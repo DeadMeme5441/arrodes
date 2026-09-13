@@ -1,0 +1,39 @@
+name: Verify
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      ARRODES_TEST_OFFLINE: '1'
+      GIT_CONFIG_NOSYSTEM: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: DeLaGuardo/setup-clojure@13.7.0
+        with:
+          cli: '1.12.5.1654'
+      - name: Check repository privacy
+        run: python scripts/check-private.py
+      - name: Check behavioral invariants
+        run: clojure -Srepro -M:test
+      - name: Package JVM executable
+        run: clojure -Srepro -T:build uber
+      - name: Exercise executable help
+        run: java -jar target/arrodes.jar --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arrodes-${{ matrix.os }}
+          path: target/arrodes.jar

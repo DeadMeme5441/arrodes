@@ -208,12 +208,15 @@
     (u/resolve-path cwd value)))
 
 (defn- runtime-options [options]
-  (let [cwd (u/canonical-path (or (:cwd options) (System/getProperty "user.dir")))
+  (let [launch-cwd (or (not-empty (System/getenv "ARRODES_LAUNCH_CWD"))
+                       (System/getProperty "user.dir"))
+        cwd (u/resolve-path launch-cwd (or (:cwd options) "."))
+        home (or (:home options) (not-empty (System/getenv "ARRODES_HOME")))
         directory (io/file cwd)]
     (u/check! (and (.exists directory) (.isDirectory directory)) :invalid-cwd
               "Working directory does not exist or is not a directory" {:cwd cwd})
     (cond-> {:cwd cwd
-             :home (u/home-dir (select-keys options [:home]))
+             :home (if home (u/resolve-path launch-cwd home) (u/home-dir {}))
              :settings (or (parse-map "--settings" (:settings-source options)) {})
              :memory? (boolean (:no-session? options))}
       (:data-dir options) (assoc :data-dir (resolve-directory cwd (:data-dir options)))
@@ -362,7 +365,7 @@
     (let [id (resolve-session-id api runtime (:session options))]
       (:session (dispatch! api runtime "session.inspect" {:session-id id})))
 
-    (or (:continue? options) (:resume? options) (:export options))
+    (or (:continue? options) (:resume? options) (and (:export options) (not (:new? options))))
     (or (recent-session api runtime cwd)
         (u/fail! :session-not-found "No session is available to resume in this project" {:cwd cwd}))
 
