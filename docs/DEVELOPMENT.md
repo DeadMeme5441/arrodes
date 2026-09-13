@@ -38,6 +38,16 @@ The SDK and stdio RPC must use the same session commands. Validate actual proces
 
 The CLI help/version paths must not open a runtime or perform provider/network work.
 
+Run the actual-process drivers from the repository:
+
+```sh
+python3 scripts/verify-rpc.py
+python3 scripts/verify-terminal.py
+python3 scripts/verify-launcher.py
+```
+
+The terminal driver uses redirected input; it does not replace an actual PTY check. The launcher driver exercises the source entry point before a JAR exists and the packaged entry point after building.
+
 ## Packaging
 
 ```sh
@@ -46,7 +56,7 @@ java -jar target/arrodes.jar --help
 java -jar target/arrodes.jar --version
 ```
 
-`bin/arrodes` uses the built JAR when present and otherwise invokes the source classpath. A PowerShell launcher is provided for Windows. The JAR is intended to need only Java at runtime; it must be exercised before release.
+`bin/arrodes` uses the built JAR when present and otherwise invokes the source classpath. A PowerShell launcher is provided for Windows. Both preserve the original launch directory when interpreting relative `--cwd` and `--home` arguments. The JAR needs only Java at runtime; it must be exercised before release.
 
 ## Privacy and Git
 

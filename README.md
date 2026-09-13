@@ -2,7 +2,7 @@
 
 A JVM/Clojure coding-agent harness built around durable sessions and a persistent Clojure evaluator.
 
-**Status: active integration, not a completed release.** The core, authenticated ChatGPT model discovery, a live coding workflow, and the stdio RPC surface have passed checks. Terminal startup and the remaining parity/packaging checks are still open. See [verification status](docs/STATUS.md) before relying on a feature.
+**Status: verified stabilization checkpoint; full Pi parity remains open.** The durable core, live ChatGPT coding workflow, stdio RPC, terminal command paths, and packaged JVM launcher have passed their recorded checks. See [verification status](docs/STATUS.md) for exact coverage and outstanding work.
 
 The repository is intentionally private.
 
@@ -75,7 +75,7 @@ bin/arrodes --mode json --cwd /path/to/project "Explain this project"
 bin/arrodes --headless
 ```
 
-The interactive terminal currently has a startup compiler issue; print/JSON and packaged-JAR checks remain pending. These commands describe the implemented interface, not completed verification. [STATUS.md](docs/STATUS.md) records the current evidence.
+The interactive terminal uses JLine, with a line-oriented fallback for redirected input. Startup, evaluator input, settings, reload, model-effort selection, sharing consent, and clean exit have been exercised. [STATUS.md](docs/STATUS.md) records the current evidence for each interface.
 
 ## State and privacy
 
