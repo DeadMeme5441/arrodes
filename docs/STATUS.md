@@ -25,6 +25,13 @@ No claim is made that every Pi provider has been live-tested. Live requests use 
 
 Verified code is committed in coherent stages with the personal repository identity. The repository remains private. Status is updated with each verification stage; an intermediate commit is not a completed-release announcement.
 
+## Committed stages
+
+- `b5629cf`: durable runtime, core regressions, and repository documentation.
+- `611d31e`: CLI entry point, verified stdio RPC, and portable RPC regression driver.
+
+Both stages were pushed to the private personal repository. Terminal/rendering, launcher/packaging/CI, and remaining parity work are not claimed complete.
+
 ## Checklist
 
 ### Repository
@@ -103,6 +110,6 @@ Verified code is committed in coherent stages with the personal repository ident
 - [ ] Remove temporary verification files and processes
 - [ ] Commit implementation with the approved personal identity
 - [ ] Push verified main to the private repository
-- [ ] Document architecture usage and verification in repository
-- [ ] Create staged commits before final handoff
+- [x] Document architecture usage and verification in repository
+- [x] Create staged commits before final handoff
 
