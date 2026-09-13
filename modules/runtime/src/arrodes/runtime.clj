@@ -335,7 +335,8 @@
     transformed))
 
 (defn- session-cache [request sid]
-  (assoc request :request/cache {:enabled? true :scope-id sid}))
+  (update request :request/cache
+          #(assoc (merge {:enabled? true} (or % {})) :scope-id sid)))
 
 (defn- prepare-completion-request [runtime sid slot registry manager config]
   (let [messages (runtime-context runtime sid registry manager config)

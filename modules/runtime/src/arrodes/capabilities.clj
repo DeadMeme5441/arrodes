@@ -32,11 +32,12 @@
 (defonce ^:private namespace-lock (Object.))
 
 (defrecord Registry
-  [session-id cwd store config emit! get-session namespace capabilities order
+  [session-id cwd store config emit! get-session namespace capabilities capability-stacks order
    hooks tool-selection wrapper-vars mutation-locks sequential-lock exclusive-lock
    live-values resources closed?])
 
-(declare register! invoke! invoke-value! catalog result-value artifact-value close!)
+(declare register! register-restorable! restore! invoke! invoke-value! catalog
+         result-value artifact-value close!)
 
 (defn- ensure-open! [registry]
   (util/check! (not @(:closed? registry)) :registry-closed
@@ -177,91 +178,137 @@
     (when (ns-resolve ns-object symbol) (ns-unmap ns-object symbol))
     (intern ns-object
             (with-meta symbol {:doc (str "Invoke registered capability " name " through the shared pipeline.")
-                               :capability/name name})
+                               :capability/name name
+                               :capability/wrapper-function function})
             function)
     symbol))
+
+(defn- register-entry! [registry descriptor]
+  (locking registry
+    (ensure-open! registry)
+    (let [{:keys [name description parameters execution permission owner replace? replace-owner?]} descriptor
+          owner (or owner "anonymous")
+          execution (or execution :parallel)
+          permission (or permission :execute)
+          current (get @(:capabilities registry) name)]
+      (util/check! (and (string? name) (not (str/blank? name))) :invalid-capability
+                   "Capability name must be a non-empty string" {})
+      (util/check! (string? (or description "")) :invalid-capability
+                   "Capability description must be a string" {:name name})
+      (util/check! (map? parameters) :invalid-capability
+                   "Capability parameters must be a JSON Schema map" {:name name})
+      (util/check! (fn? (:fn descriptor)) :invalid-capability
+                   "Capability descriptor requires a function" {:name name})
+      (util/check! (contains? #{:parallel :sequential :exclusive} execution) :invalid-capability
+                   "Capability execution must be parallel, sequential, or exclusive"
+                   {:name name :execution execution})
+      (util/check! (or (contains? #{:read :write :execute} permission) (fn? permission))
+                   :invalid-capability "Capability permission must be read, write, execute, or a function"
+                   {:name name})
+      (when current
+        (util/check! replace? :duplicate-capability
+                     (str "Capability already registered: " name) {:name name :owner (:owner current)})
+        (util/check! (or (= owner (:owner current)) replace-owner?) :capability-owner-mismatch
+                     "Replacing a capability owned by another component requires :replace-owner? true"
+                     {:name name :owner owner :current-owner (:owner current)}))
+      (let [registration-id (util/id)
+            normalized (-> descriptor
+                           (assoc :owner owner :execution execution :permission permission
+                                  :description (or description "")
+                                  ::registration-id registration-id)
+                           (dissoc :replace? :replace-owner?))]
+        (swap! (:capability-stacks registry) update name (fnil conj []) normalized)
+        (swap! (:capabilities registry) assoc name normalized)
+        (when-not current (swap! (:order registry) conj name))
+        (install-wrapper! registry name)
+        {:name name :owner owner :registration-id registration-id
+         :replaced? (boolean current)}))))
 
 (defn register!
   "Registers a descriptor and installs a same-pipeline wrapper in the session
   namespace. Replacement must be explicit; changing owner additionally requires
   :replace-owner? true. Returns registry."
   [registry descriptor]
-  (ensure-open! registry)
-  (let [{:keys [name description parameters execution permission owner replace? replace-owner?]} descriptor
-        owner (or owner "anonymous")
-        execution (or execution :parallel)
-        permission (or permission :execute)
-        current (get @(:capabilities registry) name)]
-    (util/check! (and (string? name) (not (str/blank? name))) :invalid-capability
-                 "Capability name must be a non-empty string" {})
-    (util/check! (string? (or description "")) :invalid-capability
-                 "Capability description must be a string" {:name name})
-    (util/check! (map? parameters) :invalid-capability
-                 "Capability parameters must be a JSON Schema map" {:name name})
-    (util/check! (fn? (:fn descriptor)) :invalid-capability
-                 "Capability descriptor requires a function" {:name name})
-    (util/check! (contains? #{:parallel :sequential :exclusive} execution) :invalid-capability
-                 "Capability execution must be parallel, sequential, or exclusive"
-                 {:name name :execution execution})
-    (util/check! (or (contains? #{:read :write :execute} permission) (fn? permission))
-                 :invalid-capability "Capability permission must be read, write, execute, or a function"
-                 {:name name})
-    (when current
-      (util/check! replace? :duplicate-capability
-                   (str "Capability already registered: " name) {:name name :owner (:owner current)})
-      (util/check! (or (= owner (:owner current)) replace-owner?) :capability-owner-mismatch
-                   "Replacing a capability owned by another component requires :replace-owner? true"
-                   {:name name :owner owner :current-owner (:owner current)}))
-    (let [normalized (-> descriptor
-                         (assoc :owner owner :execution execution :permission permission
-                                :description (or description ""))
-                         (dissoc :replace? :replace-owner?))]
-      (swap! (:capabilities registry) assoc name normalized)
-      (when-not current (swap! (:order registry) conj name))
-      (install-wrapper! registry name)
-      registry)))
+  (register-entry! registry descriptor)
+  registry)
+
+(defn register-restorable!
+  "Registers a descriptor and returns a bounded receipt that restore! can use
+  to remove exactly this registration and reveal the prior implementation."
+  [registry descriptor]
+  (register-entry! registry descriptor))
+
+(defn restore!
+  "Removes exactly the registration identified by receipt. If it is the active
+  implementation, the next surviving implementation is restored. Returns true
+  only when that registration still existed."
+  [registry {:keys [name registration-id]}]
+  (locking registry
+    (ensure-open! registry)
+    (let [stack (get @(:capability-stacks registry) name)
+          index (first (keep-indexed
+                        (fn [index descriptor]
+                          (when (= registration-id (::registration-id descriptor)) index))
+                        stack))]
+      (if (nil? index)
+        false
+        (let [active? (= index (dec (count stack)))
+              remaining (into (subvec stack 0 index) (subvec stack (inc index)))]
+          (if (seq remaining)
+            (swap! (:capability-stacks registry) assoc name remaining)
+            (swap! (:capability-stacks registry) dissoc name))
+          (when active?
+            (if-let [previous (peek remaining)]
+              (do
+                (swap! (:capabilities registry) assoc name previous)
+                (install-wrapper! registry name))
+              (do
+                (swap! (:capabilities registry) dissoc name)
+                (swap! (:order registry) #(vec (remove #{name} %)))
+                (when-let [symbol (get @(:wrapper-vars registry) name)]
+                  (ns-unmap (the-ns (:namespace registry)) symbol))
+                (swap! (:wrapper-vars registry) dissoc name))))
+          true)))))
 
 (defn unregister!
-  "Removes one capability. Returns true only when a capability was removed."
+  "Removes the active registration. A replaced implementation is revealed.
+  Returns true only when a capability registration was removed."
   [registry name]
-  (ensure-open! registry)
-  (if-not (contains? @(:capabilities registry) name)
-    false
-    (do
-      (swap! (:capabilities registry) dissoc name)
-      (swap! (:order registry) #(vec (remove #{name} %)))
-      (when-let [symbol (get @(:wrapper-vars registry) name)]
-        (ns-unmap (the-ns (:namespace registry)) symbol))
-      (swap! (:wrapper-vars registry) dissoc name)
-      true)))
+  (locking registry
+    (ensure-open! registry)
+    (if-let [current (get @(:capabilities registry) name)]
+      (restore! registry {:name name :registration-id (::registration-id current)})
+      false)))
 
 (defn add-hook!
   "Adds an ordered attributed hook and returns its normalized descriptor."
   [registry point descriptor]
-  (ensure-open! registry)
-  (util/check! (contains? hook-points point) :invalid-hook-point
-               (str "Unsupported hook point: " point) {:point point})
-  (let [hook (merge {:order 0 :owner "anonymous"} descriptor {:point point})
-        {:keys [id owner order]} hook]
-    (util/check! (and (string? id) (not (str/blank? id))) :invalid-hook "Hook id must be a non-empty string" {})
-    (util/check! (string? owner) :invalid-hook "Hook owner must be a string" {:id id})
-    (util/check! (integer? order) :invalid-hook "Hook order must be an integer" {:id id})
-    (util/check! (fn? (:fn hook)) :invalid-hook "Hook descriptor requires a function" {:id id})
-    (util/check! (not-any? #(= id (:id %)) (mapcat val @(:hooks registry))) :duplicate-hook
-                 (str "Hook id already registered: " id) {:id id})
-    (swap! (:hooks registry) update point (fnil conj []) hook)
-    (dissoc hook :fn)))
+  (locking registry
+    (ensure-open! registry)
+    (util/check! (contains? hook-points point) :invalid-hook-point
+                 (str "Unsupported hook point: " point) {:point point})
+    (let [hook (merge {:order 0 :owner "anonymous"} descriptor {:point point})
+          {:keys [id owner order]} hook]
+      (util/check! (and (string? id) (not (str/blank? id))) :invalid-hook "Hook id must be a non-empty string" {})
+      (util/check! (string? owner) :invalid-hook "Hook owner must be a string" {:id id})
+      (util/check! (integer? order) :invalid-hook "Hook order must be an integer" {:id id})
+      (util/check! (fn? (:fn hook)) :invalid-hook "Hook descriptor requires a function" {:id id})
+      (util/check! (not-any? #(= id (:id %)) (mapcat val @(:hooks registry))) :duplicate-hook
+                   (str "Hook id already registered: " id) {:id id})
+      (swap! (:hooks registry) update point (fnil conj []) hook)
+      (dissoc hook :fn))))
 
 (defn remove-hook!
   "Removes a hook by globally unique id and returns whether it existed."
   [registry id]
-  (ensure-open! registry)
-  (let [found? (boolean (some #(= id (:id %)) (mapcat val @(:hooks registry))))]
-    (when found?
-      (swap! (:hooks registry)
-             (fn [points]
-               (into {} (map (fn [[point hooks]] [point (vec (remove #(= id (:id %)) hooks))]) points)))))
-    found?))
+  (locking registry
+    (ensure-open! registry)
+    (let [found? (boolean (some #(= id (:id %)) (mapcat val @(:hooks registry))))]
+      (when found?
+        (swap! (:hooks registry)
+               (fn [points]
+                 (into {} (map (fn [[point hooks]] [point (vec (remove #(= id (:id %)) hooks))]) points)))))
+      found?)))
 
 (defn apply-hooks
   "Applies an immutable, stably ordered snapshot of hooks for point. Hook
@@ -295,18 +342,28 @@
         (catch Throwable _ nil)))))
 
 (defn withdraw!
-  "Removes every capability and hook attributed to owner and closes resources
-  returned by that owner's invocations."
+  "Removes every capability registration and hook attributed to owner, reveals
+  any replaced implementations, and closes resources returned by that owner."
   [registry owner]
-  (ensure-open! registry)
-  (let [tools (->> @(:capabilities registry) (keep (fn [[name descriptor]]
-                                                    (when (= owner (:owner descriptor)) name))) vec)
-        hook-ids (->> @(:hooks registry) vals (mapcat identity)
-                      (keep #(when (= owner (:owner %)) (:id %))) vec)]
-    (doseq [name tools] (unregister! registry name))
-    (doseq [id hook-ids] (remove-hook! registry id))
+  (let [withdrawn
+        (locking registry
+          (ensure-open! registry)
+          (let [registrations (->> @(:capability-stacks registry)
+                                   (mapcat (fn [[name stack]]
+                                             (keep (fn [descriptor]
+                                                     (when (= owner (:owner descriptor))
+                                                       {:name name
+                                                        :registration-id (::registration-id descriptor)}))
+                                                   stack)))
+                                   vec)
+                tools (->> registrations (map :name) distinct sort vec)
+                hook-ids (->> @(:hooks registry) vals (mapcat identity)
+                              (keep #(when (= owner (:owner %)) (:id %))) vec)]
+            (doseq [receipt registrations] (restore! registry receipt))
+            (doseq [id hook-ids] (remove-hook! registry id))
+            {:owner owner :tools tools :hooks hook-ids}))]
     (close-owner-resources! registry owner)
-    {:owner owner :tools tools :hooks hook-ids}))
+    withdrawn))
 
 (defn catalog
   "Returns public descriptors in deterministic name order."
@@ -764,7 +821,8 @@
                    {:session-id session-id :cwd (util/canonical-path cwd) :store store
                     :config (or config {}) :emit! (or emit! (fn [_] nil))
                     :get-session (or get-session (fn [] nil)) :namespace namespace :namespace-object ns-object
-                    :capabilities (atom {}) :order (atom []) :hooks (atom {})
+                    :capabilities (atom {}) :capability-stacks (atom {})
+                    :order (atom []) :hooks (atom {})
                     :tool-selection (atom (or (:tools config) :all)) :wrapper-vars (atom {})
                     :mutation-locks (atom {}) :sequential-lock (ReentrantLock. true)
                     :exclusive-lock (ReentrantReadWriteLock. true) :live-values (atom {})
@@ -772,6 +830,7 @@
         current-context (fn [] (or *invocation-context* {}))
         callbacks {:namespace namespace :current-context current-context
                    :register! #(register! registry %)
+                   :registered-implementation #(some-> (get @(:capabilities registry) %) :fn)
                    :invoke-value! #(invoke-value! registry %1 %2)
                    :registered-tools #(catalog registry)
                    :result-value #(result-value registry %)
@@ -793,7 +852,7 @@
   "Idempotently closes owned resources, expires live-only durable descriptors,
   and removes the session namespace. Cleanup failures are reported."
   [registry]
-  (if-not (compare-and-set! (:closed? registry) false true)
+  (if-not (locking registry (compare-and-set! (:closed? registry) false true))
     {:session-id (:session-id registry) :closed? true :already-closed? true
      :released-live-results 0 :errors []}
     (let [errors (volatile! [])
@@ -813,6 +872,7 @@
       (reset! (:resources registry) [])
       (reset! (:live-values registry) {})
       (reset! (:capabilities registry) {})
+      (reset! (:capability-stacks registry) {})
       (reset! (:order registry) [])
       (reset! (:hooks registry) {})
       (reset! (:wrapper-vars registry) {})

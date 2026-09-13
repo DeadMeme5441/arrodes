@@ -84,12 +84,18 @@
   (or (:name descriptor)
       (some-> var meta :name name)))
 
-(defn- register-var! [register! owner value descriptor]
+(defn- register-var! [register! registered-implementation owner value descriptor]
   (util/check! (instance? Var value) :invalid-tool-var
                "register-tool! requires a Var, for example (register-tool! #'my-tool {...})" {})
   (let [root @^Var value
-        name (tool-name-for-var value descriptor)]
-    (util/check! (ifn? root) :invalid-tool-var "The registered Var must contain a callable value"
+        name (tool-name-for-var value descriptor)
+        metadata (meta value)
+        wrapped-name (:capability/name metadata)
+        wrapper-function (:capability/wrapper-function metadata)
+        implementation (if (and (= name wrapped-name) (identical? root wrapper-function))
+                         (or (registered-implementation name) root)
+                         root)]
+    (util/check! (ifn? implementation) :invalid-tool-var "The registered Var must contain a callable value"
                  {:var (str value)})
     (util/check! (and (string? name) (not (str/blank? name))) :invalid-tool-descriptor
                  "A registered tool needs a non-empty string name" {:var (str value)})
@@ -101,15 +107,15 @@
                        :owner owner}
                       descriptor
                       {:name name :owner owner
-                       :fn (fn [arguments] (root arguments))}))
+                       :fn (fn [arguments] (implementation arguments))}))
     {:name name :registered? true}))
 
 (defn install!
   "Installs stable helper Vars in a session namespace and returns the
   clojure_eval descriptor. register! and invoke-value! must be the shared
   capability implementations, so REPL and provider calls take the same path."
-  [{:keys [namespace current-context register! invoke-value! registered-tools
-           result-value artifact-value]}]
+  [{:keys [namespace current-context register! registered-implementation invoke-value!
+           registered-tools result-value artifact-value]}]
   (let [owner (str "repl:" namespace)
         ns-object (the-ns namespace)]
     (intern ns-object (with-meta 'result {:doc "Return a native live result or its durable reconstructed value."})
@@ -121,7 +127,8 @@
     (intern ns-object (with-meta 'invoke-tool {:doc "Invoke a capability through the same hooks, validation, cancellation, and locks used by providers."})
             (fn [name arguments] (invoke-value! name arguments)))
     (intern ns-object (with-meta 'register-tool! {:doc "Explicitly expose a function Var as a model and REPL capability."})
-            (fn [var descriptor] (register-var! register! owner var descriptor)))
+            (fn [var descriptor]
+              (register-var! register! registered-implementation owner var descriptor)))
     {:name "clojure_eval"
      :owner "arrodes.builtin"
      :description (str "Evaluate Clojure forms in the persistent session namespace. "

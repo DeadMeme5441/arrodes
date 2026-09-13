@@ -40,7 +40,7 @@ Commands receive their argument value. Tools receive one argument map and return
 
 Hook descriptors have an ID, owner attribution, integer order, and function. Ordering is deterministic. Context and request hooks must preserve valid provider messages and stable prefixes when no semantic change is needed.
 
-Deliberate replacement/restoration of built-in capabilities remains an open integration item. Do not assume replacement is supported merely because registration is supported; consult [STATUS.md](STATUS.md).
+Tool replacement is deliberate: set `:replace? true` on a tool descriptor to override an existing capability. The runtime injects extension ownership and records the exact registration, so activation failure, deactivation, close, and failed reload restore the nearest prior implementation without removing unrelated owners. Omit `:replace?` for ordinary registration; accidental duplicate names still fail.
 
 ## REPL-defined tools
 

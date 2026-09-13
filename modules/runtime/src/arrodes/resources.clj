@@ -746,8 +746,15 @@
      (fn [descriptor]
        (when-not (map? descriptor)
          (fail! :extension/invalid-tool "Tool descriptor must be a map" {:descriptor descriptor}))
-       (let [descriptor (assoc descriptor :owner owner :replace? false)]
-         ((resolve-api 'arrodes.capabilities/register!) registry descriptor)))
+       (when (and (contains? descriptor :replace?) (not (boolean? (:replace? descriptor))))
+         (fail! :extension/invalid-tool "Tool descriptor :replace? must be boolean"
+                {:name (:name descriptor)}))
+       (let [replace? (true? (:replace? descriptor))
+             owned (cond-> (assoc descriptor :owner owner :replace? replace?)
+                     replace? (assoc :replace-owner? true))
+             receipt ((resolve-api 'arrodes.capabilities/register-restorable!) registry owned)]
+         (push! #((resolve-api 'arrodes.capabilities/restore!) registry receipt))
+         (select-keys receipt [:name :owner :replaced?])))
      :register-hook!
      (fn [point descriptor]
        (let [id (or (:id descriptor) (u/id))
