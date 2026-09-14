@@ -1,7 +1,7 @@
 (ns arrodes.session-test
   (:require [arrodes.artifacts :as artifacts]
             [arrodes.store :as store]
-            [arrodes.util :as u]
+            [arrodes.platform :as u]
             [clojure.test :refer [deftest is testing]])
   (:import (java.nio.file Files Path)
            (java.nio.file.attribute FileAttribute)))

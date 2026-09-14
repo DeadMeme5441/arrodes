@@ -4,7 +4,7 @@
             [arrodes.resources :as resources]
             [arrodes.session-test :as fixtures]
             [arrodes.store :as store]
-            [arrodes.util :as u]
+            [arrodes.platform :as u]
             [clojure.test :refer [deftest is testing]]))
 
 (def ^:private replacement-source
@@ -110,37 +110,30 @@
   (with-environment
     "(fn [_] nil)\n"
     (fn [{:keys [registry]}]
-      (let [descriptor "{:name \"echo\" :description \"Echo a value\" :parameters {:type \"object\" :properties {} :additionalProperties true}}"
-            first-ack (capabilities/invoke-value!
-                       registry "clojure_eval"
-                       {:source (str "(defn echo [{:keys [value]}] value)\n"
-                                     "(register-tool! #'echo " descriptor ")")})
-            second-ack (capabilities/invoke-value!
-                        registry "clojure_eval"
-                        {:source (str "(register-tool! #'echo (assoc " descriptor " :replace? true))")})
-            invocation (capabilities/invoke! registry {:id (u/id) :name "echo" :arguments {:value 42}} {})
-            result-id (get-in invocation [:result :id])]
-        (is (= {:name "echo" :registered? true} first-ack))
-        (is (= {:name "echo" :registered? true} second-ack))
-        (is (= 42 (:value invocation)))
-        (is (= "ALIAS" (capabilities/invoke-value!
-                          registry "clojure_eval"
-                          {:source "(alias 'strings 'clojure.string)\n(strings/upper-case \"alias\")"})))
-        (is (= 42 (capabilities/invoke-value!
-                   registry "clojure_eval"
-                   {:source (str "(result " (pr-str result-id) ")")})))
-        (let [read-ack
-              (capabilities/invoke-value!
-               registry "clojure_eval"
-               {:source (str "(defn read [_] :repl-read)\n"
-                             "(register-tool! #'read "
-                             "{:name \"read\" :replace? true :replace-owner? true "
-                             ":description \"REPL read replacement\" "
-                             ":parameters {:type \"object\" :properties {} :additionalProperties true}})")})]
-          (is (= {:name "read" :registered? true} read-ack))
-          (is (= :repl-read (capabilities/invoke-value! registry "read" {})))
-          (is (= :repl-read
-                 (capabilities/invoke-value! registry "clojure_eval" {:source "(read {})"}))))))))
+      (let [descriptor "{:name \"echo\" :description \"Echo a value\" :parameters {:type \"object\" :properties {} :additionalProperties true}}"]
+        (capabilities/evaluate! registry
+                                (str "(defn echo [{:keys [value]}] value)\n"
+                                     "(register-tool! #'echo " descriptor ")\n"
+                                     "(register-tool! #'echo (assoc " descriptor " :replace? true))")
+                                {})
+        (let [invocation (capabilities/invoke! registry {:id (u/id) :name "echo" :arguments {:value 42}} {})
+              result-id (get-in invocation [:result :id])]
+          (is (= 42 (:value invocation)))
+          (is (= "ALIAS" (:value (capabilities/evaluate! registry
+                                                        "(alias 'strings 'clojure.string)\n(strings/upper-case \"alias\")"
+                                                        {}))))
+          (is (= 42 (:value (capabilities/evaluate! registry
+                                                   (str "(result " (pr-str result-id) ")") {})))))
+        (capabilities/evaluate!
+         registry
+         (str "(defn read [_] :repl-read)\n"
+              "(register-tool! #'read "
+              "{:name \"read\" :replace? true :replace-owner? true "
+              ":description \"REPL read replacement\" "
+              ":parameters {:type \"object\" :properties {} :additionalProperties true}})")
+         {})
+        (is (= :repl-read (capabilities/invoke-value! registry "read" {})))
+        (is (= :repl-read (:value (capabilities/evaluate! registry "(read {})" {}))))))))
 
 (deftest capability-registration-and-removal-are-atomic
   (with-environment

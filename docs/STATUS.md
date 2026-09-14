@@ -1,125 +1,61 @@
-# Verified stabilization checkpoint
+# Conversation-first OpenTUI host
 
-The current fixed stage is complete. **Full agreed Pi parity is not complete.** Implementation checkboxes record implemented code; the separate verification tasks record remaining acceptance checks. Final delivery tasks refer to the remaining overall project, not an uncommitted stabilization stage.
+The ClojureScript/OpenTUI interface is implemented on top of the headless REPL-first core. Conversation and composer are primary; evaluation is an inspectable execution mechanism, not the default screen. Pi/OMP remains an interaction-behaviour reference, not a functionality checklist.
 
-## Verification evidence
+## Implemented
 
-- Full core suite: **31 tests, 144 assertions, zero failures/errors**. No paid provider calls in the suite.
-- New regressions: reversible built-in capability overrides, exact layer removal and ownership, failed extension activation/reload restoration, duplicate registration races, non-recursive REPL registration, alias/result helpers, explicit cache opt-out/settings, and actual local HTTP/SSE routing through two isolated provider views.
-- Actual stdio RPC process: **16 commands**, cancellation/reused-ID checks, **15 durable events**, host capability roundtrip, strict JSONL stdout, stderr diagnostics, evaluator/tool registration, namespace reset, exit 0.
-- Actual JLine terminal: startup, persistent evaluator forms and quoting, EDN settings, reload/reset, effort selection, help, declined unlisted sharing consent, quit and EOF passed. The redirected-input driver also passed after stabilization.
-- Launcher: external invocation directory, spaces, relative `--cwd` and `--home`, explicit `--new --export`, all passed through both source and packaged paths.
-- JVM package: `clojure -Srepro -T:build uber` succeeded. Actual JAR help/version and runtime/session export passed. Version **0.1.0**; local artifact `target/arrodes.jar`.
-- Privacy/Git guard: **47 text files** passed; personal repository identity and commit authors passed. Destination repository was confirmed **private**. No new platform work was added during closeout; the configured CI matrix is not claimed to have passed.
+- Flat roots: JVM core in `src/clj/arrodes`, portable logic and view projection in `src/cljc/arrodes`, OpenTUI host in `src/cljs/arrodes`, optional RPC and legacy CLI under `hosts`.
+- Keyed transcript rows, streaming assistant text, compact observed function activity, consecutive-read grouping, inline recorded edits, and visible failures. No inferred working-tree view or automatic folding at completion.
+- Persistent composer, idle send/running steer, separate follow-up queue, atomic pending edit/drop, prompt history, and file/image context attachments.
+- Contextual Summary/Output/Value/Code inspector, native EDN representation, retained artifact paging and live/saved/unavailable lifetime indicators. Wide split layout and dedicated narrow inspector.
+- Sessions, searchable commands, history inspection and explicit branching without filesystem restoration. Session navigation preserves drafts, attachments, expansion and reading position; native text selection takes priority over stop/clear shortcuts.
+- Atomic `session.view` and `entry/committed` events, cursor-based hydration, active-path filtering, unknown-outcome reporting, reconnect and confirmed owned-process shutdown.
+- Bun launcher as `bin/arrodes`; the old CLI is explicit as `bin/arrodes-cli`. The JVM still owns OAuth, providers, MCP clients, evaluation and persistence.
 
-## Previous live proof, unchanged
+Arrodes remains an MCP **client**, not a server. No subagent system, workspace model, operating-system sandbox or durable JVM checkpointing was added.
 
-Authenticated ChatGPT discovery returned the exact `gpt-5.6-luna` model with `high` effort and a 272,000-token context window. A clean live coding workflow used **8 requests**, all on that route, with no tool errors: it repaired a Clojure program, executed it successfully, retained a REPL value, and returned **43** on continuation. Independent execution returned **42**.
+## Current verification evidence
 
-The clean short workflow reported **zero cached input tokens**. An earlier diagnostic run reported real reuse, including **5,632 cached input tokens**, but also exposed a since-fixed scheduler bug; it is not a clean efficiency benchmark. A meaningful longer-session cache measurement remains open. No padding or warmup calls are used.
+| Check | Observed result |
+| --- | --- |
+| Offline behavioral suite | **49 tests, 220 assertions; zero failures/errors** |
+| Actual renderer with real JVM backend | Keyboard/mouse send, steer, follow-up, queue identity-preserving edit/drop, real read/edit/shell work, replay, draft retention, cancellation and reconnect |
+| Reverse host interaction | Real trusted JVM extension requests input/confirmation; exact response, conservative default decline, cancellation without invented output and composer preservation |
+| Navigation regressions | Keyboard sessions/history/branch, unchanged files after branch, scroll and draft restoration, native text selection, text attachment add/remove and visible evaluation failure |
+| Popup keyboard scrolling | `bun run test:tui` passes native layout/paint checks at **120×40**, **78×24** and **78×16**: both arrow directions, all menu adapters, filtering, wrapped rows and a fresh short popup. Selection scrolling waits for measured bounds; rows are reused and the scroll extent includes overflowing descriptions. |
+| Native values | Keyword/string key distinction survives the inspector's EDN representation; real large retained EDN supports Value-tab Next/Prev paging and exact return to original content |
+| Responsive rendering | Actual OpenTUI captures at **120×40** and **78×24**, visually inspected; narrow inspector takes the available width rather than squeezing the transcript |
+| Startup recovery | Invalid explicit session is reported; choosing a new valid session restores a usable connection |
+| Startup/reconnect command ordering | Real JVM regression: commands submitted during startup/reconnect execute once after readiness; initialization UI replies do not deadlock; `store-in-use` remains visible after process exit; releasing the owner allows explicit recovery without replay or stale error banners. The rebuilt PTY launcher also reaches Idle against an isolated copy of saved sessions. |
+| Process failure boundaries | Fragmented UTF-8, expired mutation marked unknown, later correlated response, malformed stream, missing executable, restart admission and confirmed SIGKILL of a child ignoring SIGTERM |
+| Actual PTY launcher | `bin/arrodes` reaches Idle, F3 opens the palette, explicit Clojure input evaluates to `42`, Ctrl+D exits **0** and tears down the terminal/core |
+| Source and packaged RPC | Both pass **16 commands, 32 durable events**, host roundtrip, cancellation/request-ID ownership, JSONL-only stdout, stderr diagnostics, registration and namespace reset |
+| Legacy terminal and launcher | Redirected quoting/EDN/reload/quit smoke and external-directory launcher smoke with spaces and relative cwd/home pass |
+| Build | Final ClojureScript frontend and headless core/RPC/CLI artifacts build; TUI bootstrap help runs through Bun/OpenTUI |
+| Privacy guard | **70 text files** checked; no embedded machine paths or credentials |
 
-## Provider audit and remaining work
+The renderer probes use real OpenTUI input/layout/rendering and a real JVM runtime with a deterministic provider for offline effects. They are not a live-provider substitute. Temporary projects, servers and probe sources are not product components.
 
-The pinned Pi baseline has **40 provider IDs**. **15 exact IDs are currently accounted for**: `amazon-bedrock`, `anthropic`, `cerebras`, `deepseek`, `github-copilot`, `google`, `google-vertex`, `groq`, `huggingface`, `mistral`, `openai`, `openai-codex`, `openrouter`, `together`, and `xai`. This is a configuration-surface audit, not a live test of all providers.
+## Live proof through the TUI
 
-**25 exact provider mappings remain open**: `ant-ling`, `azure-openai-responses`, `baseten`, `cloudflare-ai-gateway`, `cloudflare-workers-ai`, `fireworks`, `kimi-coding`, `minimax`, `minimax-cn`, `moonshotai`, `moonshotai-cn`, `nvidia`, `opencode`, `opencode-go`, `qwen-token-plan`, `qwen-token-plan-cn`, `qwen-token-plan-individual`, `radius`, `vercel-ai-gateway`, `xiaomi`, `xiaomi-token-plan-ams`, `xiaomi-token-plan-cn`, `xiaomi-token-plan-sgp`, `zai`, and `zai-coding-cn`. Near-aliases are not counted as exact support; some gaps may be mappings over existing transports rather than new transports.
+- Authentication: **Codex OAuth**.
+- Provider: **`:codex-backend`**.
+- Model: **`gpt-5.6-luna`**, verified in every assistant response.
+- Reasoning: **`:high`**; no fallback enabled.
+- **11 live provider responses; 10 evaluations, zero evaluation errors.**
+- Observed function kinds: **MCP, skill, read, edit and bash**.
 
-Remaining acceptance includes the comprehensive Pi feature matrix, retry/overflow recovery scenarios, actual print/JSON runs, remaining skills/prompts/themes and Git/Maven package sources, large-result/artifact portability boundaries, and broader terminal controls. Print/JSON code is implemented but its actual-mode verification remains unchecked below. Only the selected ChatGPT OAuth route has been live-verified. PowerShell and the cross-platform CI matrix are not claimed runtime-verified on other operating systems.
+The prompt was entered through the actual OpenTUI composer. The agent discovered functions, read the installed skill, called an external MCP add function, inspected and repaired `(+ 20 20)` to `(+ 20 22)`, executed the program and retained `verified` as `{:answer 42}`. A later direct evaluation recovered `42`; independent execution of the repaired program also printed `42`.
 
-## Committed code stages
+No credentials or raw live transcript are committed. This was not a cache-efficiency benchmark; no cache-hit claim is made.
 
-- `b5629cf`: durable runtime, core regressions, and repository documentation.
-- `611d31e`: CLI entry point, verified stdio RPC, and portable RPC driver.
-- `4cb8f07`: initial committed-status checkpoint.
-- `56a195d`: reversible capability layers, safe REPL registration, explicit cache controls, and routing regressions.
-- `cae573b`: verified terminal, launch-directory fixes, launcher regressions, and packaged JVM entry point.
+## Explicit limits
 
-All stages use `DeadMeme5441 <deadmeme5441@gmail.com>`. The repository remains private. This checklist and the session task ledger were reconciled at closeout; completed implementation is not being mistaken for completed parity verification.
+- The exercised native platform is macOS arm64 with Bun **1.3.14**, OpenTUI **0.5.11**, ClojureScript **1.11.132**, and Java **21**.
+- Windows/PowerShell and other terminal/OS combinations were not exercised. CI includes frozen dependency installation, frontend compilation and bootstrap help, but the cross-platform matrix has not been observed running for this change.
+- Broad interaction verification used OpenTUI's actual captured renderer; the fresh PTY check specifically covered launch, palette, evaluation and clean exit, not every keyboard/terminal combination.
+- Draft/navigation state is preserved within the running interface, not advertised as crash-persistent editor state.
+- Arbitrary JVM values, definitions, unjoined futures and external effects are not durable checkpoints or an OS sandbox. Branching does not restore files.
+- Historical provider/package breadth is not comprehensively verified by this UI work. Only the explicitly requested live OAuth/model route was exercised.
 
-## Reconciled checklist
-
-### Repository
-
-- [x] Create clean arrodes mono repository identity
-- [x] Record approved scope and baseline contracts
-
-### Durable sessions
-
-- [x] Implement versioned durable session storage model
-- [x] Implement session history branching and configuration
-- [x] Implement session import export and lifecycle
-- [x] Enforce exclusive ownership before session recovery
-- [x] Preserve valid references when copying branches
-- [x] Repair pending calls on selected history prefixes
-
-### Execution
-
-- [x] Implement provider registry authentication and streaming
-- [x] Implement supervised agent continuation and recovery
-- [x] Implement queues cancellation retries and compaction
-- [x] Implement stable cache efficient request construction
-- [x] Isolate provider configuration for each session
-- [x] Await all foreground work during shutdown
-- [x] Serialize session reload with foreground admission
-- [x] Compact ordinary conversations before context overflow
-- [x] Honor explicit provider cache configuration controls
-- [ ] Complete missing supported Pi provider mappings
-
-### Capabilities
-
-- [x] Implement shared capability registry and invocation
-- [x] Implement coding tools and bounded result handling
-- [x] Implement persistent session evaluator and result access
-- [x] Implement reversible capability replacement for extensions
-
-### Resources
-
-- [x] Implement settings trust and resource discovery
-- [x] Implement Clojure extensions hooks and package lifecycle
-- [x] Fix safe local package source naming
-- [x] Protect existing directories during package installation
-- [x] Prevent recursive package staging within sources
-
-### Interfaces
-
-- [x] Implement embedding API and stdio RPC
-- [x] Implement print and JSON execution modes
-- [x] Implement interactive terminal controller and customization
-- [x] Convey diagnostic bindings into RPC workers
-- [x] Preserve request ownership across cancellation reuse
-- [x] Describe session shares as unlisted disclosures
-- [x] Fix JLine completer compilation and terminal startup
-- [x] Preserve launch directory semantics in source wrappers
-
-### Verification
-
-- [ ] Verify complete supported Pi feature matrix
-- [x] Exercise coding workflow and durable restart recovery
-- [x] Verify repository identity and private data isolation
-- [x] Confirm repository remains private before delivery
-- [x] Verify model catalog using ChatGPT OAuth
-- [x] Verify live runs using Luna high effort
-- [ ] Measure cached tokens during Luna continuation
-- [x] Verify provider coverage against pinned Pi baseline
-- [x] Verify isolated project provider routing
-- [ ] Exercise retry and context overflow recovery
-- [ ] Exercise print and JSON command modes
-- [ ] Verify skills prompts themes and package sources
-- [ ] Verify large results and portable artifact roundtrips
-- [x] Verify evaluator aliases and registration replacement
-- [x] Build and exercise packaged JVM executable
-- [x] Run final regression and privacy checks
-
-### Delivery
-
-- [ ] Remove temporary verification files and processes
-- [x] Commit implementation with the approved personal identity
-- [x] Push verified main to the private repository
-- [x] Document architecture usage and verification in repository
-- [x] Create staged commits before final handoff
-
-### Stage checkpoint
-
-- [x] Reconcile todos with observed implementation state
-- [x] Report current state after verified stage
-- [x] Close verified stage without additional platform work
+The earlier core checkpoint established session ownership/recovery, reversible extension registration, provider-view isolation and MCP stdio/HTTP client behaviour. Existing regressions remain in the suite; this checkpoint adds the actual terminal interface rather than another architecture scaffold.

@@ -7,24 +7,25 @@
             :compatibility :behavioral
             :typescript-extension-compatibility false}
  :domains {:durable-session [:identity :tree :branches :configuration :messages :operations :queues :events :results]
-           :live-session [:provider-loop :capabilities :evaluator :cancellation :resources]
-           :interfaces [:terminal :print :json-events :sdk :stdio-rpc]}
+           :live-session [:provider-loop :repl-evaluation :capabilities :cancellation :resources :mcp-client]
+           :interfaces [:sdk :optional-stdio-rpc :optional-cli]}
  :required
  [{:id :session-lifecycle :features [:create :open :list :resume :rename :labels :delete :ephemeral]}
   {:id :history :features [:append-only-tree :active-branch :prompt-edit :fork :clone :import :export :branch-summary]}
   {:id :durability :features [:atomic-commit :optimistic-revision :restart-recovery :no-effect-replay :private-storage]}
-  {:id :execution :features [:prompt :continue :stream :tools :cancel :steer :follow-up :parallel-tools :ordered-results]}
+  {:id :execution :features [:prompt :continue :stream :evaluate :cancel :steer :follow-up :function-composition :ordered-evaluations]}
   {:id :context :features [:projection :manual-compaction :automatic-compaction :overflow-recovery :retry
                           :stable-cache-prefix :provider-native-cache :honest-cache-usage]}
   {:id :providers :features [:catalog :api-key :oauth :model-selection :thinking :usage :cost :custom-provider]}
-  {:id :capabilities :features [:one-registry :schemas :hooks :locks :progress :cancellation :provider-visibility]}
+  {:id :capabilities :features [:one-registry :schemas :hooks :locks :progress :cancellation :repl-discovery]}
   {:id :coding :features [:read :write :edit :bash :powershell :grep :find :ls :images :bounded-output]}
-  {:id :evaluator :features [:persistent-namespace :definitions :native-results :composition :explicit-registration :reset]}
+  {:id :evaluator :features [:persistent-namespace :definitions :native-results :composition :optional-instrumentation :correlated-events :reset]}
   {:id :resources :features [:settings :project-trust :context-files :skills :prompts :extensions :reload]}
+  {:id :mcp-client :features [:stdio :streamable-http :discovery :calls :resources :prompts :session-ownership]}
   {:id :packages :features [:install :list :configure :update :remove :pinned-references]}
   {:id :terminal :features [:multiline :completion :file-references :clipboard :external-editor :selectors :tree :themes :keybindings :extension-rendering]}
   {:id :programmatic :features [:embedding :print :json :rpc :host-requests :export :share]}]
- :excluded [:generalized-workspace :subagents :advisors :mcp :planning-mode :todo-manager
+ :excluded [:generalized-workspace :subagents :advisors :mcp-server :planning-mode :todo-manager
             :background-job-manager :distributed-runtime :replication :os-sandbox
             :jvm-checkpointing :legacy-arrodes-migration]
  :evaluator-lifetime {:preserved-on [:continue :model-change :compaction]

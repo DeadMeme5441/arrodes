@@ -2,7 +2,8 @@
   (:require [arrodes.capabilities :as capabilities]
             [arrodes.runtime :as runtime]
             [arrodes.session-test :as fixtures]
-            [arrodes.util :as u]
+            [arrodes.platform :as u]
+            [arrodes.value :as value]
             [clojure.test :refer [deftest is]])
   (:import (java.util.concurrent CountDownLatch TimeUnit)))
 
@@ -14,8 +15,8 @@
   {:response/provider :openai :response/model "gpt-4o-mini"
    :response/parts [] :response/tool-calls (vec definitions)
    :response/finish-reason :tool-calls :response/provider-data {}})
-(defn tool-call [id name]
-  {:tool-call/id id :tool-call/name name :tool-call/arguments {}})
+(defn tool-call [id source]
+  {:tool-call/id id :tool-call/name "repl" :tool-call/arguments {:source source}})
 (defmacro with-runtime [[binding complete-fn] & body]
   `(let [directory# (fixtures/temp-directory)
          ~binding (runtime/open! {:cwd directory# :home (str directory# "/home")
@@ -30,13 +31,15 @@
     (when (= result ::timeout) (throw (ex-info "Expected execution boundary was not reached" {})))
     result))
 
-(deftest parallel-effects-complete-independently-but-transcript-keeps-call-order
+(deftest composed-effects-complete-independently-and-evaluations-keep-call-order
   (let [turn (atom 0)
         completed (atom [])
         release-first (promise)
         provider (fn [_ _]
                    (if (= 1 (swap! turn inc))
-                     (calls (tool-call "first-call" "first_tool") (tool-call "second-call" "second_tool"))
+                     (calls (tool-call "first-call"
+                                       "(def completed-values (let [a (future (first_tool)) b (future (second_tool))] [@a @b])) completed-values")
+                            (tool-call "second-call" "(first completed-values)"))
                      (answer "The operations completed")))]
     (with-runtime [rt provider]
       (let [sid (:id (create-session rt))
@@ -54,8 +57,8 @@
               results (filter #(= :tool (:message/role %)) messages)]
           (is (= [:second :first] @completed))
           (is (= ["first-call" "second-call"] (mapv :message/tool-call-id results)))
-          (is (.contains (u/text-content (:message/content (first results))) "First result"))
-          (is (.contains (u/text-content (:message/content (second results))) "Second result"))
+          (is (.contains (value/text-content (:message/content (first results))) "First result"))
+          (is (.contains (value/text-content (:message/content (second results))) "First result"))
           (is (= [:user :assistant :tool :tool :assistant] (mapv :message/role messages))))))))
 
 (deftest stale-operation-control-cannot-cancel-a-new-run
@@ -101,7 +104,7 @@
         next-request (promise)
         first-provider (fn [_ opts]
                          (if (= 1 (swap! phase inc))
-                           (calls (tool-call "effect-call" "external_effect"))
+                           (calls (tool-call "effect-call" "(external_effect)"))
                            (do (deliver next-request true)
                                (loop [] (u/check-cancelled! (:cancelled? opts)) (Thread/sleep 10) (recur)))))
         rt (runtime/open! (assoc options :complete-fn first-provider))

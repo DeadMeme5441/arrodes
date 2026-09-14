@@ -5,7 +5,7 @@ Arrodes uses protocol version 1 over UTF-8 JSON Lines. One connection owns initi
 Start the headless process:
 
 ```sh
-clojure -Srepro -M:run --headless
+clojure -Srepro -M:host
 ```
 
 It first emits a `hello` containing the protocol version and connection identity. Send `initialize` before domain commands:
@@ -42,6 +42,16 @@ The example omits other snapshot fields. Use the returned session ID in later re
 
 Runtime events arrive independently as `event` records. Durable events have a global sequence; `event.replay` reads them after a cursor. Transient provider/progress output is not a second durable history.
 
+## Atomic view and replay
+
+`session.view` accepts `session-id` and returns `{"state": SESSION_STATE, "entries": ACTIVE_PATH, "cursor": SEQUENCE}`. These are one consistent observation under the session lock. `entry/committed` contains the full assigned entry and is committed atomically with that entry; legacy assistant-message events are not another insertion.
+
+A reconnecting controller buffers live events while loading the view. Replay historical events through the snapshot cursor to reconstruct call activity, without replacing the snapshot's entries or queue with older mutations. Apply buffered events newer than the snapshot after this reconstruction. Correlate by sequence/call ID and retain only activity belonging to the active path or current operation. Do not replay external effects.
+
+`session.queue.update` accepts `session-id`, `queue-id`, and `content`; it returns `{"item": UPDATED_ITEM}`. It preserves queue identity, order, timestamp, and delivery options. `session.queue.drop` accepts those IDs and returns `{"removed": REMOVED_ITEM}`. Both reject an item that has already been delivered or removed.
+
+`session.fork` accepts an optional `entry-id` and `position` (`at` or `before`). It creates another conversation branch; it does not revert filesystem effects.
+
 Request-level cancellation is different from cancelling an agent operation:
 
 ```json
@@ -52,7 +62,13 @@ It does not undo already accepted effects. A running request ID remains reserved
 
 ## Evaluator and capabilities
 
-`session.evaluate` evaluates source through the shared capability system. `session.invoke` invokes a named capability. Native values are not blindly serialized into JSON: inspect the bounded result and durable descriptor, or use the evaluator's `result` helper.
+`session.evaluate` evaluates source as a first-class session operation. `session.invoke` invokes an instrumented Clojure function. Native values are not blindly serialized into JSON: inspect bounded output and the result descriptor, or evaluate `(result 42)` with the returned integer result ID.
+
+`result.inspect` returns the retained descriptor. Inline results also include `value-edn` (a redacted, bounded native representation) and `value-truncated?`. Prefer this representation when displaying Clojure types: JSON `value` is a projection and can collapse distinctions such as keyword and string keys. Artifact-backed results use the descriptor's artifact ID and `artifact.read` paging; live-only values must not be presented as persisted checkpoints.
+
+Durable evaluation events are `evaluation/started` and `evaluation/completed`; nested functions emit `capability/started` and `capability/completed`. Their data includes `call-id` and `parent-call-id`. The event envelope includes `session-id`, `operation-id`, and sequence. Starts carry source or arguments. Completions carry content, details, `error?`, and a retained `result`. Stdout/stderr and shell progress arrive through transient `tool-progress` events with the same call correlation; use final completion output for replay.
+
+The same observation data serves direct user evaluations and agent evaluations. Controllers must not parse source or ANSI output to discover calls, infer parentage, or decide whether an operation completed. These records are UI-independent data, not an MCP protocol.
 
 A controller can attach host capabilities. Invocation produces a reverse request:
 

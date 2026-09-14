@@ -1,14 +1,25 @@
-{:paths ["modules/common/src" "modules/session/src" "modules/runtime/src" "modules/cli/src" "resources"]
+{:paths ["src/clj" "src/cljc" "resources"]
  :deps {org.clojure/clojure {:mvn/version "1.12.5"}
         org.clojure/data.json {:mvn/version "2.5.1"}
         org.xerial/sqlite-jdbc {:mvn/version "3.53.4.0"}
         org.slf4j/slf4j-nop {:mvn/version "2.0.17"}
-        org.jline/jline {:mvn/version "3.30.17"}
         clj-commons/clj-yaml {:mvn/version "1.0.29"}
+        io.github.plumce/plumcp.core-json-datajson {:mvn/version "0.2.2"}
         com.deadmeme5441/clojure-llm-sdk
         {:git/url "https://github.com/DeadMeme5441/clojure-llm-sdk"
          :git/sha "5f9a51e50dbccdef062105b28d6ec4c77e5e411e"}}
- :aliases {:run {:main-opts ["-m" "arrodes.cli"]}
-           :test {:extra-paths ["test"] :main-opts ["-m" "arrodes.test-runner"]}
-           :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.14"}}
-                   :ns-default build}}}
+ :aliases
+ {:host {:extra-paths ["hosts/rpc"]
+         :main-opts ["-m" "arrodes.rpc-main"]}
+  :run {:extra-paths ["hosts/rpc" "hosts/cli"]
+        :extra-deps {org.jline/jline {:mvn/version "3.30.17"}}
+        :main-opts ["-m" "arrodes.cli"]}
+  :test {:extra-paths ["test" "hosts/rpc"]
+         :main-opts ["-m" "arrodes.test-runner"]}
+  :cljs {:extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+         :main-opts ["-m" "cljs.main"]}
+  :tui-build {:extra-paths ["src/cljs"]
+              :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+              :main-opts ["-m" "cljs.main" "-co" "tui.edn" "-c" "arrodes.tui"]}
+  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.14"}}
+          :ns-default build}}}

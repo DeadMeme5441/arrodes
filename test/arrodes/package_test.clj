@@ -1,7 +1,7 @@
 (ns arrodes.package-test
   (:require [arrodes.packages :as packages]
             [arrodes.session-test :as fixtures]
-            [arrodes.util :as u]
+            [arrodes.platform :as u]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is]]))

@@ -25,15 +25,57 @@ jobs:
       - uses: DeLaGuardo/setup-clojure@13.7.0
         with:
           cli: '1.12.5.1654'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+      - name: Install terminal dependencies
+        run: bun install --frozen-lockfile
+      - name: Compile OpenTUI host
+        run: clojure -Srepro -M:tui-build
+      - name: Exercise TUI bootstrap help
+        run: bun scripts/tui.ts --help
+      - name: Verify TUI startup and popup regressions
+        run: bun run test:tui
       - name: Check repository privacy
         run: python scripts/check-private.py
+      - name: Verify default headless classpath
+        run: >-
+          clojure -Srepro -M -e "(require '[clojure.java.io :as io] 'arrodes.runtime)
+          (assert (nil? (io/resource \"arrodes/rpc.clj\")))
+          (assert (nil? (io/resource \"arrodes/cli.clj\")))
+          (try (Class/forName \"org.jline.reader.LineReader\")
+          (throw (ex-info \"JLine leaked onto the core classpath\" {}))
+          (catch ClassNotFoundException _))"
+      - name: Compile portable namespaces for Node
+        run: >-
+          clojure -Srepro -M:cljs -re node -e "(require '[arrodes.value :as value]
+          '[arrodes.session :as session]
+          '[arrodes.run :as agent])
+          (assert (= [\"root\"] (mapv :id (session/active-path [{:id \"root\"}]))))
+          (assert (= \"hello\" (value/text-content \"hello\")))
+          (assert (= :user (:message/role (agent/user-message \"hello\"))))"
       - name: Check behavioral invariants
         run: clojure -Srepro -M:test
-      - name: Package JVM executable
+      - name: Exercise headless RPC
+        run: python scripts/verify-rpc.py
+      - name: Exercise legacy terminal host
+        run: python scripts/verify-terminal.py
+      - name: Package headless core
         run: clojure -Srepro -T:build uber
-      - name: Exercise executable help
-        run: java -jar target/arrodes.jar --help
+      - name: Package standalone RPC host
+        run: clojure -Srepro -T:build rpc
+      - name: Package optional CLI host
+        run: clojure -Srepro -T:build cli
+      - name: Exercise RPC artifact help
+        run: java -jar target/arrodes-rpc.jar --help
+      - name: Exercise CLI artifact help
+        run: java -jar target/arrodes-cli.jar --help
+      - name: Exercise explicit legacy CLI launcher
+        run: python scripts/verify-launcher.py
       - uses: actions/upload-artifact@v4
         with:
           name: arrodes-${{ matrix.os }}
-          path: target/arrodes.jar
+          path: |
+            target/arrodes.jar
+            target/arrodes-rpc.jar
+            target/arrodes-cli.jar

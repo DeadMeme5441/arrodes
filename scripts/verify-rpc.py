@@ -27,7 +27,7 @@ async def main():
   nil)
 ''')
         process = await asyncio.create_subprocess_exec(
-            "clojure", "-Srepro", "-M:run", "--headless",
+            "clojure", "-Srepro", "-M:host",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE)
         diagnostics = []

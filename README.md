@@ -1,31 +1,59 @@
 # Arrodes
 
-A JVM/Clojure coding-agent harness built around durable sessions and a persistent Clojure evaluator.
+A conversation-first terminal coding agent, powered by a persistent JVM/Clojure evaluation environment.
 
-**Status: verified stabilization checkpoint; full Pi parity remains open.** The durable core, live ChatGPT coding workflow, stdio RPC, terminal command paths, and packaged JVM launcher have passed their recorded checks. See [verification status](docs/STATUS.md) for exact coverage and outstanding work.
+The ClojureScript/OpenTUI interface keeps the conversation and composer primary. Observed function activity stays compact inline; output, native values, and exact evaluation source are available in a contextual inspector. The JVM remains usable independently through the SDK or JSONL RPC. See [verification status](docs/STATUS.md).
 
 The repository is intentionally private.
 
 ## What Arrodes owns
 
 - Append-only, branchable conversation history, session configuration, queues, operations, results, and retained artifacts.
-- The model/tool continuation loop, cancellation, steering, follow-ups, retries, and context compaction.
-- One capability implementation shared by provider tool calls and Clojure calls.
-- A persistent evaluator namespace for each live session.
-- Provider/authentication adapters, trusted Clojure extensions, skills, prompts, and package resources.
-- SDK, stdio RPC, print/JSON, and terminal interfaces around the same session operations.
+- REPL-driven agent continuation, cancellation, steering, follow-ups, retries, and context compaction.
+- Ordinary Clojure functions for coding work, skills, prompts, extensions, and an MCP **client**.
+- One persistent namespace and native retained values per live session.
+- Provider/authentication adapters; providers see one evaluation action, not every available function.
+- A ClojureScript/OpenTUI interface, embedding API, optional stdio RPC, and an isolated legacy CLI.
 
-Arrodes is an agent harness, not a generalized workspace model. It does not include a built-in subagent system, MCP client, plan mode, to-do manager, or operating-system sandbox.
+Arrodes is not an MCP server or a generalized workspace model. It does not include a built-in subagent system, plan mode, to-do manager, or operating-system sandbox.
 
-The functional reference is Pi's supported coding-agent surface at [`71dca871bc80`](https://github.com/earendil-works/pi/commit/71dca871bc80b6bc97be37f0ca3189399d651fff). This is a behavioral target, not TypeScript extension compatibility or a claim that every parity item is already verified.
+Pi/OMP is a reference for interaction behaviour, not a requirement to reproduce its functionality or implementation. The historical Pi baseline is [`71dca871bc80`](https://github.com/earendil-works/pi/commit/71dca871bc80b6bc97be37f0ca3189399d651fff).
 
 ## Requirements
 
 - Java 21 or newer.
 - Clojure CLI for development/source execution.
+- Bun 1.3.14 or newer for the OpenTUI interface.
 - Provider credentials for live model requests.
 
 The provider layer uses a pinned revision of [clojure-llm-sdk](https://github.com/DeadMeme5441/clojure-llm-sdk). Session storage uses SQLite and immutable artifact files, not Datahike.
+
+## Start the terminal interface
+
+```sh
+bun install --frozen-lockfile
+bun run build
+bin/arrodes --cwd /path/to/project
+```
+
+The launcher rebuilds changed ClojureScript sources, then starts OpenTUI and its owned JVM RPC process. It does not require a prebuilt core JAR. New sessions default to Codex OAuth, `gpt-5.6-luna`, and `high` reasoning, without silent model fallback. Use `--provider`, `--model`, and `--thinking` to choose another route; existing sessions retain their configuration.
+
+| Interaction | Control |
+| --- | --- |
+| Send / steer the running operation | Enter |
+| Queue a follow-up / insert a newline | Ctrl+Q / Shift+Enter |
+| Dismiss selection or a panel, otherwise stop work | Esc |
+| Sessions / command palette / next pane | F2 / F3 or Ctrl+P / F6 |
+| Attach context / discover commands | `@` / `/` |
+| Scroll without following new output | PgUp / PgDn |
+| Inspect / expand the selected conversation row | Enter / Space with conversation focus |
+| Copy selected text / exit | Ctrl+C / Ctrl+D |
+
+Pending prompts can be edited or dropped before delivery. `/history` inspects the recorded path and can branch from an entry; branching never restores files. `/eval` opens explicit Clojure input without replacing the normal conversation workflow. `/refresh` reconciles state after an uncertain request outcome; it does not resend a mutation.
+
+The inspector provides Summary, Output, Value, and Code tabs, with on-demand artifact pages and honest live/saved/unavailable result lifetimes. It appears beside the conversation on wide terminals and takes a dedicated view on narrow terminals. Drafts, expanded rows, and reading position survive session navigation within the running interface.
+
+`bin/arrodes.ps1` is the PowerShell entry point. The old line-oriented/JLine interface remains available explicitly as `bin/arrodes-cli` or `bin/arrodes-cli.ps1`. Windows terminal behaviour has not been exercised in the current verification.
 
 ## SDK example
 
@@ -35,47 +63,57 @@ From the repository's Clojure classpath:
 (require '[arrodes.runtime :as runtime]
          '[arrodes.provider :as provider])
 
-(def rt (runtime/open! {:cwd "/path/to/project"}))
-
-;; Uses an available ChatGPT OAuth credential, without embedding it in a session.
-(provider/refresh! (:provider rt) :codex-backend)
-
-(def session
-  (runtime/create-session!
-   rt {:name "Project work"
-       :config {:provider :codex-backend
-                :model "gpt-5.6-luna"
-                :thinking :high
-                :tools :all}}))
-
-(runtime/run! rt (:id session) "Explain the project." {})
-(runtime/evaluate! rt (:id session) "(def retained 42) retained" {})
-(runtime/evaluate! rt (:id session) "(inc retained)" {})
-
-(runtime/close! rt)
+(let [rt (runtime/open! {:cwd "/path/to/project"})]
+  (try
+    ;; Uses available Codex/ChatGPT OAuth; credentials are not session data.
+    (provider/refresh! (:provider rt) :codex-backend)
+    (let [session (runtime/create-session!
+                   rt {:name "Project work"
+                       :config {:provider :codex-backend
+                                :model "gpt-5.6-luna"
+                                :thinking :high
+                                :tools :all
+                                :settings {:fallback-model? false}}})
+          sid (:id session)]
+      (runtime/run! rt sid "Inspect the project and explain it.")
+      (runtime/evaluate! rt sid "(defn twice [x] (* 2 x))")
+      (runtime/evaluate! rt sid "(twice 21)"))
+    (finally (runtime/close! rt))))
 ```
 
-Use `try`/`finally` to close runtimes in application code. `run!` is blocking; `start!` returns an operation receipt that can be inspected, waited for, or cancelled. See [architecture](docs/ARCHITECTURE.md) and [the protocol](docs/PROTOCOL.md).
+`run!` is blocking; `start!` returns an operation receipt that can be inspected, waited for, or cancelled. `evaluate!` is a core operation, not an invocation of a special registered tool. See [architecture](docs/ARCHITECTURE.md) and [the protocol](docs/PROTOCOL.md).
 
-## Command-line entry points
+Inside the session REPL:
 
-The help/version paths are verified:
+```clojure
+(registered-tools)                           ; callable symbols, schemas, descriptions
+(def source (read {:path "src/example.clj"})) ; native value, retained in this namespace
+(skill {:action "catalog"})
+(:content (skill {:action "read" :name "review"}))
+(mcp {:action "catalog"})                    ; configured external servers
+(result 42)                                 ; native value for a returned result ID
+```
+
+Ordinary functions need no registration. `register-tool!` adds discovery and invocation tracing when needed; it does not expose another provider tool. The provider adapter encodes evaluation as `repl`.
+
+## Source and host boundaries
+
+```text
+src/clj/arrodes/    JVM core and effects
+src/cljc/arrodes/   Portable session, run, value, and TUI projection logic
+src/cljs/arrodes/   OpenTUI view, controller, and JSONL client
+hosts/rpc/arrodes/  Optional JSONL command host
+hosts/cli/arrodes/  Existing CLI/JLine host
+```
+
+The default classpath has no CLI, RPC host, or JLine dependency. Start only the host you need:
 
 ```sh
-clojure -Srepro -M:run --help
-clojure -Srepro -M:run --version
+clojure -Srepro -M:host       # standalone headless RPC, no JLine
+clojure -Srepro -M:run --help # existing optional CLI
 ```
 
-The controller surface includes:
-
-```sh
-bin/arrodes --cwd /path/to/project --provider codex-backend --model gpt-5.6-luna --thinking high
-bin/arrodes --cwd /path/to/project --print "Explain this project"
-bin/arrodes --mode json --cwd /path/to/project "Explain this project"
-bin/arrodes --headless
-```
-
-The interactive terminal uses JLine, with a line-oriented fallback for redirected input. Startup, evaluator input, settings, reload, model-effort selection, sharing consent, and clean exit have been exercised. [STATUS.md](docs/STATUS.md) records the current evidence for each interface.
+The OpenTUI host shares pure `.cljc` data logic. The JVM owns OAuth, MCP clients, evaluation, and persistence; JavaScript does not duplicate the agent loop.
 
 ## State and privacy
 
@@ -91,10 +129,15 @@ The evaluator, shell, and trusted extensions execute local code with the process
 
 ```sh
 clojure -Srepro -M:test
+bun run build
+bun scripts/tui.ts --help
 python3 scripts/check-private.py --check-git
 clojure -Srepro -T:build uber
-java -jar target/arrodes.jar --help
+clojure -Srepro -T:build rpc
+java -jar target/arrodes-rpc.jar --help
 ```
+
+`target/arrodes.jar` is the headless core library. `:build rpc` produces the standalone RPC executable. `:build cli` produces `target/arrodes-cli.jar`, used by `bin/arrodes-cli`; the core JAR is not a CLI executable. The TUI build produces `target/tui/main.cjs` and runs through the Bun bootstrap, not directly through Node.
 
 The test suite is offline; live checks are separate and use explicitly selected credentials/model settings. See [development and verification](docs/DEVELOPMENT.md), [extensions](docs/EXTENSIONS.md), and [current status](docs/STATUS.md).
 

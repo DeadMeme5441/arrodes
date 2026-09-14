@@ -36,7 +36,7 @@ An initializer can return a cleanup function or a map with `:close`. It can regi
 - Interaction: `:append-entry!`, `:send-message!`, `:emit!`.
 - Lifecycle: `:on-close!`.
 
-Commands receive their argument value. Tools receive one argument map and return a native value or a structured result with `:value`, `:content`, `:details`, and optional `:error?`. Provider and evaluator invocation share validation, hooks, locking, cancellation, progress, and normalization.
+Commands receive their argument value through an optional host. Registered functions receive one argument map and return a native value or a structured result with `:value`, `:content`, `:details`, and optional `:error?`. Clojure wrappers share validation, hooks, effect locking, cancellation, progress, and normalization. They are not separate provider tools.
 
 Hook descriptors have an ID, owner attribution, integer order, and function. Ordering is deterministic. Context and request hooks must preserve valid provider messages and stable prefixes when no semantic change is needed.
 
@@ -56,7 +56,38 @@ Inside a live session:
 (add_values {:values [20 22]})
 ```
 
-Registration captures the implementation and installs a shared-pipeline wrapper. Definitions are otherwise private to the evaluator. A live namespace is not restored after process restart; durable serializable result values are a separate facility.
+Registration captures the implementation and installs an instrumented wrapper. It is optional: unregistered `defn` functions are immediately callable and composable in the REPL. A live namespace is not restored after process restart; supported durable result values are a separate facility.
+
+## Skills, prompts, and MCP clients
+
+`skill` supports `{:action "catalog"}` and `{:action "read" :name "name" :path "optional/support/file"}`. `prompt` supports catalog and render. Read/render results are native maps containing `:content` and resource metadata; support paths retain the existing containment checks.
+
+Configure external MCP servers in effective settings:
+
+```clojure
+{:mcp/servers
+ {:local {:transport :stdio
+          :command "/absolute/path/to/server"
+          :args []
+          :timeout-ms 30000}
+  :remote {:transport :streamable-http
+           :url "https://mcp.example.test/mcp"
+           :headers {"Authorization" "Bearer ${MCP_TOKEN}"}
+           :timeout-ms 30000}}}
+```
+
+Arrodes is the client. Connections are lazy and session-owned; reload/close disconnect them. Environment/header configuration uses `${VARIABLE}` references rather than embedded credentials. Project settings still require trust.
+
+```clojure
+(mcp {:action "catalog"})
+(mcp {:action "describe" :server "local" :name "add"})
+(def response
+  (mcp {:action "call" :server "local" :name "add"
+        :arguments {:a 20 :b 22}}))
+(:structuredContent response)
+```
+
+The gateway returns native MCP result data, including structured content, and propagates remote tool errors. It also supports `status`, `resources`, `read-resource`, `prompts`, `get-prompt`, and `reconnect`. Remote tools stay behind this Clojure function; they do not become provider-visible tool definitions.
 
 ## Packages
 

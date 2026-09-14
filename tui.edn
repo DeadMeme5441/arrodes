@@ -1,0 +1,7 @@
+{:target :nodejs
+ :main arrodes.tui
+ :output-to "target/tui/main.cjs"
+ :output-dir "target/tui/out"
+ :optimizations :simple
+ :infer-externs true
+ :source-map "target/tui/main.cjs.map"}

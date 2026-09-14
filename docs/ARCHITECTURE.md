@@ -2,79 +2,90 @@
 
 ## Boundary
 
-Arrodes is a coding-agent harness. The durable session model represents interaction history; the live runtime performs work against that history. A generalized document/workspace model is not part of this repository.
+Arrodes is a REPL-centred coding agent. Pi/OMP is a reference for interaction behaviour, not a requirement to reproduce its tool menu or implementation. The JVM owns execution; hosts observe it and submit commands.
 
 ```text
-Terminal / print / JSON / SDK / stdio RPC
-                    |
-          Session command surface
-                    |
-        Live session orchestration
-          /         |          \
- Session store   Provider   Capability registry
-      |          adapters       |
- SQLite + blobs          Coding functions + REPL
+SDK                         RPC host ← OpenTUI host
+ |                                  |
+ +------------ runtime -------------+
+                  |
+          provider continuation
+                  |
+       session Clojure evaluation
+          /       |        \
+       coding   skills   MCP client → external MCP servers
+                  |
+        native values + retained results
+                  |
+        SQLite history + artifact files
 ```
 
-Interfaces do not implement their own branching, compaction, or agent loops. The common dispatcher is `arrodes.commands/dispatch!`; Clojure callers can also use `arrodes.runtime` directly.
+Evaluation is a first-class session operation. It is not registered as a capability. `arrodes.provider-repl` alone encodes evaluation as the provider function named `repl`; arbitrary provider function names never dispatch to the registry. Provider-native call/result messages remain in durable conversation history for valid replay.
 
-## Modules
+## Flat source layout
 
-| Module | Responsibility |
+| Root | Responsibility |
 | --- | --- |
-| `modules/common` | Portable value/path/private-file utilities and bounded output capture |
-| `modules/session` | Pure session projection, SQLite transactions, history, queues, operations, events, results, artifacts, and transfer |
-| `modules/runtime` | Provider/auth adapters, capabilities/evaluator, resources/packages, run decisions, live orchestration, and commands |
-| `modules/cli` | Transport framing, CLI selection, terminal input, and rendering |
+| `src/clj/arrodes/` | JVM runtime, evaluator, capability functions, providers/auth, resource loading, MCP **client**, SQLite/artifact storage, platform effects |
+| `src/cljc/arrodes/` | `session`: pure construction/history/context projection; `run`: agent decisions; `value`: portable values; `tui-model`: event-to-view projection |
+| `src/cljs/arrodes/` | Bun/OpenTUI entry point, JSONL client, application controller, presentation and widgets |
+| `hosts/rpc/arrodes/` | Optional command dispatcher, JSONL framing, reverse host requests, standalone RPC process |
+| `hosts/cli/arrodes/` | Optional existing CLI, JLine input and terminal rendering |
 
-## Durable values
+There are no compatibility namespaces or duplicate module directories. The default classpath contains only the core roots and resources. `:host` adds RPC; `:run` adds RPC, CLI and JLine. Core interaction callbacks are injected; the runtime does not dynamically load a command host.
 
-Session IDs and entry IDs are UUID strings. Timestamps use epoch milliseconds. Entries form a parent-linked tree; the session's head selects its active path.
+The portable session constructor consumes supplied IDs, timestamps and canonical cwd. The JVM store prepares these values. No filesystem implementation is simulated in ClojureScript. Shared namespaces have been compiled and executed in Node.
 
-A session records configuration, status, metadata, and history. Entry kinds include messages, configuration changes, compactions, branch summaries, labels, evaluations, and custom data. Provider messages retain replay metadata needed by the selected provider.
+## Evaluation and functions
 
-The full tree is not the model context. Context projection follows the active path, applies compaction boundaries, and includes only the relevant message/custom-context entries. Original history remains available.
+Each live session has one namespace, one evaluation lock and REPL history (`*1`, `*2`, `*3`, `*e`). Forms run in order. Definitions take effect immediately; a later exception does not undo earlier definitions or external effects. A generation identifier distinguishes a new environment from its predecessor.
 
-Store commands use explicit SQLite transactions. Related entries, queue acknowledgements, session projections, operation changes, and events commit together. Revision checks reject stale mutations. Events are published from successful commit results, not speculative pre-commit state.
+Ordinary `def` and `defn` require no registration. `register-tool!` is optional instrumentation and discovery metadata for a function Var, not permission to use a function in Clojure. `registered-tools` returns the selected function catalog, including each callable symbol and argument schema. `:tools` selects registered functions available through their wrappers; it does not select provider-visible tools or sandbox arbitrary Clojure.
 
-## Ownership and recovery
+Registered functions share argument validation, hooks, permission checks, effect locks, cancellation and result retention. They return native Clojure values. Evaluation serialization is separate from effect locking: joined Clojure futures can compose independent calls without waiting on their parent's evaluation lock. Unjoined futures and arbitrary background threads are trusted user code, not supervised session operations; join work before returning.
 
-A file-backed store acquires a private OS file lock before schema work, live-result expiry, or recovery. Another runtime using that store is rejected. The lock is released on failed opening or genuine close, not deleted while another owner could still reference it.
+Skills are instruction/support data, accessible through `skill`; prompts are rendered data accessible through `prompt`. The `mcp` function uses lazy, session-owned connections to external MCP servers. Remote tools do not inflate the provider tool schema. Resource activation uses attributed receipts; failure, reload and teardown restore prior registrations and close owned clients.
 
-A live session owns its capability registry, evaluator namespace, resource activation, and foreground slot. At most one foreground operation runs in a session. Independent sessions can execute in the same runtime.
+## Observation, not rendering
 
-Cancellation is a request to stop, not evidence of termination. Shutdown waits for executor-owned work and blocking caller-thread work. If work does not stop by the deadline, shutdown reports an incomplete/closing state and retains its store, handles, and ownership. A later close can finish cleanup.
+Durable `evaluation/started` and `evaluation/completed` events identify an evaluation. Nested registered functions produce `capability/started` and `capability/completed`. Each has a call ID, parent call ID, session ID and operation ID. Starts contain source or arguments; completions contain bounded content, details, error status and a retained result descriptor.
 
-Recovery never reruns old external effects. Missing tool results receive explicit interruption/boundary records. Selecting a historical prefix does not undo filesystem changes; selecting or copying a prefix with pending tool calls adds provider-valid missing-result messages without executing them.
+Stdout/stderr and shell progress are transient events; completion records preserve bounded final output. Observer callbacks retain their caller's dynamic bindings so rendering an event cannot be recaptured as program output. The core emits data, not ANSI or OpenTUI objects.
 
-## Capabilities and evaluator
+## Values are not checkpoints
 
-One registry holds descriptors and implementations. Provider tool calls and the registered Clojure wrappers enter the same validation, hook, execution-lock, cancellation, progress, and result path.
+`(result 42)` retrieves a native value by its session-local integer result ID. Small supported EDN is inline; larger bounded EDN is persisted as an artifact; arbitrary JVM objects remain live-only. `(artifact "uuid")` reads retained artifact content, with a bounded helper limit. Large previews do not require copying the entire value into model context.
 
-Execution can be parallel, sequential, or exclusive. Parallel batches are bounded and own their worker lifetime. Their results are persisted in assistant call order. The evaluator is exclusive and can invoke registered functions reentrantly.
+Definitions survive ordinary continuation, model changes and compaction. Branch movement, reload, close and process restart reset the namespace. Supported durable values survive restart; live-only objects do not. The REPL supplies useful live references, not automatic JVM checkpointing.
 
-The evaluator reads and evaluates forms in sequence in its session namespace. Definitions persist across ordinary continuation, model changes, and compaction. Branch movement, reload, release, and process restart reset them.
+Result descriptors remain structured in history. Provider-readable reference expressions are generated only when constructing requests, after fork/import remapping. This prevents a copied transcript from instructing the model to retrieve a stale numeric ID.
 
-`register-tool!` explicitly exposes a function Var. It returns a small acknowledgement rather than a runtime handle. `result` retrieves a native live result or a supported durable reconstruction. Large output is exposed through bounded previews and artifacts.
+## Durability and lifecycle
 
-Arbitrary JVM state is not checkpointed. Live-only values become unavailable when the registry closes. This is distinct from durable conversation history.
+Entries form a parent-linked history tree. Active-path and compaction projection select model context without deleting original history. Store commands commit entries, queues, session projections, operations and events in explicit SQLite transactions. Published durable events come from committed records.
 
-## Provider views and caching
+`session.view` reads the session projection, active entries, and event cursor under the session lock. Every new canonical entry emits `entry/committed` in its transaction. The TUI reconstructs observed activity from historical events through that cursor, keeps the atomic entry/queue snapshot authoritative, then applies later buffered events. Historical activity from abandoned branches is excluded.
 
-A root provider manager owns shared authentication and base catalogs. Each session receives a local profile/catalog view derived from its own project's effective settings. Project endpoints must not bleed into another session's routing. Closing a view does not close shared authentication or global SDK connections.
+A file-backed store has one live runtime owner, enforced by an OS file lock before recovery or expiry. Each session admits at most one foreground operation; independent sessions can run concurrently.
 
-Requests preserve provider replay data and stable history. Tool definitions are deterministic. Normal requests use a stable session cache scope, rather than a turn or operation ID. Cached and uncached input usage are separate; unknown telemetry is not converted to zero.
+Cancellation is a request, not proof of termination. Shutdown waits for owned operation work and blocking callers. If they do not stop by the deadline, the runtime reports an incomplete closing state and retains ownership. Recovery repairs unresolved provider call/result boundaries without replaying external effects.
 
-Explicit cache-control configuration still needs final integration verification; see the status document. The system does not add padding or warmup model calls to manufacture cache hits.
+Provider managers preserve per-session routing/settings while sharing appropriate authentication. Normal requests use a stable session cache scope and provider replay data. Unknown usage remains unknown. No padding or warmup requests manufacture cache hits.
 
-## Transfer and artifacts
+Project trust controls executable resource loading, not OS isolation. Clojure, shell functions and trusted extensions run with the process's permissions. Sharing is explicit and belongs to optional hosts.
 
-The versioned export packet includes the original base configuration, entries, durable result descriptors, and artifact transfer data. Import validates structure/digests and creates new ownership/IDs while remapping references. Unavailable/live-only data remains explicitly unavailable.
+## ClojureScript + OpenTUI
 
-JSONL transfer uses a versioned header containing EDN metadata and one EDN entry record per line, preserving Clojure data without lossy keyword coercion. It is an Arrodes format, not a promise of Pi session-file compatibility.
+`scripts/tui.ts` statically imports `@opentui/core`, then loads the compiled ClojureScript entry point. This ESM bootstrap is required because OpenTUI uses top-level await while the compiler emits CommonJS. `tui.edn` uses the ClojureScript Node target; Bun executes the result. No React/Solid layer or parallel TypeScript application model is involved.
 
-## Trust
+- **Transport:** `tui-rpc` owns one child process, UTF-8 JSONL framing, correlation, request deadlines, reverse host requests, and confirmed shutdown. An expired mutation is an unknown outcome, not permission to resend. Forced termination targets the owned process tree and waits for actual process closure.
+- **Controller:** `tui-app` handles session hydration/replay, prompts, queues, inspections, file attachments and navigation through existing commands. Provider/authentication work, MCP connections, evaluation, and persistence stay on the JVM.
+- **Projection:** `tui-model` is pure `.cljc`. Canonical entries anchor transcript rows; observed calls use call IDs and parent IDs. It groups only consecutive completed read siblings. It neither parses Clojure source to invent work nor infers function success from an outer evaluation.
+- **View:** `tui-view`, `tui-present`, and `tui-widgets` use OpenTUI directly. Keyed rows and a persistent composer avoid rebuilding the transcript for each keystroke. Function output expands in place; the inspector is contextual rather than a permanently exposed REPL pane.
+- **Values:** expand retained descriptors and artifact pages on demand. Inline native values have a redacted EDN representation because JSON cannot preserve keyword/string key distinctions or arbitrary JVM objects. Live-only values remain explicitly unavailable after evaluator reset.
 
-Project trust controls loading executable project resources and settings. Saving trust does not silently reload active code or override explicit per-run trust flags. Extensions are attributed so normal activation failure/reload can withdraw their contributions.
+Enter sends when idle and steers when running; follow-ups are distinct queue items with stable identities. Editing or dropping a delivered item fails rather than resurrecting it. Explicit evaluation is available through the command palette. Session switching preserves drafts, attachments, expansion, and scroll state; branching changes history, not the filesystem.
 
-This is trusted local execution, not OS isolation. Arbitrary Clojure, shell commands, and installed extensions have the process's permissions. No automatic session sharing occurs.
+The inspector is side-by-side at 112 columns and wider; narrower terminals use a dedicated inspector view. Native text selection takes priority over stop/clear shortcuts. Output arriving while reading does not intentionally pull the viewport back to the end.
+
+The UI and actual JVM backend were exercised together, including a live Codex OAuth / Luna / high workflow. See [verification evidence and limits](STATUS.md). [OpenTUI](https://github.com/anomalyco/opentui) is a runtime dependency, not copied application code.

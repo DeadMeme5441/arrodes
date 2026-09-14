@@ -1,7 +1,7 @@
 (ns arrodes.store-lifecycle-test
   (:require [arrodes.artifacts :as artifacts]
             [arrodes.store :as store]
-            [arrodes.util :as util]
+            [arrodes.platform :as util]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]])
   (:import (java.nio.file Files Path)

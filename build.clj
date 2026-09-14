@@ -3,20 +3,71 @@
 
 (def lib 'io.github.DeadMeme5441/arrodes)
 (def version "0.1.0")
-(def class-dir "target/classes")
-(def source-dirs ["modules/common/src" "modules/session/src" "modules/runtime/src" "modules/cli/src"])
-(defn clean [_] (b/delete {:path "target"}))
-(defn uber [_]
-  (clean nil)
-  (let [basis (b/create-basis {:project "deps.edn"})]
-    (b/copy-dir {:src-dirs (conj source-dirs "resources") :target-dir class-dir})
-    (b/copy-file {:src "LICENSE" :target (str class-dir "/META-INF/ARRODES-LICENSE")})
-    (b/write-pom {:class-dir class-dir :lib lib :version version :basis basis
+(def core-source-dirs ["src/clj" "src/cljc"])
+(def host-source-dirs (conj core-source-dirs "hosts/rpc"))
+(def cli-source-dirs (conj host-source-dirs "hosts/cli"))
+
+(def pom-data
+  [[:description "Durable Clojure agent sessions with a persistent evaluator"]
+   [:url "https://github.com/DeadMeme5441/arrodes-mono"]
+   [:licenses
+    [:license
+     [:name "MIT License"]
+     [:url "https://opensource.org/licenses/MIT"]]]])
+
+(defn clean [_]
+  (b/delete {:path "target"}))
+
+(defn- package!
+  [{:keys [aliases artifact class-dir main ns-compile source-dirs]}]
+  (b/delete {:path class-dir})
+  (b/delete {:path artifact})
+  (let [basis (b/create-basis (cond-> {:project "deps.edn"}
+                                (seq aliases) (assoc :aliases aliases)))]
+    (b/copy-dir {:src-dirs (conj source-dirs "resources")
+                 :target-dir class-dir})
+    (b/copy-file {:src "LICENSE"
+                  :target (str class-dir "/META-INF/ARRODES-LICENSE")})
+    (b/write-pom {:class-dir class-dir
+                  :lib lib
+                  :version version
+                  :basis basis
                   :src-dirs source-dirs
-                  :pom-data [[:description "Durable Clojure agent sessions with a persistent evaluator"]
-                             [:url "https://github.com/DeadMeme5441/arrodes-mono"]
-                             [:licenses [:license [:name "MIT License"] [:url "https://opensource.org/licenses/MIT"]]]]})
-    (b/compile-clj {:basis basis :src-dirs source-dirs :class-dir class-dir
-                    :ns-compile '[arrodes.cli]})
-    (b/uber {:class-dir class-dir :uber-file "target/arrodes.jar" :basis basis :main 'arrodes.cli})
-    {:artifact "target/arrodes.jar" :version version}))
+                  :pom-data pom-data})
+    (b/compile-clj {:basis basis
+                    :src-dirs source-dirs
+                    :class-dir class-dir
+                    :ns-compile ns-compile})
+    (b/uber (cond-> {:class-dir class-dir
+                     :uber-file artifact
+                     :basis basis}
+              main (assoc :main main)))
+    {:artifact artifact :version version}))
+
+(defn uber
+  "Build the default headless core artifact. It contains neither host nor CLI code."
+  [_]
+  (package! {:artifact "target/arrodes.jar"
+             :class-dir "target/classes-core"
+             :source-dirs core-source-dirs
+             :ns-compile '[arrodes.runtime]}))
+
+(defn rpc
+  "Build the optional standalone JSONL RPC host without JLine."
+  [_]
+  (package! {:aliases [:host]
+             :artifact "target/arrodes-rpc.jar"
+             :class-dir "target/classes-rpc"
+             :source-dirs host-source-dirs
+             :ns-compile '[arrodes.rpc-main]
+             :main 'arrodes.rpc-main}))
+
+(defn cli
+  "Build the optional legacy terminal host and its JLine dependency."
+  [_]
+  (package! {:aliases [:run]
+             :artifact "target/arrodes-cli.jar"
+             :class-dir "target/classes-cli"
+             :source-dirs cli-source-dirs
+             :ns-compile '[arrodes.cli]
+             :main 'arrodes.cli}))

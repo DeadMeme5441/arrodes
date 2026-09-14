@@ -11,8 +11,8 @@ with tempfile.TemporaryDirectory(prefix="arrodes-launcher-") as temporary:
     launch = Path(temporary) / "launch with spaces"
     project = launch / "project"
     project.mkdir(parents=True)
-    launcher = (["pwsh", "-NoProfile", "-File", str(repository / "bin" / "arrodes.ps1")]
-                if os.name == "nt" else [str(repository / "bin" / "arrodes")])
+    launcher = (["pwsh", "-NoProfile", "-File", str(repository / "bin" / "arrodes-cli.ps1")]
+                if os.name == "nt" else [str(repository / "bin" / "arrodes-cli")])
     result = subprocess.run(
         launcher + ["--cwd", "project", "--home", "home", "--new", "--no-session", "--export", "-"],
         cwd=launch, capture_output=True, text=True, timeout=60)

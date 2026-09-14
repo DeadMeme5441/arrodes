@@ -4,7 +4,7 @@
             [arrodes.resources :as resources]
             [arrodes.session-test :as fixtures]
             [arrodes.store :as store]
-            [arrodes.util :as u]
+            [arrodes.platform :as u]
             [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]))
 

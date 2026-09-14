@@ -1,0 +1,17 @@
+{
+  "name": "arrodes-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "bun": ">=1.3.14" },
+  "scripts": {
+    "build": "clojure -Srepro -M:tui-build",
+    "test:tui": "bun scripts/test-tui.ts",
+    "tui": "bun scripts/tui.ts",
+    "dev": "bun scripts/tui.ts"
+  },
+  "dependencies": {
+    "@opentui/core": "0.5.11",
+    "web-tree-sitter": "0.25.10"
+  }
+}
