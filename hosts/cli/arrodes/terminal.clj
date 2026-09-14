@@ -707,7 +707,7 @@
                        :operation-id nil)
                 (refresh-presentation! state)
                 (when (:tty? @state) (install-bindings! state)))
-      "name" (let [name (str/join " " args)]
+      "name" (let [name (str/trim raw)]
                (when (str/blank? name) (error! "terminal.invalid-name" "Usage: /name NAME"))
                (dispatch! rt "session.name" {:session-id sid :name name})
                (refresh-status! state))

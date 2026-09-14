@@ -17,7 +17,8 @@
 (def ^:private default-line-limit (* 16 1024 1024))
 (def ^:private default-host-limit 128)
 (def ^:private default-host-timeout-ms 300000)
-(def ^:private supported-host-kinds #{:select :confirm :input :notify :capability})
+(def ^:private supported-host-kinds
+  #{:select :confirm :input :notify :capability :renderer :widget :set-widget :render :editor})
 
 (defn- daemon-thread-factory [connection-id]
   (let [counter (atom 0)]
@@ -66,29 +67,57 @@
                  {:code "internal-error" :message (str error) :data {}})]
     (update mapped :data #(or % {}))))
 
-(defn- project-value [context value]
-  (-> ((:public-value context) value)
-      value/redact
-      wire-value))
 
 (defn json-str
   "Encode a command/public value without losing namespaced keys or scalar types."
   [public-value value]
   (json/write-str (-> (public-value value) value/redact wire-value)))
 
-(defn- emit! [context value]
-  (let [line (json/write-str (project-value context value))
-        ^Writer writer (:writer context)]
+(defn- emit-line! [context line]
+  (let [^Writer writer (:writer context)]
     (locking (:write-lock context)
-      (.write writer line)
+      (.write writer ^String line)
       (.write writer "\n")
       (.flush writer))))
+
+(defn- emit! [context value]
+  (emit-line! context (json-str (:public-value context) value)))
 
 (defn- emit-error! [context id error]
   (emit! context {:type "response" :id id :error (error-value error)}))
 
 (defn- protocol-error! [context id code message data]
   (emit-error! context id (ex-info message (assoc (or data {}) :error/code code))))
+
+(defn- present-event [context event]
+  (let [data (:data event)
+        type (or (:event/type data) (:type data) (:type event))
+        capability (or (:name data) (:tool/name data) (:tool-call/name data))
+        renderers (get @(:renderers context) (:session-id event))
+        render (or (get renderers (wire-key type)) (get renderers capability))]
+    (if-not render
+      event
+      (try
+        (let [rendered (render event)
+              {:keys [writer buffer]} (u/bounded-writer 32768)]
+          (binding [*out* writer *print-length* 200 *print-level* 20]
+            (cond
+              (string? rendered) (print rendered)
+              (sequential? rendered) (doseq [line (take 200 rendered)] (println line))
+              (some? rendered) (pr rendered)))
+          (assoc event :presentation {:content (str buffer)}))
+        (catch Throwable error
+          (assoc event :presentation {:error (or (ex-message error) "Extension renderer failed")}))))))
+
+(defn- register-renderer! [context {:keys [session-id id render remove?]}]
+  (value/check! (and (string? id) (not (str/blank? id))) :invalid-renderer
+                "Renderer registration requires a non-empty id" {})
+  (value/check! (or remove? (fn? render)) :invalid-renderer
+                "Renderer registration requires a native function" {:id id})
+  (swap! (:renderers context) update session-id
+         (fn [renderers]
+           (if remove? (dissoc renderers id) (assoc renderers id render))))
+  {:renderer-id id :active? (not remove?)})
 
 (defn- read-line-bounded
   "Read strict LF-delimited JSONL. Returns ::eof or ::too-long as sentinels."
@@ -150,32 +179,37 @@
 (defn- host-request! [context request]
   (let [kind (let [value (:kind request)] (if (string? value) (keyword value) value))]
     (value/check! (contains? supported-host-kinds kind) :unsupported-host-request
-              "The connected host does not support this UI request"
-              {:kind kind :supported (sort (map name supported-host-kinds))})
-    (let [id (u/id)
-          response (promise)
-          requested-timeout (:timeout-ms request)
-          timeout-ms (if (and (integer? requested-timeout) (pos? requested-timeout))
-                       (min requested-timeout (:host-timeout-ms context))
-                       (:host-timeout-ms context))]
-      (reserve-host! context id response)
-      (try
-        (emit! context (cond-> {:type "host-request"
-                                :id id
-                                :request (assoc request :kind kind :timeout-ms timeout-ms)}
-                         (.get ^ThreadLocal (:request-id context))
-                         (assoc :request-id (.get ^ThreadLocal (:request-id context)))))
-        (await-host! context id response timeout-ms)
-        (catch Throwable error
-          (swap! (:pending-host context) dissoc id)
-          (if (:local-host-cancel? (ex-data error))
-            (do
-              (emit! context {:type "host-cancel" :id id
-                              :reason (:error/code (ex-data error))})
-              (throw (ex-info (ex-message error)
-                              (dissoc (ex-data error) :local-host-cancel?)
-                              error)))
-            (throw error)))))))
+                  "The connected host does not support this UI request"
+                  {:kind kind :supported (sort (map name supported-host-kinds))})
+    (cond
+      (= :renderer kind) (register-renderer! context request)
+      (and @(:closing? context) (:remove? request)
+           (contains? #{:widget :set-widget} kind)) {:widget-id (:id request) :visible? false}
+      :else
+      (let [id (u/id)
+            response (promise)
+            requested-timeout (:timeout-ms request)
+            timeout-ms (if (and (integer? requested-timeout) (pos? requested-timeout))
+                         (min requested-timeout (:host-timeout-ms context))
+                         (:host-timeout-ms context))]
+        (reserve-host! context id response)
+        (try
+          (emit! context (cond-> {:type "host-request"
+                                  :id id
+                                  :request (assoc request :kind kind :timeout-ms timeout-ms)}
+                           (.get ^ThreadLocal (:request-id context))
+                           (assoc :request-id (.get ^ThreadLocal (:request-id context)))))
+          (await-host! context id response timeout-ms)
+          (catch Throwable error
+            (swap! (:pending-host context) dissoc id)
+            (if (:local-host-cancel? (ex-data error))
+              (do
+                (emit! context {:type "host-cancel" :id id
+                                :reason (:error/code (ex-data error))})
+                (throw (ex-info (ex-message error)
+                                (dissoc (ex-data error) :local-host-cancel?)
+                                error)))
+              (throw error))))))))
 
 (defn- resolve-runtime-api []
   {:open! (requiring-resolve 'arrodes.runtime/open!)
@@ -206,7 +240,7 @@
                            runtime
                            (fn [event]
                              (try
-                               (emit! context (cond-> {:type "event" :event event}
+                               (emit! context (cond-> {:type "event" :event (present-event context event)}
                                                 (.get ^ThreadLocal (:request-id context))
                                                 (assoc :request-id (.get ^ThreadLocal (:request-id context)))))
                                (catch Throwable diagnostic
@@ -248,15 +282,28 @@
     (value/check! (map? params) :invalid-params "Request params must be an object" {})
     (let [params (if (contains? #{"capability.attach" "capability.detach"} method)
                    (assoc params :connection-id (:connection-id context))
-                   params)]
-      (record-attachment! context method params
-                          ((:dispatch context) @(:runtime context) method params)))))
+                   params)
+          result (record-attachment! context method params
+                                     ((:dispatch context) @(:runtime context) method params))]
+      (if (= "event.replay" method)
+        (update result :events #(mapv (partial present-event context) %))
+        result))))
 
 (defn- respond-once! [context id responded value error]
-  (when (.compareAndSet ^AtomicBoolean responded false true)
-    (if error
-      (emit-error! context id error)
-      (emit! context {:type "response" :id id :result value}))))
+  (when-not (.get ^AtomicBoolean responded)
+    (let [response (if error
+                     {:type "response" :id id :error (error-value error)}
+                     {:type "response" :id id :result value})
+          line (try
+                 (json-str (:public-value context) response)
+                 (catch Throwable _
+                   (json/write-str
+                    {:type "response" :id id
+                     :error {:code "serialization-error"
+                             :message "Command response could not be serialized"
+                             :data {:unknown-outcome? true}}})))]
+      (when (.compareAndSet ^AtomicBoolean responded false true)
+        (emit-line! context line)))))
 
 (defn- retire-request! [context id token]
   (swap! (:inflight context)
@@ -406,6 +453,7 @@
             (binding [*out* *err*]
               (println "RPC runtime cleanup failed:" (ex-message diagnostic))))))
       (reset! (:runtime context) nil)
+      (reset! (:renderers context) {})
       (when @interrupted? (.interrupt (Thread/currentThread)))
       {:status (if (and @executor-terminated?
                         (= :closed (:status @runtime-report)))
@@ -485,6 +533,7 @@
                         :inflight (atom {})
                         :pending-host (atom {})
                         :attachments (atom {})
+                        :renderers (atom {})
                         :closing? (atom false)
                         :settled? (AtomicBoolean. false)}
                reader (BufferedReader. (io/reader wire-in))]

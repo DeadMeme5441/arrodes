@@ -148,6 +148,56 @@
     (is (empty? (:queue removed)))
     (is (= "red\n\tok" (model/safe-text "\u001b[31mred\u001b[0m\u0000\n\tok")))))
 
+(deftest hydration-never-reopens-settled-or-cancelling-operation
+  (let [completed-events [(event 1 :operation/started {:kind :run})
+                          (event 2 :operation/completed {})]
+        authoritative (model/hydrate
+                       {:state {:session {:id "session-1" :status :idle}
+                                :phase :settling
+                                :operation-id "op-1"
+                                :operation {:id "op-1" :kind :run :status :completed}}
+                        :cursor 2}
+                       completed-events)
+        legacy (model/hydrate
+                {:state {:session {:id "session-1" :status :idle}
+                         :phase :settling :operation-id "op-1"}
+                 :cursor 2}
+                completed-events)
+        cancelling (model/hydrate
+                    {:state {:session {:id "session-1" :status :running}
+                             :phase :cancelling :operation-id "op-1"}
+                     :cursor 2}
+                    [(event 1 :operation/started {:kind :run})
+                     (event 2 :operation/cancelling {})])]
+    (is (= :completed (get-in authoritative [:operation :status])))
+    (is (= :completed (get-in legacy [:operation :status])))
+    (is (= :cancelling (get-in cancelling [:operation :status])))))
+
+(deftest renderer-presentation-is-display-data-not-capability-status
+  (let [rendered (-> (model/empty-state)
+                     (model/apply-event
+                      (assoc (event 1 :capability/completed
+                                    {:call-id "rendered" :name "read"
+                                     :content "canonical" :error? false})
+                             :presentation {:content "custom"})))
+        renderer-failed (-> (model/empty-state)
+                            (model/apply-event
+                             (assoc (event 2 :capability/completed
+                                           {:call-id "renderer-failed" :name "read"
+                                            :content "canonical" :error? false})
+                                    :presentation {:error "renderer exploded"})))
+        generic (-> (model/empty-state)
+                    (model/apply-event
+                     (assoc (event 3 :session/updated {})
+                            :presentation {:content "session renderer"})))]
+    (is (= :completed (get-in rendered [:activities "rendered" :status])))
+    (is (= "custom" (get-in rendered [:activities "rendered" :presentation])))
+    (is (= :completed (get-in renderer-failed [:activities "renderer-failed" :status])))
+    (is (= "renderer exploded"
+           (get-in renderer-failed [:activities "renderer-failed" :presentation-error])))
+    (is (= ["session renderer"] (mapv :text (:presentations generic))))
+    (is (= :presentation (:kind (last (model/rows generic)))))))
+
 (deftest hydration-recovers-activity-before-cursor-without-reopening-abandoned-branches
   (let [assistant (assoc (entry "selected" nil :assistant "")
                          :data {:message/role :assistant :message/content ""

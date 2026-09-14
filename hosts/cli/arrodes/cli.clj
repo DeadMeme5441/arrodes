@@ -12,7 +12,7 @@
   (:import (java.io Writer)
            (java.nio ByteBuffer)
            (java.nio.charset CodingErrorAction StandardCharsets)
-           (java.nio.file Files LinkOption Path)
+           (java.nio.file Files LinkOption)
            (java.util Base64)))
 
 (def version "0.1.0")
@@ -476,7 +476,7 @@
       (write-output! writer (str (:path result) "\n")))
     0))
 
-(defn- run-runtime-mode! [options wire-out diagnostics]
+(defn- run-runtime-mode! [options wire-out]
   (let [api (resolve-api)
         open-options (assoc (runtime-options options) :command! (:dispatch! api))
         runtime ((:open! api) open-options)]
@@ -532,7 +532,7 @@
            (when (and redirect? (identical? out *out*))
              (System/setOut System/err))
            (binding [*out* err]
-             (run-runtime-mode! options writer err))
+             (run-runtime-mode! options writer))
            (finally
              (when (and redirect? (identical? out *out*))
                (System/setOut original-system-out)))))))))

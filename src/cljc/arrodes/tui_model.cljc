@@ -4,6 +4,7 @@
             #?(:clj [clojure.data.json :as json])))
 
 (def ^:private max-progress-characters (* 64 1024))
+(def ^:private max-presentation-rows 200)
 
 (def ^:private enum-keys
   #{:type :event/type :part/type :message/role :role :kind :status :phase
@@ -45,7 +46,7 @@
                         "thinking" "stream" "mode"}
                       (name key)))))
 
-(declare decode-wire apply-event put-activity)
+(declare decode-wire apply-event put-activity event-presentation)
 
 (defn- decode-map [m]
   (persistent!
@@ -108,6 +109,7 @@
    :entries []
    :activities {}
    :activity-order []
+   :presentations []
    :streams {:operation-id nil :content "" :reasoning ""}
    :queue []
    :operation nil
@@ -135,12 +137,26 @@
             entries)))
       entries)))
 
-(defn- snapshot-operation [state]
-  (or (:operation state)
-      (when-let [id (:operation-id state)]
-        {:id id
-         :kind (:operation-kind state)
-         :status (if (= :idle (:phase state)) :completed :running)})))
+(def ^:private replay-owned-operation-statuses
+  #{:cancelling :completed :failed :cancelled :interrupted})
+
+(defn- snapshot-operation [state prior]
+  (if (contains? state :operation)
+    (:operation state)
+    (when-let [id (:operation-id state)]
+      (let [prior (when (= id (:id prior)) prior)
+            phase (:phase state)]
+        (cond
+          (and prior (contains? replay-owned-operation-statuses (:status prior)))
+          prior
+
+          (= :idle phase)
+          {:id id :kind (:operation-kind state) :status :completed}
+
+          :else
+          {:id id
+           :kind (:operation-kind state)
+           :status (if (= :cancelling phase) :cancelling :running)})))))
 
 (defn- recorded-source [arguments]
   (let [arguments (if (string? arguments)
@@ -211,9 +227,12 @@
                        :operation/failed :operation/cancelled :operation/interrupted
                        :tool/interrupted}
         history (reduce apply-event (empty-state)
-                        (filter #(and (past? %) (contains? ledger-types (:type %))) events))
-        active-operation (snapshot-operation state)
+                        (filter #(and (past? %)
+                                      (or (contains? ledger-types (:type %))
+                                          (seq (event-presentation %))))
+                                events))
         prior-operation (:operation history)
+        active-operation (snapshot-operation state prior-operation)
         operation (if active-operation
                     (merge (when (= (:id active-operation) (:id prior-operation)) prior-operation)
                            (into {} (remove (comp nil? val)) active-operation))
@@ -238,23 +257,59 @@
                       (merge (get-in model [:activities id]) activity))
       (and id (not known?)) (update :activity-order conj id))))
 
+(defn- event-presentation [event]
+  (let [presentation (field event :presentation)
+        content (field presentation :content)
+        error (field presentation :error)]
+    (cond-> {}
+      (string? content) (assoc :presentation (safe-text content))
+      (string? error) (assoc :presentation-error (safe-text error)))))
+
+(def ^:private activity-presentation-types
+  #{:evaluation/started :evaluation/completed
+    :capability/started :capability/completed})
+
+(defn- add-event-presentation [model event]
+  (let [{:keys [presentation presentation-error]} (event-presentation event)]
+    (if (or (contains? activity-presentation-types (:type event))
+            (and (nil? presentation) (nil? presentation-error)))
+      model
+      (let [id (str "presentation:"
+                    (or (:seq event) (:id event)
+                        (str (:operation-id event) ":" (:type event) ":" (:time event))))
+            row {:id id
+                 :kind :presentation
+                 :text (str (or presentation "")
+                            (when presentation-error
+                              (str (when presentation "\n\n")
+                                   "Renderer error (canonical event preserved): "
+                                   presentation-error)))
+                 :error? (boolean presentation-error)}
+            rows (replace-by-id (:presentations model) row)
+            rows (if (> (count rows) max-presentation-rows)
+                   (subvec rows (- (count rows) max-presentation-rows))
+                   rows)]
+        (assoc model :presentations rows)))))
+
 (defn- start-activity [model event kind]
   (let [data (:data event)
-        id (:call-id data)]
+        id (:call-id data)
+        presentation (event-presentation event)]
     (if-not id
       model
       (put-activity
        model
-       (cond-> {:id id
-                :parent-id (:parent-call-id data)
-                :kind kind
-                :name (when (= kind :capability) (:name data))
-                :content ""
-                :details {}
-                :result nil
-                :status :running
-                :start-seq (:seq event) :started-at (:time event)
-                :operation-id (:operation-id event)}
+       (cond-> (merge {:id id
+                       :parent-id (:parent-call-id data)
+                       :kind kind
+                       :name (when (= kind :capability) (:name data))
+                       :content ""
+                       :details {}
+                       :result nil
+                       :status :running
+                       :start-seq (:seq event) :started-at (:time event)
+                       :operation-id (:operation-id event)}
+                      presentation)
          (= kind :evaluation) (assoc :source (:source data))
          (= kind :capability) (assoc :arguments (:arguments data)))))))
 
@@ -271,7 +326,8 @@
 
 (defn- complete-activity [model event kind]
   (let [data (:data event)
-        id (:call-id data)]
+        id (:call-id data)
+        presentation (event-presentation event)]
     (if-not id
       model
       (let [prior (get-in model [:activities id])
@@ -288,6 +344,7 @@
                    (= kind :capability) (assoc :arguments (:arguments data)))
             activity (merge base prior
                             (select-keys data [:name :source :arguments :content :result])
+                            presentation
                             {:details (merge (:details prior) (:details data))
                              :status (failure-status data)})]
         (put-activity model activity)))))
@@ -383,6 +440,7 @@
         operation (cond-> (merge (when-not (= status :running) (:operation model))
                                   (:operation data)
                                   (select-keys data [:kind :result :error])
+                                  (event-presentation event)
                                   {:id (:operation-id event) :status status})
                     (and (= status :running) (:time event)) (assoc :started-at (:time event)))
         session-status (case status
@@ -469,10 +527,12 @@
 
               ;; :message/assistant intentionally cannot insert a row. Only the
               ;; canonical :entry/committed event owns durable message identity.
-              model)]
-        (if seq
-          (assoc next-model :cursor (max (or (:cursor next-model) 0) seq))
-          next-model)))))
+              model)
+            next-model (add-event-presentation next-model event)
+            next-model (if seq
+                         (assoc next-model :cursor (max (or (:cursor next-model) 0) seq))
+                         next-model)]
+        next-model))))
 
 (defn activity-title [activity]
   (let [arguments (:arguments activity)
@@ -667,4 +727,4 @@
                            :text (safe-text content)
                            :entry-id nil
                            :streaming? true}))]
-    (group-reads (into (:rows projected) live-rows))))
+    (group-reads (into (into (:rows projected) (:presentations model)) live-rows))))

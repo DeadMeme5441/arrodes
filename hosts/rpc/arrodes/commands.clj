@@ -37,6 +37,8 @@
   "Project ordinary data without serializing runtime handles or executable functions."
   [value]
   (cond
+    (and (float? value) (not (Double/isFinite (double value))))
+    {:type :number :encoding :edn :value (pr-str value)}
     (or (nil? value) (string? value) (boolean? value) (number? value) (keyword? value)) value
     (symbol? value) (str value)
     (instance? Throwable value) (public-value (value/redact (value/error-map value)))

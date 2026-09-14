@@ -99,7 +99,10 @@
       (let [code (or (field remote-error :code) "remote-error")
             message (or (field remote-error :message) "RPC request failed")
             data (field remote-error :data)
-            failure (error code message {:remote data :request-id id})]
+            failure (error code message
+                           {:remote data
+                            :request-id id
+                            :unknown-outcome? (boolean (field data :unknown-outcome?))})]
         (when (= method "initialize")
           (swap! (:state client) assoc :failure failure))
         (reject! deferred failure))

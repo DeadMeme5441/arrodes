@@ -160,15 +160,46 @@
                requests
                (conj (vec requests) request))))))
 
+(defn- remove-host-overlay [overlay id]
+  (when overlay
+    (let [previous (remove-host-overlay (:return-overlay overlay) id)]
+      (if (= id (:host-id overlay))
+        previous
+        (cond-> overlay
+          (contains? overlay :return-overlay) (assoc :return-overlay previous))))))
+
 (defn- host-cancelled! [app id reason]
   (swap! (:state app)
          (fn [state]
            (-> state
                (update :host-requests
                        #(filterv (fn [request] (not= id (:id request))) %))
+               (update-in [:ui :overlay] remove-host-overlay id)
                (assoc :notice {:kind :info
                                :message (str "Host interaction cancelled"
                                              (when reason (str ": " reason)))})))))
+
+(defn- update-widget! [app request]
+  (let [sid (value-field request :session-id)
+        id (value-field request :id)
+        remove? (boolean (value-field request :remove?))]
+    (when-not (and (string? sid) (not (str/blank? sid)))
+      (throw (error "invalid-widget-session" "Widget request requires a session id" {})))
+    (when-not (and (string? id) (not (str/blank? id)))
+      (throw (error "invalid-widget" "Widget request requires a non-empty id" {})))
+    (swap! (:state app)
+           (fn [state]
+             (if remove?
+               (let [widgets (dissoc (get-in state [:widgets-by-session sid] {}) id)]
+                 (if (seq widgets)
+                   (assoc-in state [:widgets-by-session sid] widgets)
+                   (update state :widgets-by-session dissoc sid)))
+               (assoc-in state [:widgets-by-session sid id]
+                         {:id id
+                          :placement (keyword (or (value-field request :placement) :status))
+                          :content (or (value-field request :content) "")
+                          :order (or (value-field request :order) 0)}))))
+    {:widget-id id :visible? (not remove?)}))
 
 (defn- replay-pages! [app sid after events through]
   (if (>= after through)
@@ -187,8 +218,14 @@
 (defn- hydrate-session!
   ([app sid] (hydrate-session! app sid false))
   ([app sid switching?]
-   (let [token (str (js/Date.now) "-" (rand-int 1000000))]
-     (swap! (:state app) assoc :hydrating {:token token :session-id sid :events []})
+   (let [token (str (js/Date.now) "-" (rand-int 1000000))
+         navigation (if switching?
+                      (inc (or (:navigation-generation @(:state app)) 0))
+                      (or (:navigation-generation @(:state app)) 0))]
+     (swap! (:state app)
+            (fn [state]
+              (cond-> (assoc state :hydrating {:token token :session-id sid :events []})
+                switching? (assoc :navigation-generation navigation))))
      (-> (call! app "session.view" {:session-id sid})
          (.then
           (fn [wire-snapshot]
@@ -199,7 +236,8 @@
                    (fn [replayed]
                      (swap! (:state app)
                             (fn [state]
-                              (if (= token (get-in state [:hydrating :token]))
+                              (if (and (= token (get-in state [:hydrating :token]))
+                                       (= navigation (:navigation-generation state)))
                                 (let [buffered (get-in state [:hydrating :events])
                                       boundary (last (keep-indexed
                                                       (fn [index event]
@@ -229,10 +267,18 @@
           (fn [hydrate-error]
             (swap! (:state app)
                    (fn [state]
-                     (if (= token (get-in state [:hydrating :token]))
+                     (if (and (= token (get-in state [:hydrating :token]))
+                              (= navigation (:navigation-generation state)))
                        (assoc state :hydrating nil)
                        state)))
             (throw hydrate-error)))))))
+
+(defn- refresh-owned-session! [app sid navigation]
+  (let [state @(:state app)]
+    (if (and (= sid (session-id-from state))
+             (= navigation (:navigation-generation state)))
+      (hydrate-session! app sid false)
+      (resolved (:view state)))))
 
 (defn- load-sessions! [app]
   (-> (call! app "session.list" {})
@@ -352,7 +398,7 @@
     :else
     (let [preferred-session-id (when reconnect? (session-id-from @(:state app)))
           _ (swap! (:state app) assoc :connection {:status :starting}
-                   :host-requests [] :hydrating nil :notice nil)
+                   :host-requests [] :widgets-by-session {} :hydrating nil :notice nil)
           before (-> (resolved nil)
                      (.then (fn [_]
                               (if-let [client @(:client app)]
@@ -422,6 +468,8 @@
           :models []
           :history nil
           :history-by-session {}
+          :widgets-by-session {}
+          :navigation-generation 0
           :ui {:draft "" :drafts {} :session-ui {} :attachments []
                :overlay nil :selected nil :inspect-tab :summary
                :focus :composer :follow? true}
@@ -482,16 +530,24 @@
 (defn- clear-confirmed-submission! [app sid text attachments]
   (swap! (:state app)
          (fn [state]
-           (if (= sid (session-id-from state))
+           (let [active? (= sid (session-id-from state))]
              (cond-> state
-               (= text (get-in state [:ui :draft]))
-               (-> (assoc-in [:ui :draft] "")
-                   (assoc-in [:ui :drafts sid] ""))
-               (= attachments (get-in state [:ui :attachments]))
-               (assoc-in [:ui :attachments] []))
-             state))))
+               (= text (get-in state [:ui :drafts sid]))
+               (assoc-in [:ui :drafts sid] "")
 
-(declare upsert-by-id)
+               (= text (get-in state [:ui :session-ui sid :draft]))
+               (assoc-in [:ui :session-ui sid :draft] "")
+
+               (= attachments (get-in state [:ui :session-ui sid :attachments]))
+               (assoc-in [:ui :session-ui sid :attachments] [])
+
+               (and active? (= text (get-in state [:ui :draft])))
+               (assoc-in [:ui :draft] "")
+
+               (and active? (= attachments (get-in state [:ui :attachments])))
+               (assoc-in [:ui :attachments] []))))))
+
+(declare enrich-pending-by-id)
 
 (defn- submit! [app data]
   (let [state @(:state app)
@@ -533,7 +589,7 @@
                  (clear-confirmed-submission! app sid (or (:draft-text data) text) attachments)
                  (when (and (contains? #{"operation.steer" "operation.follow-up"} method)
                             (= sid (session-id-from @(:state app))))
-                   (swap! (:state app) update-in [:view :queue] upsert-by-id result))
+                   (swap! (:state app) update-in [:view :queue] enrich-pending-by-id result))
                  result))))))))
 
 (defn- switch-session! [app sid]
@@ -676,12 +732,9 @@
                entries)]
           (recur stack traversed matches))))))
 
-(defn- upsert-by-id [items item]
-  (let [id (value-field item :id)
-        found? (some #(= id (value-field % :id)) items)]
-    (if found?
-      (mapv #(if (= id (value-field % :id)) item %) items)
-      (conj (vec items) item))))
+(defn- enrich-pending-by-id [items item]
+  (let [id (value-field item :id)]
+    (mapv #(if (= id (value-field % :id)) (merge % item) %) items)))
 
 (defn- edited-queue-content [content text]
   (when-not (string? text)
@@ -694,7 +747,7 @@
     (let [parts (vec (or content []))
           {:keys [result replaced?]}
           (reduce
-           (fn [{:keys [result replaced?] :as state} part]
+           (fn [{:keys [replaced?] :as state} part]
              (let [type (value-field part :part/type)
                    text-part? (contains? #{:text "text"} type)]
                (cond
@@ -755,7 +808,8 @@
 (defn- perform-command! [app action data]
   (let [state @(:state app)
         sid (session-id-from state)
-        oid (operation-id-from state)]
+        oid (operation-id-from state)
+        navigation (:navigation-generation state)]
     (case action
       :submit (submit! app data)
 
@@ -789,6 +843,7 @@
                                             #(filterv (fn [session]
                                                         (not= target (value-field session :id))) %))
                                     (update :history-by-session dissoc target)
+                                    (update :widgets-by-session dissoc target)
                                     (update-in [:ui :drafts] dissoc target)
                                     (update-in [:ui :session-ui] dissoc target))
                           (= target sid) (assoc-in [:view :session] nil)
@@ -826,7 +881,7 @@
           (.then
            (fn [wire-session]
              (update-session-state! app wire-session)
-             (hydrate-session! app sid false))))
+             (refresh-owned-session! app sid navigation))))
 
       :queue-edit (queue-edit! app data)
       :queue-drop (queue-drop! app data)
@@ -847,6 +902,10 @@
       :attach (resolved (add-attachment! app (:path data)))
       :files (resolved (complete-files app (:query data)))
 
+      :host-widget
+      (resolved (update-widget! app (:request data)))
+
+
       :host-response
       (-> (rpc/host-response! (current-client app) (:id data) (:result data))
           (.then (fn [result] (remove-host-request! app (:id data)) result)))
@@ -863,7 +922,7 @@
 
       :reload
       (-> (mutation! app "session.reload" {:session-id sid})
-          (.then (fn [_] (hydrate-session! app sid false))))
+          (.then (fn [_] (refresh-owned-session! app sid navigation))))
 
       :history
       (-> (call! app "session.tree" {:session-id sid})
@@ -872,9 +931,10 @@
              (let [history (decode wire-result)]
                (swap! (:state app)
                       (fn [state]
-                        (-> state
-                            (assoc :history history)
-                            (assoc-in [:history-by-session sid] history))))
+                        (cond-> (assoc-in state [:history-by-session sid] history)
+                          (and (= sid (session-id-from state))
+                               (= navigation (:navigation-generation state)))
+                          (assoc :history history))))
                history))))
 
       :export
@@ -898,7 +958,7 @@
                      (when @(:closed? app)
                        (throw (error "closed" "TUI application is closed" {})))
                      (perform-command! app action (or data {})))
-           connection (when-not (contains? #{:reconnect :host-response :host-cancel} action)
+           connection (when-not (contains? #{:reconnect :host-response :host-cancel :host-widget} action)
                         @(:connect-promise app))
            promise (if connection (.then connection execute) (execute nil))]
        (.catch promise

@@ -2,6 +2,7 @@
   "TUI regression entry point: real RPC lifecycle followed by native popup rendering."
   (:require [arrodes.tui-app :as app]
             [arrodes.tui-app-test :as app-test]
+            [arrodes.tui-model :as model]
             [arrodes.tui-view :as view]
             [clojure.string :as str]))
 
@@ -86,6 +87,143 @@
       (.then #(walk! application terminal "down" 23))
       (.then #(walk! application terminal "up" 23))))
 
+(defn- inspector-and-host-lifetimes! [application terminal]
+  (let [message {:id "message" :kind :message
+                 :data {:message/role :user :message/content "new selection"}}
+        activity {:id "old" :kind :capability :name "bash" :status :completed
+                  :start-seq 1 :content "old output"
+                  :presentation "custom renderer output"
+                  :result {:id "old-result" :kind :inline
+                           :value "old value" :available? true}}
+        renderer-failed {:id "renderer-failed" :kind :capability :name "bash"
+                         :status :completed :start-seq 2
+                         :content "canonical renderer fallback"
+                         :presentation-error "renderer exploded"}
+        activity-row {:id "activity:old" :kind :activity :activity activity}]
+    (swap! (:state application)
+           (fn [state]
+             (-> state
+                 (assoc :view (assoc (model/empty-state)
+                                     :session {:id "view-session" :name "View session" :cwd (.cwd js/process)}
+                                     :entries [message]
+                                     :activities {"old" activity
+                                                  "renderer-failed" renderer-failed}
+                                     :activity-order ["old" "renderer-failed"]
+                                     :snapshot-cursor 0))
+                 (update :ui merge {:selected "activity:old"
+                                    :inspected-row activity-row
+                                    :inspector? true
+                                    :inspect-tab :value
+                                    :inspection {:result-id "old-result"
+                                                 :descriptor (:result activity)
+                                                 :page {:content "stale artifact" :offset 1}}
+                                    :overlay nil
+                                    :focus :transcript
+                                    :follow? false}))))
+    (.focus (node terminal "conversation"))
+    (-> (until! terminal
+                #(let [frame (.captureCharFrame terminal)]
+                   (and (str/includes? frame "custom renderer output")
+                        (str/includes? frame "canonical renderer fallback")
+                        (str/includes? frame "Renderer error")
+                        (str/includes? frame "done")))
+                "Custom presentation or its non-fatal renderer error was not visible")
+        (.then (fn [_] (.pressArrow (.-mockInput terminal) "up")))
+        (.then (fn [_]
+                 (until! terminal
+                         #(and (= "message:message" (get-in @(:state application) [:ui :selected]))
+                               (nil? (get-in @(:state application) [:ui :inspection])))
+                         "Selecting a message retained the prior result descriptor")))
+        (.then
+         (fn [_]
+           (app/command! application :host-widget
+                         {:request {:kind :widget :session-id "view-session"
+                                    :id "widget" :placement :header
+                                    :content "extension widget"}})))
+        (.then
+         (fn [_]
+           (until! terminal
+                   #(and (.-visible (node terminal "session-widgets"))
+                         (str/includes? (.captureCharFrame terminal) "extension widget"))
+                   "Session widget was not rendered by the native view")))
+        (.then
+         (fn [_]
+           (app/command! application :host-widget
+                         {:request {:kind :set-widget :session-id "view-session"
+                                    :id "widget" :remove? true}})))
+        (.then
+         (fn [_]
+           (until! terminal #(not (.-visible (node terminal "session-widgets")))
+                   "Removed session widget remained visible")))
+        (.then
+         (fn [_]
+           (swap! (:state application) assoc
+                  :host-requests [{:id "render-request"
+                                   :request {:kind :render :session-id "view-session"
+                                             :title "Rendered output"
+                                             :content ["first rendered line" "second rendered line"]}}])))
+        (.then
+         (fn [_]
+           (until! terminal
+                   #(and (= :render (get-in @(:state application) [:ui :overlay :kind]))
+                         (str/includes? (.captureCharFrame terminal) "first rendered line"))
+                   "Render reverse request did not use the native overlay")))
+        (.then
+         (fn [_]
+           (swap! (:state application)
+                  #(-> %
+                       (assoc :host-requests [{:id "editor-request"
+                                              :request {:kind :editor :session-id "view-session"
+                                                        :title "Edit value" :initial "editable"}}])
+                       (assoc-in [:ui :overlay] nil)))))
+        (.then
+         (fn [_]
+           (until! terminal
+                   #(and (= "editor-request" (get-in @(:state application) [:ui :overlay :host-id]))
+                         (= "editable" (.-plainText (node terminal "dialog-input"))))
+                   "Editor reverse request did not open the native multiline input")))
+        (.then
+         (fn [_]
+           (swap! (:state application)
+                  #(-> %
+                       (assoc :host-requests [])
+                       (assoc-in [:ui :overlay]
+                                 {:kind :commands :token "return"
+                                  :query "" :index 0 :title "Return overlay"})))))
+        (.then
+         (fn [_]
+           (swap! (:state application) assoc
+                  :host-requests [{:id "cancelled-input"
+                                   :request {:kind :input :session-id "view-session"
+                                             :title "Cancelled input"}}])))
+        (.then
+         (fn [_]
+           (until! terminal
+                   #(= "cancelled-input" (get-in @(:state application) [:ui :overlay :host-id]))
+                   "Host input did not open")))
+        (.then
+         (fn [_]
+           (swap! (:state application) assoc
+                  :host-requests [{:id "next-confirm"
+                                   :request {:kind :confirm :session-id "view-session"
+                                             :title "Next confirmation"}}])))
+        (.then
+         (fn [_]
+           (until! terminal
+                   #(and (= "next-confirm" (get-in @(:state application) [:ui :overlay :host-id]))
+                         (nil? (get-in @(:state application)
+                                       [:ui :overlay :return-overlay :host-id])))
+                   "Cancelled input survived as the next request's return overlay")))
+        (.then
+         (fn [_]
+           (swap! (:state application) assoc :host-requests [])))
+        (.then
+         (fn [_]
+           (until! terminal
+                   #(and (= :commands (get-in @(:state application) [:ui :overlay :kind]))
+                         (nil? (get-in @(:state application) [:ui :overlay :host-id])))
+                   "Cancelled reverse-request overlay remained active"))))))
+
 (defn- exercise! [terminal]
   (let [application (app/create! {:runtime-root (.cwd js/process) :cwd (.cwd js/process)})
         mounted (view/mount! application (.-renderer terminal) {})]
@@ -130,7 +268,10 @@
         (.then #(walk! application terminal "down" 23))
         (.then #(walk! application terminal "up" 23))
         (.then #(menu! application terminal :choices))
-        (.then (fn [] (println "Popup scrolling passed: commands, sessions, models, history, files, pending, wrapped choices, resize and filtering.")))
+        (.then (fn [_]
+                 (.resize terminal 120 40)
+                 (inspector-and-host-lifetimes! application terminal)))
+        (.then (fn [] (println "Native TUI passed: popup layout, inspector selection ownership, session widgets, render/editor requests and cancelled overlay cleanup.")))
         (.finally (fn []
                     (view/destroy! mounted)
                     (.destroy (.-renderer terminal))

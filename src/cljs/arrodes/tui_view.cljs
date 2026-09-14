@@ -8,7 +8,7 @@
 
 (declare refresh! schedule! open-overlay! close-overlay! choose-overlay! commands
          inspect! submit! follow! focus! close-inspector! request-inspection! quit! file-query! escape!)
-(declare render-overlay! destroy!)
+(declare render-overlay! render-widgets! destroy!)
 
 (defn- state [view] @(:state (:app view)))
 (defn- ui! [view f & args] (apply swap! (:state (:app view)) update :ui f args))
@@ -29,7 +29,8 @@
   (or (last (remove str/blank? (str/split (str (or path "")) #"[/\\]"))) "project"))
 (defn- row-list [view]
   (let [m (:view (state view))
-        source (select-keys m [:entries :activities :activity-order :streams :operation :snapshot-cursor])]
+        source (select-keys m [:entries :activities :activity-order :presentations
+                               :streams :operation :snapshot-cursor])]
     (if (= source (:model-source @(:local view)))
       (:rows @(:local view))
       (let [rows (model/rows m)]
@@ -236,6 +237,14 @@
     (ui! view assoc :overlay previous :focus :composer)
     (if previous (render-overlay! view) (.focus (:composer view)))))
 
+(defn- reconcile-host-overlays [overlay pending]
+  (when overlay
+    (let [previous (reconcile-host-overlays (:return-overlay overlay) pending)]
+      (if (and (:host-id overlay) (not (contains? pending (:host-id overlay))))
+        previous
+        (cond-> overlay
+          (contains? overlay :return-overlay) (assoc :return-overlay previous))))))
+
 (defn- file-query! [view query]
   (when-let [timer (:file-query-timer @(:local view))] (js/clearTimeout timer))
   (swap! (:local view) assoc :file-query-timer
@@ -385,7 +394,8 @@
       (let [a (present/activity row)
             text (or (present/inline-content row expanded) "")
             user? (= :user (:role row))
-            color (cond (present/failed? a) (:error w/colors)
+            color (cond (:error? row) (:error w/colors)
+                        (present/failed? a) (:error w/colors)
                         (= :running (:status a)) (:accent w/colors)
                         :else (:muted w/colors))]
         (set! (.-backgroundColor (:root record))
@@ -462,21 +472,30 @@
     (ui! view assoc-in [:inspection :loading?] true)
     (-> (invoke! view :artifact {:artifact-id artifact-id :offset offset :limit 12000})
         (.then (fn [page]
-                 (when (= selection (get-in (state view) [:ui :selected]))
+                 (when (and (= selection (get-in (state view) [:ui :selected]))
+                            (= artifact-id (get-in (state view) [:ui :inspection :descriptor :artifact-id])))
                    (ui! view update :inspection assoc :page page :loading? false))))
-        (.catch (fn [_] (ui! view assoc-in [:inspection :loading?] false))))))
+        (.catch (fn [_]
+                  (when (and (= selection (get-in (state view) [:ui :selected]))
+                             (= artifact-id (get-in (state view) [:ui :inspection :descriptor :artifact-id])))
+                    (ui! view assoc-in [:inspection :loading?] false)))))))
 
 (defn- request-inspection! [view row]
-  (when-let [id (model/field (:result (present/activity row)) :id)]
-    (let [selection (:id row)]
-      (ui! view assoc :inspection {:result-id id :loading? true})
+  (let [selection (:id row)
+        id (model/field (:result (present/activity row)) :id)]
+    (ui! view assoc :inspection (when id {:selection-id selection :result-id id :loading? true}))
+    (when id
       (-> (invoke! view :result {:result-id id})
           (.then (fn [descriptor]
-                   (when (= selection (get-in (state view) [:ui :selected]))
+                   (when (and (= selection (get-in (state view) [:ui :selected]))
+                              (= id (get-in (state view) [:ui :inspection :result-id])))
                      (ui! view update :inspection assoc :descriptor descriptor :loading? false)
                      (when-let [artifact-id (model/field descriptor :artifact-id)]
                        (load-artifact-page! view artifact-id 1)))))
-          (.catch (fn [_] (ui! view assoc-in [:inspection :loading?] false)))))))
+          (.catch (fn [_]
+                    (when (and (= selection (get-in (state view) [:ui :selected]))
+                               (= id (get-in (state view) [:ui :inspection :result-id])))
+                      (ui! view assoc-in [:inspection :loading?] false))))))))
 
 (defn- branch! [view row]
   (when-let [entry-id (:entry-id row)]
@@ -639,10 +658,30 @@
 
 (defn- respond-host! [view id result cancel?]
   (swap! (:local view) assoc :handled-host id)
-  (fire! view (if cancel? :host-cancel :host-response) (if cancel? {:id id} {:id id :result result}))
+  (fire! view (if cancel? :host-cancel :host-response)
+         (if cancel? {:id id} {:id id :result result}))
   (close-overlay! view))
 
+(defn- display-content [content]
+  (model/safe-text
+   (if (sequential? content)
+     (str/join "\n" (map #(if (string? %) % (model/text-content %)) content))
+     (model/text-content content))))
+
+(defn- complete-widget! [view id request]
+  (swap! (:local view) assoc :handled-host id)
+  (-> (invoke! view :host-widget {:request request})
+      (.then #(fire! view :host-response {:id id :result %}))
+      (.catch (fn [failure]
+                (notify! view (error-text failure) :error)
+                (fire! view :host-cancel {:id id})))))
+
 (defn- render-host-request! [view]
+  (let [pending (set (map :id (:host-requests (state view))))
+        overlay (get-in (state view) [:ui :overlay])
+        reconciled (reconcile-host-overlays overlay pending)]
+    (when (not= overlay reconciled)
+      (ui! view assoc :overlay reconciled)))
   (let [s (state view)
         envelope (first (:host-requests s))
         request (or (:request envelope) envelope)
@@ -658,22 +697,45 @@
           (do (notify! view (or (:message request) (:url request) (present/pretty (dissoc request :kind))))
               (swap! (:local view) assoc :handled-host id)
               (fire! view :host-response {:id id :result nil}))
-          :input
-          (open-overlay! view {:kind :input :host-id id :title title :query "" :secret? (:secret? request)
+
+          (:widget :set-widget)
+          (complete-widget! view id request)
+
+          :render
+          (let [previous (get-in s [:ui :overlay])]
+            (swap! (:local view) assoc :handled-host id)
+            (open-overlay! view {:kind :render :title title
+                                 :body (display-content (:content request))
+                                 :return-overlay previous})
+            (fire! view :host-response {:id id :result nil}))
+
+          (:input :editor)
+          (open-overlay! view {:kind :input :host-id id :title title
+                               :query (if (= :editor kind)
+                                        (or (:content request) (:initial request) "")
+                                        "")
+                               :secret? (:secret? request)
                                :hint (when (map? (:prompt request)) (present/pretty (:prompt request)))
                                :on-submit #(respond-host! view id % false)})
+
           :confirm
           (open-overlay! view {:kind :confirm :host-id id :title title
                                :hint (or (:message request) (present/pretty (dissoc request :kind :timeout-ms)))
                                :items [{:label "No" :description "Decline" :choose #(respond-host! view id false false)}
                                        {:label "Yes" :description "Approve the displayed request" :choose #(respond-host! view id true false)}]})
+
           :select
           (open-overlay! view {:kind :choices :host-id id :title title :query ""
                                :items (conj (mapv (fn [item]
                                                    {:label (if (map? item) (or (:label item) (:name item) (str (:value item))) (str item))
-                                                    :description ""
-                                                    :choose #(respond-host! view id (if (map? item) (or (:value item) (:id item) (:label item)) item) false)})
-                                                 (:options request)) cancel)})
+                                                    :description (or (:description item) "")
+                                                    :choose #(respond-host! view id
+                                                                             (if (and (map? item) (contains? item :value))
+                                                                               (:value item)
+                                                                               (if (map? item) (or (:id item) (:label item)) item))
+                                                                             false)})
+                                                 (or (:items request) (:options request))) cancel)})
+
           (open-overlay! view {:kind :confirm :host-id id :title "Unsupported host capability"
                                :hint (str "No frontend implementation is registered for " (:name request)
                                           ". The core request is not approved or executed by this UI.")
@@ -833,6 +895,23 @@
             :else false)]
       (when handled (w/consume! event)))))
 
+(defn- active-widgets [state]
+  (let [sid (get-in state [:view :session :id])]
+    (sort-by (juxt #(or (:order %) 0) :id)
+             (vals (get-in state [:widgets-by-session sid] {})))))
+
+(defn- render-widgets! [view]
+  (let [widgets (remove #(= :status (:placement %)) (active-widgets (state view)))
+        signature (vec widgets)]
+    (set! (.-visible (:widget-box view)) (boolean (seq widgets)))
+    (when (not= signature (:widget-signature @(:local view)))
+      (swap! (:local view) assoc :widget-signature signature)
+      (w/clear! (:widget-items view))
+      (doseq [widget widgets]
+        (.add (:widget-items view)
+              (w/text (:renderer view) (display-content (:content widget))
+                      {:width "100%" :maxHeight 3 :fg (:muted w/colors)}))))))
+
 (defn- render-chrome! [view]
   (let [s (state view) renderer (:renderer view)
         width (.-terminalWidth renderer) height (.-terminalHeight renderer)
@@ -852,6 +931,11 @@
                     (= :cancelled (:status operation)) "Cancelled"
                     (= :interrupted (:status operation)) "Interrupted"
                     :else "Idle")
+        status-widgets (->> (active-widgets s)
+                            (filter #(= :status (:placement %)))
+                            (map #(-> (display-content (:content %))
+                                      (str/replace #"\s+" " ")))
+                            (remove str/blank?))
         notice (:notice s)
         notice-text (if (map? notice)
                       (str (when (:unknown-outcome? notice) "Outcome unknown; inspect before resubmitting. ")
@@ -863,7 +947,8 @@
     (set! (.-visible (:header-commands view)) (>= width 55))
     (w/content! (:footer-status view)
                 (str (or (:model config) "Core") " / "
-                     (name (keyword (or (:thinking config) "high"))) "   " phase))
+                     (name (keyword (or (:thinking config) "high"))) "   " phase
+                     (when (seq status-widgets) (str " · " (str/join " · " status-widgets)))))
     (set! (.-fg (:footer-status view))
           (if (contains? #{:disconnected :closing} connection) (:error w/colors) (:accent w/colors)))
     (w/content! (:footer-keys view)
@@ -909,6 +994,7 @@
       (render-rows! view)
       (render-pending! view)
       (render-attachments! view)
+      (render-widgets! view)
       (render-inspector! view)
       (render-host-request! view)
       (render-overlay! view)
@@ -1041,6 +1127,10 @@
         pending-more (w/button renderer "" (fn [] (open-overlay! @view-ref {:kind :pending :title "Pending messages" :query ""
                                                                            :hint "Enter edits; Delete drops a still-pending message."}))
                                {:visible false :height 1 :fg (:muted w/colors)})
+        widget-box (w/box renderer {:id "session-widgets" :visible false :width "100%"
+                                    :maxHeight 6 :paddingX 2 :border ["top"]
+                                    :borderColor (:border w/colors)})
+        widget-items (w/box renderer {:width "100%"})
         notice-box (w/box renderer {:visible false :height 1 :width "100%" :paddingX 2 :flexDirection "row"})
         notice-text (w/text renderer "" {:height 1 :flexGrow 1 :flexShrink 1 :truncate true :wrapMode "none"})
         notice-detail (w/button renderer "[Details]"
@@ -1118,6 +1208,7 @@
               :inspector-prev inspector-prev
               :inspector-branch inspector-branch :inspector-lifetime inspector-lifetime
               :pending pending :pending-items pending-items :pending-more pending-more :new-activity new-activity
+              :widget-box widget-box :widget-items widget-items
               :notice-box notice-box :notice-text notice-text :composer-box composer-box :composer composer
               :attachment-row attachment-row :attachment-items attachment-items :footer-status footer-status :footer-keys footer-keys
               :modal-shade modal-shade :modal modal :modal-title modal-title :modal-hint modal-hint
@@ -1136,6 +1227,7 @@
     (w/add! inspector inspector-header inspector-tab-row inspector-scroll inspector-actions inspector-lifetime)
     (w/add! body conversation inspector)
     (w/add! pending pending-title pending-items pending-more)
+    (w/add! widget-box widget-items)
     (w/add! notice-box notice-text notice-detail notice-close)
     (w/add! attachment-row attach-button attachment-items)
     (w/add! composer-box composer attachment-row)
@@ -1143,7 +1235,7 @@
     (w/add! modal-header modal-title modal-close)
     (w/add! modal modal-header modal-hint modal-input modal-list modal-footer)
     (w/add! modal-shade modal)
-    (w/add! root header body new-activity pending notice-box composer-box footer modal-shade)
+    (w/add! root header body new-activity pending widget-box notice-box composer-box footer modal-shade)
     (.add (.-root renderer) root)
     (swap! local assoc :key-handler key-handler :frame-handler frame-handler :resize-handler resize-handler
            :pulse-timer (js/setInterval (fn [] (when (busy? view) (schedule! view))) 1000))

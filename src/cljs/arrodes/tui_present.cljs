@@ -50,6 +50,7 @@
     :read-group (str "Read " (count (:activities row)) " files")
     :activity (model/activity-title (:activity row))
     :reasoning "Reasoning"
+    :presentation "Extension"
     :message (case (:role row) :user "YOU" :assistant "ARRODES" "CONTEXT")
     "Execution"))
 
@@ -74,21 +75,34 @@
   (let [details (:details a)
         value (model/field (:result a) :value)
         stdout (or (model/field details :stdout) (model/field value :stdout))
-        stderr (or (model/field details :stderr) (model/field value :stderr))]
-    (if (or (some? stdout) (some? stderr))
-      (str "STDOUT\n" (if (seq stdout) stdout "No output")
-           "\n\nSTDERR\n" (if (seq stderr) stderr "No output")
-           (when-some [exit (exit-code a)] (str "\n\nExit status: " exit)))
-      (or (not-empty (model/text-content (:content a)))
-          (not-empty (:output a))
-          (when (= :running (:status a)) "Waiting for output...")
-          "No textual output recorded."))))
+        stderr (or (model/field details :stderr) (model/field value :stderr))
+        canonical (if (or (some? stdout) (some? stderr))
+                    (str "STDOUT\n" (if (seq stdout) stdout "No output")
+                         "\n\nSTDERR\n" (if (seq stderr) stderr "No output")
+                         (when-some [exit (exit-code a)] (str "\n\nExit status: " exit)))
+                    (or (not-empty (model/text-content (:content a)))
+                        (not-empty (:output a))
+                        (when (= :running (:status a)) "Waiting for output...")
+                        "No textual output recorded."))
+        presentation (not-empty (:presentation a))
+        renderer-error (not-empty (:presentation-error a))
+        content (cond
+                  renderer-error canonical
+                  presentation
+                  (if (or (failed? a) (contains? #{:interrupted :cancelled} (:status a)))
+                    (str presentation "\n\n" (str/upper-case (status-label a)) "\n" canonical)
+                    presentation)
+                  :else canonical)]
+    (str content
+         (when renderer-error
+           (str "\n\nRenderer error (canonical result preserved): " renderer-error)))))
 
 (defn inline-content [row expanded?]
   (let [a (activity row)
         diff (recorded-diff a)]
     (case (:kind row)
       :message (:text row)
+      :presentation (:text row)
       :reasoning (when expanded? (:text row))
       :read-group (when expanded?
                     (str/join "\n" (map #(str (model/activity-title %) "  " (status-label %)) (:activities row))))
@@ -98,8 +112,10 @@
                             (if expanded? 40 7))
         (or expanded? (failed? a) (= :evaluation (:kind a))
             (contains? #{"bash" "powershell"} (:name a)))
-        (lines-preview (or (not-empty (model/text-content (:content a)))
-                           (not-empty (:output a)) "")
+        (lines-preview (if (or (:presentation a) (:presentation-error a))
+                         (output-text a)
+                         (or (not-empty (model/text-content (:content a)))
+                             (not-empty (:output a)) ""))
                        (if expanded? 40 5))
         :else nil)
       nil)))

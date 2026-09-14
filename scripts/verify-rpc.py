@@ -2,6 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 import tempfile
+import sys
 
 
 async def main():
@@ -14,6 +15,13 @@ async def main():
 (fn [api]
   (println "INIT_DIAGNOSTIC")
   ((:register-command! api) {:name "noisy" :fn (fn [_] (println "COMMAND_DIAGNOSTIC") :ok)})
+  ((:register-renderer! api)
+   {:name "evaluation/completed"
+    :fn (fn [event] (str "Evaluation " (if (get-in event [:data :error?]) "failed" "completed")))})
+  ((:register-ui! api) {:name "probe-status" :kind :widget :placement :status :content "Extension active"})
+  ((:register-command! api)
+   {:name "unserializable"
+    :fn (fn [_] {(proxy [Object] [] (toString [] (throw (Exception. "private detail")))) true})})
   ((:register-command! api)
    {:name "slow" :fn (fn [_]
                        (println "SLOW_STARTED")
@@ -26,13 +34,15 @@ async def main():
                        :done)})
   nil)
 ''')
+        command = sys.argv[1:] or ["clojure", "-Srepro", "-M:host"]
         process = await asyncio.create_subprocess_exec(
-            "clojure", "-Srepro", "-M:host",
+            *command,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE)
         diagnostics = []
         events = []
         slow_started = asyncio.Event()
+        widgets = {}
         count = 0
 
         async def collect_diagnostics():
@@ -63,9 +73,19 @@ async def main():
                 if packet.get("type") == "event":
                     events.append(packet["event"])
                 elif packet.get("type") == "host-request":
-                    assert host is not None, packet
-                    await send({"type": "host-response", "id": packet["id"],
-                                "result": host(packet["request"])})
+                    host_request = packet["request"]
+                    if host_request["kind"] in ("widget", "set-widget"):
+                        key = (host_request["session-id"], host_request["id"])
+                        if host_request.get("remove?"):
+                            widgets.pop(key, None)
+                        else:
+                            widgets[key] = host_request["content"]
+                        result = {"widget-id": host_request["id"],
+                                  "visible?": not host_request.get("remove?", False)}
+                    else:
+                        assert host is not None, packet
+                        result = host(host_request)
+                    await send({"type": "host-response", "id": packet["id"], "result": result})
                 elif packet.get("type") == "response" and packet.get("id") == identifier:
                     return packet
                 else:
@@ -97,6 +117,25 @@ async def main():
             assert evaluated["error?"] is False, evaluated
             assert evaluated["result"]["value"] == 42, evaluated
             assert "EVAL_CAPTURE" in evaluated["content"], evaluated
+            assert widgets[(sid, "probe-status")] == "Extension active", widgets
+            completed = [event for event in events if event["type"] == "evaluation/completed"]
+            assert completed[-1]["presentation"]["content"] == "Evaluation completed", completed
+            encoding_error = await request("session.command",
+                                           {"session-id": sid, "name": "unserializable"},
+                                           error="serialization-error")
+            assert encoding_error["data"]["unknown-outcome?"] is True, encoding_error
+            await request("runtime.inspect")
+            numbers = await request("session.evaluate", {"session-id": sid,
+                                    "source": "[Double/NaN Double/POSITIVE_INFINITY Double/NEGATIVE_INFINITY]"})
+            assert numbers["error?"] is False, numbers
+            assert numbers["result"]["value"] == [
+                {"type": "number", "encoding": "edn", "value": text}
+                for text in ("##NaN", "##Inf", "##-Inf")], numbers
+            descriptor = await request("result.inspect",
+                                       {"session-id": sid, "result-id": numbers["result"]["id"]})
+            assert descriptor["value-edn"] == "[##NaN ##Inf ##-Inf]", descriptor
+            snapshot = await request("session.view", {"session-id": sid})
+            assert snapshot["entries"][-1]["kind"] == "evaluation", snapshot
             await request("session.command", {"session-id": sid, "name": "noisy"})
 
             code = '''(defn add_values [{:keys [values]}] (reduce + values))
@@ -136,6 +175,11 @@ async def main():
             replay = await request("event.replay", {"after": 0})
             sequences = [event["seq"] for event in replay["events"]]
             assert sequences == sorted(set(sequences)), replay
+            assert any(event.get("presentation", {}).get("content") == "Evaluation completed"
+                       for event in replay["events"]), replay
+            assert any(event["type"] == "evaluation/completed"
+                       and event["data"]["result"]["id"] == numbers["result"]["id"]
+                       for event in replay["events"]), replay
             await request("session.reload", {"session-id": sid})
             reset = await request("session.evaluate", {"session-id": sid, "source": "(resolve 'n)"})
             assert reset["error?"] is False and reset["result"].get("value") is None, reset
