@@ -6,6 +6,20 @@ Arrodes is open source under the [MIT license](LICENSE). It runs trusted local c
 
 ## Install
 
+Install the latest release on macOS or glibc-based Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DeadMeme5441/arrodes/main/install.sh | sh
+```
+
+The installer detects your OS and architecture, verifies the SHA-256 checksum, and installs to `~/.local/bin/arrodes`. No sudo, language runtimes, or package managers required. Run the same command to update.
+
+If `~/.local/bin` is not on your `PATH`, the installer prints the command to add it. Then run `arrodes` inside a project to begin setup.
+
+Prefer to inspect scripts before running them? [Read the installer](install.sh), or use the manual downloads below.
+
+### Manual download
+
 Download the executable for your system and its matching `.sha256` file from [Releases](https://github.com/DeadMeme5441/arrodes/releases/latest).
 
 | System | Executable |
@@ -19,7 +33,7 @@ The executable is self-contained. End users do not need to install a language ru
 
 Windows support is experimental and is not included in this release.
 
-### macOS
+#### macOS
 
 Verify before renaming or moving the file:
 
@@ -34,7 +48,7 @@ Use the `x64` filename on an Intel Mac. Ensure `~/.local/bin` is on `PATH`.
 
 The macOS binaries are not Developer ID signed or notarized. After verifying the checksum, the first launch may require **System Settings → Privacy & Security → Open Anyway**. Only approve an artifact obtained from the release you trust.
 
-### Linux
+#### Linux
 
 ```sh
 sha256sum -c arrodes-linux-x64.sha256

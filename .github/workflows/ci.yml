@@ -56,6 +56,8 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Check repository privacy
         run: python scripts/check-private.py
+      - name: Verify release installer
+        run: python scripts/verify-install.py
       - name: Check behavioral invariants
         run: clojure -Srepro -M:test
       - name: Verify native TUI and controller
