@@ -528,7 +528,19 @@
                            :allow-closing? true})
                 (js/Promise.reject (error "not-ready" "RPC process did not finish startup" {})))]
           (-> shutdown
-              (.then (fn [_] (force-stop! client child exit))
+              (.then (fn [_]
+                       (let [timer (atom nil)
+                             elapsed (js/Promise.
+                                      (fn [resolve _]
+                                        (reset! timer
+                                                (js/setTimeout #(resolve ::elapsed)
+                                                               (or (get-in client [:options :shutdown-timeout-ms])
+                                                                   default-shutdown-timeout-ms)))))]
+                         (-> (js/Promise.race #js [(:promise exit) elapsed])
+                             (.then #(if (= ::elapsed %)
+                                       (force-stop! client child exit)
+                                       %))
+                             (.finally #(js/clearTimeout @timer)))))
                      (fn [_] (force-stop! client child exit)))
               (.then (fn [details]
                        (status! client :closed details)

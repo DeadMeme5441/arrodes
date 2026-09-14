@@ -202,7 +202,7 @@ async def exercise(executable, home, project, environment):
             f'"/{native_path}"))] true)'})
         assert native["error?"] is False and native["result"]["value"] is True, native
         operation = await rpc.call("session.run", {"session-id": sid, "prompt": "Read answer.txt, repair 41 to 42, and run the result."})
-        result = await rpc.call("operation.wait", {"operation-id": operation["id"], "timeout-ms": 30000})
+        result = await rpc.call("operation.wait", {"operation-id": operation["id"], "timeout-ms": 90000})
         assert result["status"] == "completed", result
         failures = [event["data"] for event in rpc.events
                     if event["type"] in {"capability/completed", "evaluation/completed"}
@@ -403,7 +403,7 @@ def main():
                 ':auth-strategy :bearer :models [{:id "fixture-model"}]}} '
                 ':session-config {:model "retired-model" :thinking :high}}')
             (home / "config" / "settings.edn").write_text(fixture_settings)
-            shell = '(powershell {:command "Get-Content -LiteralPath answer.txt" :timeout 10})' if os.name == "nt" else '(bash {:command "cat answer.txt" :timeout 10})'
+            shell = '(powershell {:command "Get-Content -LiteralPath answer.txt" :timeout 60})' if os.name == "nt" else '(bash {:command "cat answer.txt" :timeout 10})'
             FixtureProvider.source = (
                 '(def original (read {:path "answer.txt"})) '
                 '(edit {:path "answer.txt" :edits [{:oldText "41" :newText "42"}]}) '

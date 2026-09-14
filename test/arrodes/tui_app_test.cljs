@@ -1,6 +1,7 @@
 (ns arrodes.tui-app-test
   "Actual JVM regressions for commands issued during connection changes."
-  (:require [arrodes.tui-app :as app]))
+  (:require [arrodes.tui-app :as app]
+            [arrodes.tui-rpc :as rpc]))
 
 (def ^:private fs (js/require "node:fs"))
 (def ^:private path (js/require "node:path"))
@@ -254,6 +255,35 @@
                  (.then (fn [_] (queue-receipt! application)))
                  (.then (fn [_] (acknowledgement! application a b))))))))))
 
+(defn- graceful-close! []
+  (let [source "process.on('SIGTERM', () => process.exit(99));
+process.stdout.write(JSON.stringify({type:'hello', protocol:1}) + '\\n');
+let pending = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => {
+  pending += chunk;
+  const lines = pending.split('\\n'); pending = lines.pop();
+  for (const line of lines) {
+    if (!line) continue;
+    const request = JSON.parse(line);
+    process.stdout.write(JSON.stringify({type:'response', id:request.id, result:{}}) + '\\n');
+    if (request.method === 'shutdown') {
+      process.stdin.pause();
+      setTimeout(() => process.exit(0), 500);
+    }
+  }
+});"
+        client (rpc/create! {:command [(.-execPath js/process) "-e" source]
+                             :initialize {} :shutdown-timeout-ms 2000})]
+    (-> (rpc/start! client)
+        (.then (fn [_] (rpc/close! client)))
+        (.then (fn [report]
+                 (check! (= 0 (get-in report [:process :code]))
+                         "A successful shutdown acknowledgement must allow natural process exit")
+                 (check! (nil? (get-in report [:process :signal]))
+                         "Graceful shutdown must not signal the owned process")))
+        (.finally (fn [] (rpc/close! client))))))
+
 (defn exercise! []
   (let [temporary (.mkdtempSync fs (.join path (.tmpdir os) "arrodes-client-test-"))
         script (.join path temporary "host.clj")
@@ -290,6 +320,7 @@
                  (check! (not= :error (get-in @(:state contender) [:notice :kind]))
                          "Successful reconnect must remove the stale connection error")))
         (.then (fn [_] (controller-interleavings! contender)))
+        (.then (fn [_] (graceful-close!)))
         (.then (fn [_]
                  (println "RPC/controller passed: startup recovery, navigation-owned refresh, delivered queue reconciliation and acknowledged draft ownership.")))
         (.finally (fn []
