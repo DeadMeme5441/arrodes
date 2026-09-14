@@ -14,7 +14,9 @@
       (with-open [body (.getRequestBody exchange)]
         (slurp body))
       (swap! requests conj {:path (-> exchange .getRequestURI .getPath)
-                            :method (.getRequestMethod exchange)})
+                            :method (.getRequestMethod exchange)
+                            :authorization (-> exchange .getRequestHeaders
+                                               (.getFirst "Authorization"))})
       (let [payload (str "data: {\"id\":\"local-" label
                          "\",\"model\":\"local-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\""
                          label "\"},\"finish_reason\":null}]}\n\n"
@@ -29,7 +31,7 @@
           (.write output bytes))))))
 
 (defn- provider-ids [manager]
-  (set (map :provider (:providers (provider/status manager)))))
+  (set (keys @(:profiles manager))))
 
 (deftest explicit-cache-controls-survive-the-stable-session-scope
   (let [requests (atom [])
@@ -85,8 +87,10 @@
           (is (= {:closed? true} (provider/close! alpha)))
           (is (= "beta" (-> (provider/complete! beta request {:provider :project-api})
                              :response/parts first :text)))
-          (is (= [{:path "/alpha/chat/completions" :method "POST"}
-                  {:path "/beta/chat/completions" :method "POST"}]
+          (is (= [{:path "/alpha/chat/completions" :method "POST"
+                   :authorization nil}
+                  {:path "/beta/chat/completions" :method "POST"
+                   :authorization nil}]
                  @requests))
           (is (not (contains? (provider-ids root) :project-api)))
           (finally

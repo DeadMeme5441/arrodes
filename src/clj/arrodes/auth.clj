@@ -17,7 +17,8 @@
            [java.util Base64]
            [java.util.concurrent.locks ReentrantLock]))
 
-(defrecord AuthStore [^Path directory ^Path file ^Path lock-file ^ReentrantLock process-lock closed?])
+(defrecord AuthStore [^Path directory ^Path file ^Path lock-file ^ReentrantLock process-lock
+                      refresh-locks closed?])
 
 (def ^:private store-version 1)
 (def ^:private file-permissions
@@ -26,6 +27,7 @@
   #{PosixFilePermission/OWNER_READ PosixFilePermission/OWNER_WRITE
     PosixFilePermission/OWNER_EXECUTE})
 (defonce ^:private process-locks (atom {}))
+(defonce ^:private process-refresh-locks (atom {}))
 (defonce ^:private http-client
   (delay (-> (HttpClient/newBuilder)
              (.connectTimeout (Duration/ofSeconds 15))
@@ -79,6 +81,11 @@
                                 %
                                 (assoc % (str lock-file) (ReentrantLock.))))
                       (str lock-file))
+                 (get (swap! process-refresh-locks
+                             #(if (contains? % (str lock-file))
+                                %
+                                (assoc % (str lock-file) (atom {}))))
+                      (str lock-file))
                  (atom false))))
 
 (defn- with-store-lock [store f]
@@ -88,7 +95,7 @@
     (.lock local)
     (try
       (with-open [channel (FileChannel/open (:lock-file store) options)
-                  file-lock (.lock channel)]
+                  _file-lock (.lock channel)]
         (f))
       (finally (.unlock local)))))
 
@@ -128,15 +135,28 @@
       (finally
         (Files/deleteIfExists tmp)))))
 
+(defn- credential-snapshot [store provider-id]
+  (with-store-lock
+   store
+   (fn []
+     (let [state (read-state* store)]
+       {:credential (get-in state [:providers provider-id])
+        :revision (long (or (get-in state [:revisions provider-id]) 0))}))))
+
+(defn- next-revision [state provider-id]
+  (update-in state [:revisions provider-id] (fnil inc 0)))
+
 (defn credential [store provider-id]
-  (with-store-lock store #(get-in (read-state* store) [:providers provider-id])))
+  (:credential (credential-snapshot store provider-id)))
 
 (defn put-credential! [store provider-id value]
   (with-store-lock
    store
    (fn []
      (let [state (read-state* store)]
-       (write-state* store (assoc-in state [:providers provider-id] value))
+       (write-state* store (-> state
+                               (next-revision provider-id)
+                               (assoc-in [:providers provider-id] value)))
        value))))
 
 (defn delete-credential! [store provider-id]
@@ -144,8 +164,32 @@
    store
    (fn []
      (let [state (read-state* store)]
-       (write-state* store (update state :providers dissoc provider-id))
+       (write-state* store (-> state
+                               (next-revision provider-id)
+                               (update :providers dissoc provider-id)))
        nil))))
+
+(defn- refresh-lock [store provider-id]
+  (or (get @(:refresh-locks store) provider-id)
+      (get (swap! (:refresh-locks store)
+                  #(if (contains? % provider-id)
+                     %
+                     (assoc % provider-id (Object.))))
+           provider-id)))
+
+(defn- replace-credential-if-current!
+  [store provider-id expected-revision expected value]
+  (with-store-lock
+   store
+   (fn []
+     (let [state (read-state* store)]
+       (when (and (= expected-revision
+                     (long (or (get-in state [:revisions provider-id]) 0)))
+                  (= expected (get-in state [:providers provider-id])))
+         (write-state* store (-> state
+                                 (next-revision provider-id)
+                                 (assoc-in [:providers provider-id] value)))
+         true)))))
 
 (defn credential-info [store]
   (with-store-lock
@@ -346,9 +390,9 @@
                              :code_challenge challenge :code_challenge_method "S256"
                              :state state :id_token_add_organizations "true"
                              :codex_cli_simplified_flow "true" :originator "arrodes"}))]
-    (notify! options {:type :auth-url :url url
-                      :instructions "Complete ChatGPT login in a browser; the local callback or pasted code will finish login."})
     (try
+      (notify! options {:type :auth-url :url url
+                        :instructions "Complete ChatGPT login in a browser; the local callback or pasted code will finish login."})
       (let [code (await-browser-code options callback state)]
         (when-not (seq code) (fail! :auth/missing-code "No OAuth authorization code was received" {}))
         (let [c (token-credential
@@ -423,9 +467,9 @@
                              :response_type "code" :redirect_uri redirect :scope scopes
                              :code_challenge challenge :code_challenge_method "S256"
                              :state verifier}))]
-    (notify! options {:type :auth-url :url url
-                      :instructions "Complete Anthropic login in a browser; the local callback or pasted code will finish login."})
     (try
+      (notify! options {:type :auth-url :url url
+                        :instructions "Complete Anthropic login in a browser; the local callback or pasted code will finish login."})
       (let [code (await-browser-code options callback verifier)]
         (when-not (seq code) (fail! :auth/missing-code "No OAuth authorization code was received" {}))
         (token-credential
@@ -540,45 +584,71 @@
     {:provider provider-id :status :logged-in :type (:type credential)
      :expires-at (:expires-at credential)}))
 
+(defn- retain-refresh-data [current updated]
+  (cond-> updated
+    (and (:refresh-token current) (nil? (:refresh-token updated)))
+    (assoc :refresh-token (:refresh-token current))
+    (and (:account-id current) (nil? (:account-id updated)))
+    (assoc :account-id (:account-id current))))
+
+(defn- refresh-credential! [provider-id c]
+  (let [refresh-token (:refresh-token c)]
+    (when (str/blank? (str refresh-token))
+      (fail! :auth/refresh-token "Stored OAuth credential has no refresh token"
+             {:provider provider-id}))
+    (retain-refresh-data
+     c
+     (cond
+       (contains? #{:codex-backend :openai-codex} provider-id)
+       (let [x (token-credential
+                provider-id
+                (request! {:method :post :url openai-token-url
+                           :form {:grant_type "refresh_token"
+                                  :refresh_token refresh-token
+                                  :client_id openai-client-id}})
+                0)
+             account-id (jwt-account-id (:access-token x))]
+         (cond-> x account-id (assoc :account-id account-id)))
+
+       (= :anthropic provider-id)
+       (token-credential
+        provider-id
+        (request! {:method :post :url anthropic-token-url
+                   :body {:grant_type "refresh_token" :client_id anthropic-client-id
+                          :refresh_token refresh-token}})
+        300000)
+
+       (= :github-copilot provider-id)
+       (copilot-token! refresh-token (:enterprise-domain c))
+
+       :else
+       (fail! :auth/unsupported-refresh "Provider does not support OAuth refresh"
+              {:provider provider-id})))))
+
 (defn refresh!
   "Refresh one stored OAuth credential. API-key credentials are unchanged."
   [store provider-id options]
   (let [provider-id (keyword provider-id)
-        c (credential store provider-id)]
-    (when-not c (fail! :auth/not-configured "Provider has no stored credential" {:provider provider-id}))
-    (if-not (= :oauth (:type c))
-      {:provider provider-id :status :configured :type :api-key}
-      (let [refresh-token (:refresh-token c)
-            _ (when (str/blank? (str refresh-token))
-                (fail! :auth/refresh-token "Stored OAuth credential has no refresh token"
-                       {:provider provider-id}))
-            updated
-            (cond
-              (contains? #{:codex-backend :openai-codex} provider-id)
-              (let [x (token-credential
-                       provider-id
-                       (request! {:method :post :url openai-token-url
-                                  :form {:grant_type "refresh_token"
-                                         :refresh_token refresh-token
-                                         :client_id openai-client-id}})
-                       0)]
-                (assoc x :account-id (jwt-account-id (:access-token x))))
-              (= :anthropic provider-id)
-              (token-credential
-               provider-id
-               (request! {:method :post :url anthropic-token-url
-                          :body {:grant_type "refresh_token" :client_id anthropic-client-id
-                                 :refresh_token refresh-token}})
-               300000)
-              (= :github-copilot provider-id)
-              (copilot-token! refresh-token (:enterprise-domain c))
-              :else
-              (fail! :auth/unsupported-refresh "Provider does not support OAuth refresh"
-                     {:provider provider-id}))]
-        (ensure-active! options)
-        (put-credential! store provider-id updated)
-        {:provider provider-id :status :refreshed :type :oauth
-         :expires-at (:expires-at updated)}))))
+        attempted (credential-snapshot store provider-id)
+        c (:credential attempted)]
+    (when-not c
+      (fail! :auth/not-configured "Provider has no stored credential"
+             {:provider provider-id}))
+    (locking (refresh-lock store provider-id)
+      (let [current (credential-snapshot store provider-id)]
+        (if (not= (:revision attempted) (:revision current))
+          {:provider provider-id :status :superseded
+           :type (some-> current :credential :type)}
+          (if-not (= :oauth (:type c))
+            {:provider provider-id :status :configured :type :api-key}
+            (let [updated (refresh-credential! provider-id c)]
+              (ensure-active! options)
+              (if (replace-credential-if-current!
+                   store provider-id (:revision attempted) c updated)
+                {:provider provider-id :status :refreshed :type :oauth
+                 :expires-at (:expires-at updated)}
+                {:provider provider-id :status :superseded
+                 :type (some-> (credential store provider-id) :type)}))))))))
 
 (defn ensure-fresh!
   "Refresh an OAuth credential only when its guarded expiry has passed."

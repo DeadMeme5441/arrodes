@@ -6,9 +6,12 @@
             [llm.sdk.errors :as sdk-errors]
             [llm.sdk.http :as sdk-http]
             [llm.sdk.pricing :as pricing]
+            [llm.sdk.sse :as sdk-sse]
             [llm.sdk.stream :as sdk-stream]
             [llm.sdk.transport :as sdk-transport]
+            [llm.sdk.provider.auth :as sdk-auth]
             [llm.sdk.providers.anthropic.chat :as anthropic]
+            [llm.sdk.providers.codex.auth :as codex-auth]
             [llm.sdk.providers.codex.responses :as codex]
             [llm.sdk.providers.openai.chat :as openai]))
 
@@ -91,6 +94,9 @@
      :capabilities (set (:profile/capabilities p))
      :env-var-names (vec (:profile/env-var-names p))
      :base-url (:profile/base-url p)
+     :auth-strategy (:profile/auth-strategy p)
+     :auth-header-name (:profile/auth-header-name p)
+     :headers (:profile/default-headers p)
      :refreshable? (boolean (:profile/supports-model-listing p))
      :built-in? true}))
 
@@ -199,7 +205,7 @@
 
 (defn create!
   "Create a manager with a private credential store and manager-local profiles."
-  [{:keys [home settings complete-fn] :as options}]
+  [{:keys [home settings complete-fn]}]
   (when-not (and (string? home) (not (str/blank? home)))
     (fail! :provider/home "Provider manager requires a non-empty :home" {}))
   (when (contains-secret? settings)
@@ -247,6 +253,8 @@
       (fail! :provider/built-in "Built-in provider profiles cannot be replaced"
              {:provider id}))
     (let [profile (normalize-custom-profile id descriptor)]
+      (swap! (:live-models manager) dissoc id)
+      (swap! (:last-refresh manager) dissoc id)
       (swap! (:profiles manager) assoc id profile)
       profile)))
 
@@ -260,6 +268,7 @@
              {:provider id}))
     (swap! (:profiles manager) dissoc id)
     (swap! (:live-models manager) dissoc id)
+    (swap! (:last-refresh manager) dissoc id)
     {:removed id}))
 
 (defn withdraw!
@@ -279,39 +288,43 @@
 (defn- env-value [names]
   (some (fn [n] (let [v (System/getenv n)] (when-not (str/blank? v) v))) names))
 
-(defn- stored-credential [manager provider-id p]
-  (or (auth/credential (:auth manager) provider-id)
-      (when (not= provider-id (:sdk-id p))
-        (auth/credential (:auth manager) (:sdk-id p)))))
+(defn- stored-credential-entry [manager provider-id p]
+  (if-let [credential (auth/credential (:auth manager) provider-id)]
+    {:provider-id provider-id :credential credential}
+    (when-let [sdk-id (when (not= provider-id (:sdk-id p)) (:sdk-id p))]
+      (when-let [credential (auth/credential (:auth manager) sdk-id)]
+        {:provider-id sdk-id :credential credential}))))
 
-(defn- codex-auth [manager provider-id p refresh? options]
-  (let [stored (if refresh?
-                 (or (auth/ensure-fresh! (:auth manager) provider-id options)
-                     (when (not= provider-id (:sdk-id p))
-                       (auth/ensure-fresh! (:auth manager) (:sdk-id p) options)))
-                 (stored-credential manager provider-id p))]
+(defn- current-credential [manager entry refresh? options]
+  (let [credential (:credential entry)]
+    (if (and refresh? (= :oauth (:type credential)))
+      (auth/ensure-fresh! (:auth manager) (:provider-id entry) options)
+      credential)))
+
+(defn- codex-auth [stored]
+  (let [token (or (:access-token stored) (:secret stored))]
     (cond
-      (and stored (= :oauth (:type stored)))
-      {:source :stored-oauth
-       :type :oauth
-       :headers (cond-> {"Authorization" (str "Bearer " (:access-token stored))
-                         "User-Agent" "codex_cli_rs/0.0.0 (arrodes-mono)"
-                         "originator" "codex_cli_rs"}
-                  (:account-id stored) (assoc "ChatGPT-Account-ID" (:account-id stored)))}
-      (codex/codex-backend-available?)
-      {:source :codex-cli :type :oauth :headers (codex/codex-backend-auth-headers)}
+      token
+      {:source (:source stored)
+       :type (:type stored)
+       :token token
+       :account-id (:account-id stored)
+       :credential stored}
+
+      (codex-auth/codex-backend-available?)
+      {:source :codex-cli :type :oauth}
+
       :else nil)))
 
 (defn- auth-resolution [manager provider-id p refresh? options]
-  (let [stored (stored-credential manager provider-id p)
-        c (if (and refresh? (= :oauth (:type stored)))
-            (or (auth/ensure-fresh! (:auth manager) provider-id options) stored)
-            stored)
+  (let [entry (stored-credential-entry manager provider-id p)
+        c (current-credential manager entry refresh? options)
         env-token (env-value (:env-var-names p))
         sdk-id (:sdk-id p)]
     (cond
-      (contains? #{:codex-backend :openai-codex} provider-id)
-      (codex-auth manager provider-id p refresh? options)
+      (or (contains? #{:codex-backend :openai-codex} provider-id)
+          (= :codex-backend sdk-id))
+      (codex-auth c)
 
       (= provider-id :github-copilot)
       (let [token (or (:access-token c) (:secret c) env-token)]
@@ -471,6 +484,18 @@
 (defn- openai-model-url [p]
   (str (str/replace (:base-url p) #"/$" "") "/models"))
 
+(defn- sdk-runtime-config [manager provider-id p resolution]
+  (cond-> (merge
+           (select-keys (:settings manager)
+                        [:connect-timeout-ms :timeout-ms :transport :incremental?])
+           (select-keys (get-in (:settings manager) [:provider-options provider-id])
+                        [:connect-timeout-ms :timeout-ms :transport :incremental?]))
+    (:token resolution) (assoc :auth-token (:token resolution))
+    (:account-id resolution) (assoc :account-id (:account-id resolution))
+    (and (= :profile-alias (:kind p)) (:base-url p))
+    (assoc :base-url (:base-url p))
+    (seq (:headers p)) (assoc :headers (:headers p))))
+
 (defn- refresh-one! [manager provider-id]
   (let [provider-id (keyword provider-id)
         p (profile manager provider-id)
@@ -478,8 +503,12 @@
         result
         (cond
           (contains? #{:codex-backend :openai-codex} provider-id)
-          (let [body (auth/request! {:url "https://chatgpt.com/backend-api/codex/models?client_version=99.99.99"
-                                     :headers (:headers resolution)})]
+          (let [sdk-profile (-> (sdk/provider-profile (:sdk-id p))
+                                (sdk-auth/apply-runtime-config
+                                 (sdk-runtime-config manager provider-id p resolution)))
+                request-auth (codex-auth/request-auth sdk-profile)
+                body (auth/request! {:url "https://chatgpt.com/backend-api/codex/models?client_version=99.99.99"
+                                     :headers (:headers request-auth)})]
             (->> (or (:models body) (:data body))
                  (keep #(codex-model provider-id p %)) vec))
 
@@ -504,11 +533,12 @@
           (or (= (:kind p) :openai-compatible)
               (and (= :sdk (:kind p)) (:refreshable? p)))
           (let [url (openai-model-url p)
-                headers (merge (:headers p)
-                               (when-let [token (:token resolution)]
-                                 (case (:auth-strategy p)
-                                   :api-key-header {(:auth-header-name p) token}
-                                   {"Authorization" (str "Bearer " token)})))
+                headers (sdk-auth/merge-headers
+                         (:headers p)
+                         (when-let [token (:token resolution)]
+                           (case (:auth-strategy p)
+                             :api-key-header {(:auth-header-name p) token}
+                             {"Authorization" (str "Bearer " token)})))
                 body (auth/request! {:url url :headers headers})]
             (->> (:data body) (keep #(model-from-openai provider-id p %)) vec))
 
@@ -562,7 +592,7 @@
   [manager provider-id options]
   (open-manager! manager)
   (let [provider-id (keyword provider-id)
-        p (profile manager provider-id)]
+        _ (profile manager provider-id)]
     (when (contains? #{:bedrock :amazon-bedrock} provider-id)
       (fail! :auth/ambient
              "Amazon Bedrock uses the SDK's native AWS credential chain; configure AWS credentials in the process environment or shared AWS files"
@@ -580,7 +610,13 @@
    (refresh-auth! manager provider-id {}))
   ([manager provider-id options]
    (open-manager! manager)
-   (auth/refresh! (:auth manager) (keyword provider-id) options)))
+   (let [provider-id (keyword provider-id)
+         p (profile manager provider-id)
+         credential-provider (or (:provider-id
+                                  (stored-credential-entry manager provider-id p))
+                                 provider-id)]
+     (assoc (auth/refresh! (:auth manager) credential-provider options)
+            :provider provider-id))))
 
 (defn logout!
   "Remove only the selected provider's private stored credential."
@@ -620,20 +656,26 @@
                            :provider provider-id :attempts 1}))))
       (let [start (sdk-stream/start-event)
             _ (emit-event! options start)
-            events
-            (loop [lines (seq (sdk-http/line-seq-closeable body))
-                   out [start] terminal? false]
-              (if-let [line (first lines)]
-                (let [parsed (event-list (sdk-transport/parse-stream-event transport profile line))
-                      _ (doseq [event parsed] (emit-event! options event))
-                      terminal? (or terminal? (some #(= :stream/end (:event/type %)) parsed))]
-                  (recur (next lines) (into out parsed) terminal?))
+            accumulated
+            (loop [records (seq (sdk-sse/event-seq
+                                 (sdk-http/line-seq-closeable body)))
+                   acc (sdk-stream/reduce-event (sdk-stream/empty-accumulator) start)
+                   terminal? false]
+              (if-let [record (first records)]
+                (let [parsed (event-list
+                              (sdk-transport/parse-stream-event transport profile record))
+                      acc (reduce (fn [current event]
+                                    (emit-event! options event)
+                                    (sdk-stream/reduce-event current event))
+                                  acc parsed)]
+                  (recur (next records) acc
+                         (or terminal? (some #(= :stream/end (:event/type %)) parsed))))
                 (if terminal?
-                  out
-                  (let [end (sdk-stream/end-event)]
+                  acc
+                  (let [end (sdk-stream/end-event :finish-reason :incomplete)]
                     (emit-event! options end)
-                    (conj out end)))))
-            response (sdk-stream/events->response events provider-id model-id)]
+                    (sdk-stream/reduce-event acc end)))))
+            response (sdk-stream/acc->response accumulated provider-id model-id)]
         (-> response
             (assoc :response/provider provider-id :response/model model-id)
             (pricing/stamp-response-cost-and-cache provider-id model-id)))
@@ -641,48 +683,36 @@
         (when (instance? java.io.Closeable body)
           (.close ^java.io.Closeable body))))))
 
-(defn- codex-complete! [manager provider-id p request options]
+(defn- custom-openai-complete! [manager provider-id p request options]
   (let [resolution (require-auth! manager provider-id p true options)
-        model-id (:request/model request)
-        transient-profile {:profile/id :arrodes-codex-request
-                           :profile/base-url "https://example.invalid/v1"
-                           :profile/auth-strategy :none
-                           :profile/default-headers {}
-                           :profile/capabilities (:capabilities p)}
-        base (codex/build-request-codex transient-profile
-                                        (assoc request :request/stream? true))
-        cache-key (get-in request [:request/cache :scope-id])
-        headers (merge (:headers resolution)
-                       {"Accept" "text/event-stream"}
-                       (when cache-key {"session_id" cache-key
-                                        "x-client-request-id" cache-key}))
-        body (cond-> (-> (:body base)
-                         (assoc :stream true)
-                         (dissoc :max_output_tokens))
-               (nil? (get-in base [:body :instructions]))
-               (assoc :instructions "You are a helpful assistant."))
-        req (merge base
-                   (direct-http-options manager provider-id)
-                   {:url "https://chatgpt.com/backend-api/codex/responses"
-                    :headers headers :body body})]
-    (direct-sse-complete! provider-id model-id
-                          (assoc transient-profile :profile/id provider-id)
-                          (codex/make-transport) req options)))
+        profile (cond-> {:profile/id provider-id
+                         :profile/protocol-family :openai-chat
+                         :profile/base-url (:base-url p)
+                         :profile/auth-strategy (:auth-strategy p)
+                         :profile/env-var-names []
+                         :profile/default-headers (:headers p)
+                         :profile/capabilities (:capabilities p)}
+                  (:token resolution)
+                  (assoc :profile/auth-token (:token resolution))
+                  (= :api-key-header (:auth-strategy p))
+                  (assoc :profile/auth-header-name (:auth-header-name p)))
+        transport (openai/make-transport)
+        req (merge
+             (openai/build-request-openai
+              profile (assoc request :request/stream? true))
+             (direct-http-options manager provider-id))]
+    (direct-sse-complete! provider-id (:request/model request)
+                          profile transport req options)))
 
 (defn- copilot-complete! [manager provider-id p request options]
   (let [resolution (require-auth! manager provider-id p true options)
         model-id (:request/model request)
         claude? (str/starts-with? (str/lower-case model-id) "claude")
         base-url (:base-url resolution)
-        profile (if claude?
-                  {:profile/id provider-id :profile/base-url base-url
-                   :profile/auth-strategy :bearer :profile/auth-token (:token resolution)
-                   :profile/default-headers copilot-default-headers
-                   :profile/capabilities (:capabilities p)}
-                  {:profile/id provider-id :profile/base-url base-url
-                   :profile/auth-strategy :bearer :profile/auth-token (:token resolution)
-                   :profile/default-headers copilot-default-headers
-                   :profile/capabilities (:capabilities p)})
+        profile {:profile/id provider-id :profile/base-url base-url
+                 :profile/auth-strategy :bearer :profile/auth-token (:token resolution)
+                 :profile/default-headers copilot-default-headers
+                 :profile/capabilities (:capabilities p)}
         transport (if claude? (anthropic/make-transport) (codex/make-transport))
         req (merge
              (if claude?
@@ -713,7 +743,6 @@
 (defn- sdk-complete! [manager provider-id p request options]
   (let [resolution (require-auth! manager provider-id p true options)
         sdk-id (:sdk-id p)
-        custom? (= :openai-compatible (:kind p))
         c (:credential resolution)
         vertex? (contains? #{:vertex-gemini :google-vertex :vertex-anthropic} provider-id)
         request (if (and vertex? (:token resolution))
@@ -725,13 +754,7 @@
                     (:location c)
                     (assoc-in [:request/provider-options :vertex :location] (:location c)))
                   request)
-        config (cond-> (merge (select-keys (:settings manager)
-                                           [:connect-timeout-ms :timeout-ms :transport :incremental?])
-                              (select-keys (get-in (:settings manager) [:provider-options provider-id])
-                                           [:connect-timeout-ms :timeout-ms :transport :incremental?]))
-                 (and (:token resolution) (not vertex?)) (assoc :api-key (:token resolution))
-                 custom? (assoc :base-url (:base-url p))
-                 (seq (:headers p)) (assoc :headers (:headers p)))
+        config (sdk-runtime-config manager provider-id p resolution)
         callback (fn [event] (emit-event! options event))]
     (when (auth/cancelled? options) (throw (cancelled-ex)))
     (let [response (sdk/complete sdk-id request :stream? true :on-event callback
@@ -790,12 +813,9 @@
           :copilot (copilot-complete! manager provider-id p canonical-request options)
           :azure-openai (azure-complete! manager provider-id p canonical-request options)
           :profile-alias (sdk-complete! manager provider-id p canonical-request options)
-          :openai-compatible (sdk-complete! manager provider-id
-                                            (assoc p :sdk-id :openai)
-                                            canonical-request options)
-          (if (contains? #{:codex-backend :openai-codex} provider-id)
-            (codex-complete! manager provider-id p canonical-request options)
-            (sdk-complete! manager provider-id p canonical-request options))))
+          :openai-compatible (custom-openai-complete!
+                              manager provider-id p canonical-request options)
+          (sdk-complete! manager provider-id p canonical-request options)))
       (catch clojure.lang.ExceptionInfo e
         (case (:error/type (ex-data e))
           :provider/cancelled (throw e)
