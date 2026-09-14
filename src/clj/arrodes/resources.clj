@@ -110,7 +110,7 @@
         (str real)))))
 
 (defn- global-settings-path [manager] (u/resolve-path (:home manager) "settings.edn"))
-(defn- project-settings-path [manager] (u/resolve-path (:cwd manager) ".arrodes-mono/settings.edn"))
+(defn- project-settings-path [manager] (u/resolve-path (:cwd manager) ".arrodes/settings.edn"))
 (defn- trust-path [manager] (u/resolve-path (:home manager) "trust.edn"))
 
 (defn- read-trust-store [manager]
@@ -423,7 +423,7 @@
         initial (assert-no-secrets! (:initial-settings manager) [:explicit])
         global-keybindings (read-map-file (u/resolve-path (:home manager) "keybindings.edn") {} :keybindings/invalid)
         project-keybindings (if trusted?
-                              (read-map-file (u/resolve-path (:cwd manager) ".arrodes-mono/keybindings.edn") {} :keybindings/invalid)
+                              (read-map-file (u/resolve-path (:cwd manager) ".arrodes/keybindings.edn") {} :keybindings/invalid)
                               {})
         effective (-> (patch-map global project)
                       (patch-map initial)
@@ -456,7 +456,7 @@
                                      (when trusted?
                                        (package-resources-by-scope :project))
                                      (when trusted?
-                                       (discover-default kind (u/resolve-path (:cwd manager) ".arrodes-mono")
+                                       (discover-default kind (u/resolve-path (:cwd manager) ".arrodes")
                                                          :local :project))
                                      (get project-configured kind)
                                      (get initial-configured kind))))))

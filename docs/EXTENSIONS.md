@@ -1,6 +1,6 @@
 # Clojure extensions and resources
 
-Global resources live under the selected application home. Project resources live under `.arrodes-mono` in the project. Executable project resources require an applicable trust decision or explicit run trust.
+Global resources live under the selected application home. Project resources live under `.arrodes` in the project. Executable project resources require an applicable trust decision or explicit run trust.
 
 Resource groups include `extensions`, `skills`, `prompts`, `themes`, and `packages`. Settings and keybindings are EDN. Skills use the Agent Skills frontmatter/content convention; prompt templates are expanded on demand.
 

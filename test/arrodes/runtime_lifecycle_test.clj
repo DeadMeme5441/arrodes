@@ -70,7 +70,7 @@
 
 (deftest reload-excludes-a-concurrent-start-through-handle-replacement
   (let [directory (fixtures/temp-directory)
-        extension (io/file directory ".arrodes-mono" "extensions" "blocking_close.clj")
+        extension (io/file directory ".arrodes" "extensions" "blocking_close.clj")
         entered (promise)
         release (promise)]
     (io/make-parents extension)

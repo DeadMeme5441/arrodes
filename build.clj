@@ -9,7 +9,7 @@
 
 (def pom-data
   [[:description "Durable Clojure agent sessions with a persistent evaluator"]
-   [:url "https://github.com/DeadMeme5441/arrodes-mono"]
+   [:url "https://github.com/DeadMeme5441/arrodes"]
    [:licenses
     [:license
      [:name "MIT License"]

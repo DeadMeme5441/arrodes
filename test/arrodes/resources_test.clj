@@ -16,9 +16,9 @@
         cwd (str directory "/project")]
     (try
       (u/ensure-dir! home)
-      (u/ensure-dir! (str cwd "/.arrodes-mono"))
+      (u/ensure-dir! (str cwd "/.arrodes"))
       (u/write-edn! (str home "/settings.edn") {:example/options {:global 1 :shared :global}})
-      (u/write-edn! (str cwd "/.arrodes-mono/settings.edn") {:example/options {:project 2 :shared :project}})
+      (u/write-edn! (str cwd "/.arrodes/settings.edn") {:example/options {:project 2 :shared :project}})
       (let [untrusted (resources/create! {:cwd cwd :home home :trust false
                                           :settings {:example/options {:initial 3}}})
             trusted (resources/create! {:cwd cwd :home home :trust true
@@ -34,7 +34,7 @@
 (deftest failed-extension-activation-withdraws-its-capabilities
   (let [directory (fixtures/temp-directory)
         home (str directory "/home")
-        extension-dir (str directory "/.arrodes-mono/extensions")
+        extension-dir (str directory "/.arrodes/extensions")
         database (store/open! {:memory? true})
         provider-manager (provider/create! {:home home :settings {}})
         session (store/create-session! database {:cwd directory :name "Extension rollback" :config fixtures/config})
@@ -80,7 +80,7 @@
 (deftest disabled-extensions-exclude-lower-precedence-discovery
   (let [directory (fixtures/temp-directory)
         home (str directory "/home")
-        project-extension-root (str directory "/.arrodes-mono/extensions")
+        project-extension-root (str directory "/.arrodes/extensions")
         markers ["global-disabled.marker" "project-disabled.marker"
                  "package-disabled.marker" "explicit-disabled.marker"]
         database (store/open! {:memory? true})
@@ -102,10 +102,10 @@
       (u/write-edn! (str home "/settings.edn")
                     {:extensions [{:path "extensions/global-disabled.clj" :enabled? false}
                                   {:path "extensions/missing.clj" :enabled? false}]})
-      (u/write-edn! (str directory "/.arrodes-mono/settings.edn")
-                    {:extensions [{:path ".arrodes-mono/extensions/project-disabled.clj"
+      (u/write-edn! (str directory "/.arrodes/settings.edn")
+                    {:extensions [{:path ".arrodes/extensions/project-disabled.clj"
                                    :enabled? false}
-                                  {:path ".arrodes-mono/extensions/missing.clj"
+                                  {:path ".arrodes/extensions/missing.clj"
                                    :enabled? false}]})
       (packages/install!
        home directory
@@ -121,9 +121,9 @@
       (let [manager
             (resources/create!
              {:cwd directory :home home :trust true
-              :settings {:extensions [{:path ".arrodes-mono/extensions/explicit-disabled.clj"
+              :settings {:extensions [{:path ".arrodes/extensions/explicit-disabled.clj"
                                        :enabled? false}
-                                      {:path ".arrodes-mono/extensions/missing-explicit.clj"
+                                      {:path ".arrodes/extensions/missing-explicit.clj"
                                        :enabled? false}]}})]
         (try
           (resources/activate!

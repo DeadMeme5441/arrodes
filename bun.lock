@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "arrodes-tui",
+      "name": "arrodes",
       "dependencies": {
         "@opentui/core": "0.5.11",
         "web-tree-sitter": "0.25.10",

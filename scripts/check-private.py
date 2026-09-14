@@ -9,7 +9,7 @@ import sys
 
 EXPECTED_NAME = "DeadMeme5441"
 EXPECTED_EMAIL = "deadmeme5441@gmail.com"
-EXPECTED_REMOTE = "https://github.com/DeadMeme5441/arrodes-mono.git"
+EXPECTED_REMOTE = "https://github.com/DeadMeme5441/arrodes.git"
 
 
 def git(*args):

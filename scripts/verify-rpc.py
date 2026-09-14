@@ -9,7 +9,7 @@ async def main():
     with tempfile.TemporaryDirectory(prefix="arrodes-rpc-") as temporary:
         root = Path(temporary)
         project = root / "project"
-        extensions = project / ".arrodes-mono" / "extensions"
+        extensions = project / ".arrodes" / "extensions"
         extensions.mkdir(parents=True)
         (extensions / "probe.clj").write_text('''(println "LOAD_DIAGNOSTIC")
 (fn [api]

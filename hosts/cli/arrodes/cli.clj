@@ -44,7 +44,7 @@
    "  --no-session                Use an in-memory runtime for this process\n\n"
    "Runtime:\n"
    "  --cwd <directory>           Session/project working directory\n"
-   "  --home <directory>          Arrodes home (else ARRODES_HOME or ~/.arrodes-mono)\n"
+   "  --home <directory>          Arrodes home (else ARRODES_HOME or ~/.arrodes)\n"
    "  --data-dir <directory>      Persistent runtime data directory\n"
    "  --isolated                  Require an explicit dedicated --home\n"
    "  --trust | --no-trust        Override project resource trust for this process\n\n"

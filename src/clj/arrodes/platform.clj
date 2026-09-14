@@ -92,4 +92,4 @@
      (if (> (count s) limit) (str (subs s 0 limit) "\n[Preview truncated]") s))))
 (defn home-dir [options]
   (canonical-path (or (:home options) (System/getenv "ARRODES_HOME")
-                      (str (System/getProperty "user.home") "/.arrodes-mono"))))
+                      (str (System/getProperty "user.home") "/.arrodes"))))

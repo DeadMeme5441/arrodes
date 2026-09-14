@@ -148,7 +148,7 @@
 
 (deftest registered-renderer-and-widget-use-the-runtime-ui-boundary
   (let [directory (fixtures/temp-directory)
-        extension (io/file directory ".arrodes-mono" "extensions" "native_ui.clj")
+        extension (io/file directory ".arrodes" "extensions" "native_ui.clj")
         requests (atom [])
         runtime* (atom nil)]
     (try

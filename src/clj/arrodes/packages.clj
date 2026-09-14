@@ -39,7 +39,7 @@
 (defn- package-root [home cwd scope]
   (case (scope-key scope)
     :global (u/resolve-path home "packages")
-    :project (u/resolve-path cwd ".arrodes-mono/packages")))
+    :project (u/resolve-path cwd ".arrodes/packages")))
 
 
 (defn- index-path [root] (u/resolve-path root "packages.edn"))

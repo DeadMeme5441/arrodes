@@ -117,7 +117,7 @@ The OpenTUI host shares pure `.cljc` data logic. The JVM owns OAuth, MCP clients
 
 ## State and privacy
 
-The default application home is `~/.arrodes-mono`, overridden by `ARRODES_HOME` or `--home`. Project resources live in `.arrodes-mono` within the selected project. Credentials belong in the private authentication store or environment, not session configuration.
+The default application home is `~/.arrodes`, overridden by `ARRODES_HOME` or `--home`. Project resources live in `.arrodes` within the selected project. Credentials belong in the private authentication store or environment, not session configuration.
 
 A file-backed data directory has **one live runtime owner**. A second runtime opening the same directory is rejected before recovery or expiry can modify it. Multiple sessions can run inside one runtime. Use separate data directories for separate live runtimes.
 
