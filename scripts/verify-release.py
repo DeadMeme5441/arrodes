@@ -35,6 +35,7 @@ class FixtureProvider(BaseHTTPRequestHandler):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.requests.append(request)
         assert self.headers.get("Authorization") == "Bearer local-release-check"
+        assert request["model"] == "fixture-model", request["model"]
         if any(message["role"] == "tool" and message.get("tool_call_id") == "repair" for message in request["messages"]):
             delta = {"content": "Verified the repository repair: 42."}
             finish = "stop"
@@ -67,7 +68,7 @@ def isolated_environment(root):
         system = Path(environment["SYSTEMROOT"]) / "System32"
         search = os.pathsep.join([str(system), str(system / "WindowsPowerShell" / "v1.0")])
     else:
-        for name in ["sh", "bash"]:
+        for name in ["sh", "bash", "cat"]:
             source = Path("/bin") / name
             if source.exists():
                 (tools / name).symlink_to(source)
@@ -203,11 +204,15 @@ async def exercise(executable, home, project, environment):
         operation = await rpc.call("session.run", {"session-id": sid, "prompt": "Read answer.txt, repair 41 to 42, and run the result."})
         result = await rpc.call("operation.wait", {"operation-id": operation["id"], "timeout-ms": 30000})
         assert result["status"] == "completed", result
+        failures = [event["data"] for event in rpc.events
+                    if event["type"] in {"capability/completed", "evaluation/completed"}
+                    and event["data"].get("error?")]
+        assert not failures, failures
         assert (project / "answer.txt").read_text() == "42\n"
         names = {event["data"].get("name") for event in rpc.events if event["type"] == "capability/completed"}
         assert {"read", "edit", "powershell" if os.name == "nt" else "bash"} <= names, names
         value = await rpc.call("session.evaluate", {"session-id": sid, "source": "verified"})
-        assert value["result"]["value"]["answer"] == 42, value
+        assert value["error?"] is False and value["result"].get("value", {}).get("answer") == 42, value
         result_id = value["result"]["id"]
         # Another repo must not contend on a global database lock.
         second = project.parent / "second repo"
@@ -398,11 +403,14 @@ def main():
                 ':auth-strategy :bearer :models [{:id "fixture-model"}]}} '
                 ':session-config {:model "retired-model" :thinking :high}}')
             (home / "config" / "settings.edn").write_text(fixture_settings)
-            shell = '(powershell {:command "Write-Output 42" :timeout 10})' if os.name == "nt" else '(bash {:command "printf 42" :timeout 10})'
+            shell = '(powershell {:command "Get-Content -LiteralPath answer.txt" :timeout 10})' if os.name == "nt" else '(bash {:command "cat answer.txt" :timeout 10})'
             FixtureProvider.source = (
                 '(def original (read {:path "answer.txt"})) '
                 '(edit {:path "answer.txt" :edits [{:oldText "41" :newText "42"}]}) '
-                f'(def verified {{:answer 42 :execution {shell}}}) verified')
+                f'(def execution {shell}) '
+                '(assert (zero? (:exit-code execution)) (pr-str execution)) '
+                '(def verified {:answer (parse-long (clojure.string/trim (:stdout execution)))}) '
+                '(assert (= 42 (:answer verified)) (pr-str execution)) verified')
             asyncio.run(exercise(installed, home, project, environment))
             terminal_home = root / "terminal home"
             (terminal_home / "config").mkdir(parents=True)
