@@ -1,6 +1,7 @@
 (ns arrodes.runtime-test
   (:require [arrodes.capabilities :as capabilities]
             [arrodes.runtime :as runtime]
+            [arrodes.run :as run]
             [arrodes.session-test :as fixtures]
             [arrodes.platform :as u]
             [arrodes.value :as value]
@@ -127,3 +128,45 @@
                                  (runtime/entries reopened sid)))))
           (finally (runtime/close! reopened))))
       (finally (runtime/close! rt) (fixtures/remove-directory! directory)))))
+
+(deftest cancelled-branch-summary-preserves-head-and-live-evaluator
+  (let [summarizing? (atom false)
+        runtime* (atom nil)
+        session-id* (atom nil)
+        provider (fn [_ _]
+                   (when @summarizing?
+                     (runtime/cancel! @runtime* @session-id*))
+                   (answer (if @summarizing? "Summary" "Done")))]
+    (with-runtime [rt provider]
+      (reset! runtime* rt)
+      (let [sid (:id (create-session rt))]
+        (reset! session-id* sid)
+        (runtime/run! rt sid "First turn")
+        (let [earlier-head (:head (runtime/session rt sid))]
+          (runtime/run! rt sid "Second turn")
+          (is (= 42 (:value (runtime/evaluate! rt sid "(def retained 41) (inc retained)"))))
+          (let [head-before (:head (runtime/session rt sid))]
+            (reset! summarizing? true)
+            (is (thrown? clojure.lang.ExceptionInfo
+                         (runtime/branch! rt sid earlier-head {:summarize? true})))
+            (is (= head-before (:head (runtime/session rt sid))))
+            (is (= 42 (:value (runtime/evaluate! rt sid "(inc retained)"))))))))))
+
+(deftest compaction-plan-supports-an-empty-retained-range
+  (let [message (fn [id role]
+                  {:id id :kind :message
+                   :data {:message/role role :message/content id}})
+        entries [(message "abandoned-user" :user)
+                 {:id "marker" :kind :compaction
+                  :data {:summary "Imported summary"}}
+                 (message "new-user" :user)
+                 (message "new-assistant" :assistant)
+                 (message "latest-user" :user)
+                 (message "latest-assistant" :assistant)]
+        plan (run/compaction-plan entries
+                                  {:settings {:compaction-keep-entries 1}})]
+    (is (= ["marker" "new-user" "new-assistant"]
+           (mapv :id (:summary-entries plan))))
+    (is (= ["latest-user" "latest-assistant"]
+           (mapv :id (:kept-entries plan))))
+    (is (= "latest-user" (:first-kept-entry-id plan)))))

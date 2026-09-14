@@ -10,7 +10,7 @@
             [arrodes.store :as store]
             [arrodes.platform :as util]
             [arrodes.value :as value])
-  (:import (java.util.concurrent ExecutorService Executors Future RejectedExecutionException TimeUnit)))
+  (:import (java.util.concurrent ExecutorService Executors RejectedExecutionException TimeUnit)))
 
 (defn- ensure-open! [runtime]
   (value/check! (= :open @(:lifecycle runtime)) :runtime-closed
@@ -43,7 +43,9 @@
     (emit-events! runtime (:events result))
     result))
 
-(def ^:private ui-kinds #{:select :confirm :input :notify :capability})
+(def ^:private ui-kinds
+  #{:select :confirm :input :notify :capability
+    :renderer :widget :set-widget :render :editor})
 
 (defn set-ui!
   "Installs or removes the single host-interaction callback."
@@ -172,15 +174,20 @@
   (locking (session-lock runtime sid)
     (locking (:handle-lock runtime)
       (when-let [handle (get @(:handles runtime) sid)]
-        (swap! (:handles runtime) dissoc sid)
-        (let [resource-report (try (resources/close! (:resources handle))
-                                   (catch Throwable error {:status :failed :error (value/error-map error)}))
-              registry-report (try (capabilities/close! (:registry handle))
-                                   (catch Throwable error {:closed? false :error (value/error-map error)}))
-              provider-report (try (provider/close! (:provider handle))
-                                   (catch Throwable error {:closed? false :error (value/error-map error)}))]
-          {:session-id sid :resources resource-report :registry registry-report
-           :provider provider-report})))))
+        (let [resource-report (resources/close! (:resources handle))]
+          (value/check! (= :closed (:status resource-report)) :cleanup-incomplete
+                        "Session resources did not finish shutting down"
+                        {:session-id sid :resources resource-report})
+          (let [registry-report (capabilities/close! (:registry handle))
+                provider-report (provider/close! (:provider handle))]
+            (value/check! (and (:closed? registry-report)
+                               (empty? (:errors registry-report))
+                               (:closed? provider-report)) :cleanup-incomplete
+                          "Session handles did not finish shutting down"
+                          {:session-id sid :registry registry-report :provider provider-report})
+            (swap! (:handles runtime) dissoc sid)
+            {:session-id sid :resources resource-report :registry registry-report
+             :provider provider-report}))))))
 
 (defn- foreground [runtime sid]
   (get @(:foreground runtime) sid))
@@ -198,7 +205,8 @@
       (ensure-open! runtime)
       (ensure-idle! runtime sid)
       (let [slot {:operation-id oid :kind kind :phase (atom :starting)
-                  :cancelled (atom false) :thread (atom nil)
+                  :cancelled (atom false) :cancellable? (atom true)
+                  :accepting-input? (atom true) :thread (atom nil)
                   :done (promise) :finished (promise) :usage (atom {})}]
         (swap! (:foreground runtime) assoc sid slot)
         (swap! (:operations runtime) assoc oid slot)
@@ -214,22 +222,22 @@
   phase)
 
 (defn- operation-start! [runtime sid kind]
-  (let [oid (util/id)
-        slot (acquire-foreground! runtime sid kind oid)
-        operation {:id oid :session-id sid :kind kind :status :running :created-at (util/now)}]
-    (try
-      (let [result (locking (session-lock runtime sid)
-                     (commit! runtime sid
+  (locking (session-lock runtime sid)
+    (let [oid (util/id)
+          slot (acquire-foreground! runtime sid kind oid)
+          operation {:id oid :session-id sid :kind kind :status :running :created-at (util/now)}]
+      (try
+        (let [result (commit! runtime sid
                               {:session {:status :running}
                                :operation operation
                                :events [{:operation-id oid :type :operation/started
-                                         :data {:kind kind}}]}))]
-        {:slot slot :operation (:operation result)})
-      (catch Throwable error
-        (swap! (:operations runtime) dissoc oid)
-        (deliver (:finished slot) true)
-        (release-foreground! runtime sid oid)
-        (throw error)))))
+                                         :data {:kind kind}}]})]
+          {:slot slot :operation (:operation result)})
+        (catch Throwable error
+          (swap! (:operations runtime) dissoc oid)
+          (release-foreground! runtime sid oid)
+          (deliver (:finished slot) true)
+          (throw error))))))
 
 (defn- durable-invocation [result]
   (dissoc result :value))
@@ -264,19 +272,27 @@
                                   :message/result {:kind :inline :content content
                                                    :details {:error/code (name status)}
                                                    :available? true}}}))
-                      unresolved)]
-            (commit! runtime sid
-                     {:entries interrupted-entries
-                      :session {:status session-status}
-                      :operation operation
-                      :events (cond-> [{:operation-id oid
-                                        :type (keyword "operation" (name status))
-                                        :data (cond-> {}
-                                                error (assoc :error (value/error-map error)))}]
-                                (seq unresolved)
-                                (conj {:operation-id oid :type :tool/interrupted
-                                       :data {:call-ids (mapv :tool-call/id unresolved)
-                                              :status status}}))})))]
+                      unresolved)
+                command
+                {:entries interrupted-entries
+                 :session {:status session-status}
+                 :operation operation
+                 :events (cond-> [{:operation-id oid
+                                   :type (keyword "operation" (name status))
+                                   :data (cond-> {}
+                                           error (assoc :error (value/error-map error)))}]
+                           (seq unresolved)
+                           (conj {:operation-id oid :type :tool/interrupted
+                                  :data {:call-ids (mapv :tool-call/id unresolved)
+                                         :status status}}))}]
+            (release-foreground! runtime sid oid)
+            (try
+              (let [result (store/commit! (:store runtime) sid command)]
+                (emit-events! runtime (:events result))
+                result)
+              (catch Throwable settlement-error
+                (swap! (:foreground runtime) assoc sid slot)
+                (throw settlement-error)))))]
     (:operation committed)))
 
 (defn- cancelled-error? [slot error]
@@ -407,6 +423,7 @@
                             :type :queue/delivered
                             :data {:ids (mapv :id items) :phase phase}}]})
         (when (= phase :turn-boundary)
+          (reset! (:accepting-input? slot) false)
           (set-phase! slot :settling)))
       items)))
 
@@ -590,9 +607,9 @@
         (throw error)))
     (finally
       (reset! (:thread slot) nil)
-      (swap! (:operations runtime) dissoc (:operation-id slot))
+      (release-foreground! runtime sid (:operation-id slot))
       (deliver (:finished slot) true)
-      (release-foreground! runtime sid (:operation-id slot)))))
+      (swap! (:operations runtime) dissoc (:operation-id slot)))))
 
 (defn- submit-operation! [runtime sid slot work]
   (try
@@ -606,9 +623,9 @@
     (catch RejectedExecutionException error
       (let [operation (settle-operation! runtime sid slot :failed nil error)]
         (deliver (:done slot) operation)
-        (swap! (:operations runtime) dissoc (:operation-id slot))
-        (deliver (:finished slot) true)
         (release-foreground! runtime sid (:operation-id slot))
+        (deliver (:finished slot) true)
+        (swap! (:operations runtime) dissoc (:operation-id slot))
         (throw error)))))
 (defn- root-provider-settings [cwd home initial-settings]
   (let [manager (resources/create! {:cwd cwd :home home
@@ -719,25 +736,29 @@
   (run/usage-from-entries (store/active-path (:store runtime) sid)))
 
 (defn state [runtime sid]
-  (let [snapshot (store/session (:store runtime) sid)
-        slot (foreground runtime sid)
-        event-seq (latest-event-seq runtime sid)
-        registry (get-in @(:handles runtime) [sid :registry])
-        selection (get-in snapshot [:config :tools])]
-    {:session snapshot
-     :phase (if slot @(:phase slot) :idle)
-     :operation-id (:operation-id slot)
-     :queues (store/pending (:store runtime) sid)
-     :usage (usage runtime sid)
-     :event-seq event-seq
-     :repl (when registry
-             {:namespace (str (:namespace registry)) :generation (:generation registry)})
-     :tools {:selection selection
-             :capabilities (if registry (capabilities/catalog registry) [])}}))
+  (locking (session-lock runtime sid)
+    (let [snapshot (store/session (:store runtime) sid)
+          slot (foreground runtime sid)
+          operation (when slot
+                      (store/operation (:store runtime) (:operation-id slot)))
+          event-seq (latest-event-seq runtime sid)
+          registry (get-in @(:handles runtime) [sid :registry])
+          selection (get-in snapshot [:config :tools])]
+      {:session snapshot
+       :phase (if slot @(:phase slot) :idle)
+       :operation-id (:operation-id slot)
+       :operation operation
+       :queues (store/pending (:store runtime) sid)
+       :usage (usage runtime sid)
+       :event-seq event-seq
+       :repl (when registry
+               {:namespace (str (:namespace registry)) :generation (:generation registry)})
+       :tools {:selection selection
+               :capabilities (if registry (capabilities/catalog registry) [])}})))
 
 (defn session-view
-  "Returns the durable session projection, active entries, and replay cursor
-   from one session-lock boundary."
+  "Returns the durable session projection, authoritative foreground operation,
+   active entries, and replay cursor from one session-lock boundary."
   [runtime sid]
   (ensure-open! runtime)
   (locking (session-lock runtime sid)
@@ -810,6 +831,8 @@
                     :branch-summary-truncated
                     "Branch summary was truncated by the provider" {})
        (locking (session-lock runtime sid)
+         (util/check-cancelled! (:cancelled slot))
+         (reset! (:cancellable? slot) false)
          (let [branched (store/branch! (:store runtime) sid leaf
                                        (dissoc opts :expected-revision :summarize?))
                _ (emit-events! runtime (:events branched))]
@@ -821,8 +844,8 @@
                                :type :session/branch-summarized
                                :data {:from-id (get-in source [:snapshot :head])
                                       :entry-id leaf
-                                      :usage (:response/usage response)}}]})))
-       (close-handle! runtime sid)
+                                      :usage (:response/usage response)}}]})
+           (close-handle! runtime sid)))
        {:summary summary :usage (:response/usage response)}))))
 
 (defn branch! [runtime sid leaf opts]
@@ -945,7 +968,7 @@
         (value/check! (contains? #{:run :continue} (:kind slot)) :operation-not-steerable
                      "Only running agent operations accept queued input"
                      {:operation-id oid :kind (:kind slot)})
-        (value/check! (not= :settling @(:phase slot)) :operation-not-active
+        (value/check! @(:accepting-input? slot) :operation-not-active
                      "Operation has crossed its final input boundary"
                      {:operation-id oid :session-id sid})
         (let [item {:id (util/id) :session-id sid :operation-id oid :kind kind
@@ -1021,35 +1044,39 @@
                          "Operation is not the session's current foreground operation"
                          {:operation-id oid :session-id sid
                           :current-operation-id (:operation-id slot)})
-            (reset! (:cancelled slot) true)
-            (let [result (commit! runtime sid
-                                  {:operation {:id oid :status :cancelling}
-                                   :events [{:operation-id oid :type :operation/cancelling
-                                             :data {}}]})]
-              (when-let [thread @(:thread slot)]
-                (when-not (identical? thread (Thread/currentThread))
-                  (.interrupt ^Thread thread)))
-              (:operation result))))))))
+            (if-not @(:cancellable? slot)
+              op
+              (do
+                (reset! (:cancelled slot) true)
+                (let [result (commit! runtime sid
+                                      {:operation {:id oid :status :cancelling}
+                                       :events [{:operation-id oid :type :operation/cancelling
+                                                 :data {}}]})]
+                  (when-let [thread @(:thread slot)]
+                    (when-not (identical? thread (Thread/currentThread))
+                      (.interrupt ^Thread thread)))
+                  (:operation result))))))))))
 
 (defn cancel! [runtime sid]
-  (if-let [oid (:operation-id (foreground runtime sid))]
-    (cancel-operation! runtime oid)
-    (do
-      (store/session (:store runtime) sid)
-      {:session-id sid :operation-id nil :status :idle})))
+  (locking (session-lock runtime sid)
+    (if-let [oid (:operation-id (foreground runtime sid))]
+      (cancel-operation! runtime oid)
+      (do
+        (store/session (:store runtime) sid)
+        {:session-id sid :operation-id nil :status :idle}))))
+
 
 (defn wait!
   ([runtime oid] (wait! runtime oid nil))
   ([runtime oid timeout-ms]
-   (let [current (store/operation (:store runtime) oid)]
-     (if (run/terminal-operation? current)
-       current
-       (if-let [slot (get @(:operations runtime) oid)]
-         (let [value (if (nil? timeout-ms)
-                       @(:done slot)
-                       (deref (:done slot) (long (max 0 timeout-ms)) ::timeout))]
-           (if (= ::timeout value) (store/operation (:store runtime) oid) value))
-         (store/operation (:store runtime) oid))))))
+   (if-let [slot (get @(:operations runtime) oid)]
+     (let [finished (if (nil? timeout-ms)
+                      @(:finished slot)
+                      (deref (:finished slot) (long (max 0 timeout-ms)) ::timeout))]
+       (if (= ::timeout finished)
+         (store/operation (:store runtime) oid)
+         @(:done slot)))
+     (store/operation (:store runtime) oid))))
 
 (defn evaluate!
   ([runtime sid source] (evaluate! runtime sid source {}))
@@ -1106,14 +1133,14 @@
 (defn- remaining-close-millis [deadline]
   (long (max 0 (quot (- deadline (System/nanoTime)) 1000000))))
 
-(defn- await-foreground! [slot deadline]
+(defn- await-operation! [slot deadline]
   (or (realized? (:finished slot))
       (let [remaining (remaining-close-millis deadline)]
         (and (pos? remaining)
              (not= ::timeout (deref (:finished slot) remaining ::timeout))))))
 
 (defn close!
-  "Cancels owned work and closes resources only after every foreground driver
+  "Cancels owned work and closes resources only after every operation driver
    has actually exited. An incomplete close retains every handle and the store
    so a later close attempt can finish safely."
   [runtime]
@@ -1124,7 +1151,7 @@
          :executor-terminated? true :errors []}
         (let [slots (locking (:foreground runtime)
                       (compare-and-set! (:lifecycle runtime) :open :closing)
-                      (vec (vals @(:foreground runtime))))
+                      (vec (vals @(:operations runtime))))
               current (Thread/currentThread)
               cancellation-errors (atom [])]
             (doseq [slot slots]
@@ -1146,7 +1173,7 @@
                   self-slots (filterv #(identical? current @(:thread %)) slots)
                   _ (doseq [slot slots
                             :when (not (some #(identical? slot %) self-slots))]
-                      (await-foreground! slot deadline))
+                      (await-operation! slot deadline))
                   incomplete (filterv #(not (realized? (:finished %))) slots)
                   foreground-complete? (empty? incomplete)
                   executor-terminated?
@@ -1182,16 +1209,24 @@
                                     (keys @(:handles runtime)))
                       root (try (resources/close! (:resources runtime))
                                 (catch Throwable error
-                                  (swap! errors conj (value/error-map error)) nil))
-                      provider (try (provider/close! (:provider runtime))
-                                    (catch Throwable error
-                                      (swap! errors conj (value/error-map error)) nil))
-                      store (try (store/close! (:store runtime))
-                                 (catch Throwable error
-                                   (swap! errors conj (value/error-map error)) nil))]
-                  (reset! (:listeners runtime) {})
-                  (reset! (:lifecycle runtime) :closed)
-                  {:status :closed :already-closed? false
-                   :foreground-complete? true :executor-terminated? true
-                   :handles handles :resources root :provider provider :store store
-                   :errors @errors}))))))))
+                                  (swap! errors conj (value/error-map error)) nil))]
+                  (if (or (seq @(:handles runtime)) (not= :closed (:status root)))
+                    {:status :closing :already-closed? false
+                     :foreground-complete? true :executor-terminated? true
+                     :store-closed? false :handles-closed? false
+                     :handles handles :resources root
+                     :errors (into @errors (:errors root))}
+                    (let [provider (try (provider/close! (:provider runtime))
+                                        (catch Throwable error
+                                          (swap! errors conj (value/error-map error)) nil))
+                          store (try (store/close! (:store runtime))
+                                     (catch Throwable error
+                                       (swap! errors conj (value/error-map error)) nil))
+                          closed? (empty? @errors)]
+                      (when closed?
+                        (reset! (:listeners runtime) {})
+                        (reset! (:lifecycle runtime) :closed))
+                      {:status (if closed? :closed :closing) :already-closed? false
+                       :foreground-complete? true :executor-terminated? true
+                       :handles handles :resources root :provider provider :store store
+                       :errors @errors}))))))))))

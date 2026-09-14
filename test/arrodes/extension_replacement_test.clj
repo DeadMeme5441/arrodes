@@ -13,6 +13,12 @@
 (def ^:private failing-replacement-source
   "(fn [api]\n  ((:register-tool! api)\n   {:name \"read\"\n    :replace? true\n    :description \"Failing read replacement\"\n    :parameters {:type \"object\" :properties {\"path\" {:type \"string\"}} :required [\"path\"] :additionalProperties false}\n    :permission :read\n    :fn (fn [_] \"replacement-that-must-not-leak\")})\n  (throw (ex-info \"Intentional activation failure\" {})))\n")
 
+(def ^:private presentation-source
+  "(fn [api]\n  ((:register-renderer! api) {:name \"probe-renderer\" :fn (fn [event] (str \"old:\" (:content event)))})\n  ((:register-ui! api) {:name \"probe-widget\" :kind :widget :content \"old widget\"})\n  nil)\n")
+
+(def ^:private failing-presentation-source
+  "(fn [api]\n  ((:register-renderer! api) {:name \"probe-renderer\" :fn (fn [event] (str \"new:\" (:content event)))})\n  ((:register-ui! api) {:name \"probe-widget\" :kind :widget :content \"new widget\"})\n  (throw (ex-info \"Intentional presentation activation failure\" {})))\n")
+
 (defn- activation-context [database sid provider-manager]
   {:session-id sid
    :get-session (fn [& _] (store/session database sid))
@@ -64,6 +70,16 @@
                            :parameters {:type "object" :properties {}}
                            :fn (fn [_] :survived)}))
 
+(defn- presentation-host [state]
+  (fn [{:keys [kind id remove?] :as request}]
+    (let [group (if (= :renderer kind) :renderers :widgets)]
+      (swap! state update group
+             (fn [entries]
+               (if remove?
+                 (dissoc entries id)
+                 (assoc entries id request)))))
+    nil))
+
 (deftest deliberate-extension-replacement-restores-built-in-on-deactivation
   (with-environment
     replacement-source
@@ -105,6 +121,41 @@
       (resources/close! manager)
       (is (= "original read behavior"
              (capabilities/invoke-value! registry "read" {:path sample-path}))))))
+
+(deftest failed-activation-cleans-up-only-its-presentation-contributions
+  (with-environment
+    failing-presentation-source
+    (fn [{:keys [registry manager context]}]
+      (let [state (atom {:renderers {"independent-renderer" {:id "independent-renderer"}}
+                         :widgets {"independent-widget" {:id "independent-widget"}}})
+            context (assoc context :ui! (presentation-host state))]
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (resources/activate! manager registry context)))
+        (is (= #{"independent-renderer"} (set (keys (:renderers @state)))))
+        (is (= #{"independent-widget"} (set (keys (:widgets @state)))))
+        (is (empty? (resources/renderers manager registry context)))
+        (is (empty? (resources/ui-entries manager registry context)))))))
+
+(deftest failed-reload-restores-prior-presentation-contributions
+  (with-environment
+    presentation-source
+    (fn [{:keys [extension-path registry manager context]}]
+      (let [state (atom {:renderers {"independent-renderer" {:id "independent-renderer"}}
+                         :widgets {"independent-widget" {:id "independent-widget"}}})
+            context (assoc context :ui! (presentation-host state))]
+        (resources/activate! manager registry context)
+        (spit extension-path failing-presentation-source)
+        (is (thrown? clojure.lang.ExceptionInfo (resources/reload! manager)))
+        (is (= "old:value"
+               ((:fn (first (resources/renderers manager registry context)))
+                {:content "value"})))
+        (is (= "old widget"
+               (:content (first (resources/ui-entries manager registry context)))))
+        (is (= #{"independent-renderer" "probe-renderer"}
+               (set (keys (:renderers @state)))))
+        (is (= #{"independent-widget" "probe-widget"}
+               (set (keys (:widgets @state)))))
+        (is (= "old widget" (get-in @state [:widgets "probe-widget" :content])))))))
 
 (deftest repl-reregistration-remains-bounded-and-non-recursive
   (with-environment

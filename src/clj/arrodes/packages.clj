@@ -92,15 +92,15 @@
   child)
 
 (defn- installed-path-valid? [root name descriptor]
-  (let [path (:path descriptor)
-        expected (.normalize (.toAbsolutePath (.resolve (u/path root) (str name))))]
+  (let [path (:path descriptor)]
     (and (string? name)
          (= name (safe-name name))
          (= name (:name descriptor))
          (string? path)
-         (= expected (.normalize (.toAbsolutePath (u/path path))))
          (Files/isDirectory (u/path path) (make-array LinkOption 0))
-         (not (Files/isSymbolicLink (u/path path))))))
+         (not (Files/isSymbolicLink (u/path path)))
+         (= (.resolve (.toRealPath (u/path root) (make-array LinkOption 0)) name)
+            (.toRealPath (u/path path) (make-array LinkOption 0))))))
 
 (defn- delete-tree! [path]
   (let [p (u/path path)]
@@ -452,7 +452,7 @@
                 _ (assert-no-symbolic-links! payload)
                 manifest (read-manifest payload)
                 descriptor {:name name
-                            :source source
+                            :source (if (= :local (:type spec)) (:path spec) source)
                             :scope scope
                             :type (:type spec)
                             :ref (:ref spec)

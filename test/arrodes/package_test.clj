@@ -59,3 +59,21 @@
       (is (= "(fn [_] {:version 1})" (slurp (str project "/extension.clj"))))
       (is (empty? (packages/list-packages home project)))
       (finally (fixtures/remove-directory! directory)))))
+
+(deftest global-local-package-update-keeps-installing-cwd-source
+  (let [directory (fixtures/temp-directory)
+        home (str directory "/home")
+        project-a (str directory "/A")
+        project-b (str directory "/B")
+        source-a (make-package! (str project-a "/pkg") "(fn [_] {:source :a :version 1})")
+        _ (make-package! (str project-b "/pkg") "(fn [_] {:source :b :version 1})")]
+    (try
+      (let [installed (packages/install! home project-a "./pkg" {:scope :global})
+            installed-file (str (:path installed) "/extension.clj")]
+        (is (= (.getCanonicalPath (io/file source-a)) (:source installed)))
+        (spit (str source-a "/extension.clj") "(fn [_] {:source :a :version 2})")
+        (packages/update! home project-b (:name installed) {:scope :global})
+        (is (= "(fn [_] {:source :a :version 2})" (slurp installed-file)))
+        (is (= (.getCanonicalPath (io/file source-a))
+               (:source (first (packages/list-packages home project-b {:scope :global}))))))
+      (finally (fixtures/remove-directory! directory)))))

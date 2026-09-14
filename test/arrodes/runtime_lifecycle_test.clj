@@ -1,5 +1,6 @@
 (ns arrodes.runtime-lifecycle-test
   (:require [arrodes.runtime :as runtime]
+            [arrodes.mcp :as mcp]
             [arrodes.session-test :as fixtures]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -140,6 +141,177 @@
         (is (some #(and (string? %)
                         (str/starts-with? % "Conversation summary:\n"))
                   contents)))
+      (finally
+        (runtime/close! rt)
+        (fixtures/remove-directory! directory)))))
+
+(deftest post-turn-compaction-does-not-reopen-input-admission
+  (let [directory (fixtures/temp-directory)
+        runtime* (atom nil)
+        session-id* (atom nil)
+        calls (atom 0)
+        rejected (atom nil)
+        provider (fn [_ _]
+                   (case (swap! calls inc)
+                     1 (answer :fixture "large" "First answer")
+                     2 (assoc (answer :fixture "large" "Second answer")
+                              :response/usage {:usage/input-tokens 60000})
+                     3 (do
+                         (reset! rejected
+                                 (try
+                                   (runtime/follow-up! @runtime* @session-id*
+                                                       "Must not be stranded")
+                                   (catch clojure.lang.ExceptionInfo error
+                                     (ex-data error))))
+                         (answer :fixture "large" "Durable summary"))))
+        settings {:providers
+                  {:fixture {:type :profile-alias
+                             :provider :openai
+                             :models [{:id "large" :context-window 100000
+                                       :thinking-levels [:none]}]}}}
+        rt (runtime/open! {:cwd directory :home (str directory "/home")
+                           :data-dir (str directory "/data")
+                           :settings settings :complete-fn provider})
+        config {:provider :fixture :model "large" :thinking :none :tools []
+                :instructions ""
+                :settings {:compaction-threshold 0.5
+                           :compaction-keep-entries 1}}
+        sid (:id (runtime/create-session! rt {:config config}))]
+    (try
+      (reset! runtime* rt)
+      (reset! session-id* sid)
+      (runtime/run! rt sid "First prompt")
+      (runtime/run! rt sid "Second prompt")
+      (is (= 3 @calls))
+      (is (= "operation-not-active" (:error/code @rejected)))
+      (is (some #(= :compaction (:kind %)) (runtime/entries rt sid)))
+      (is (empty? (runtime/pending rt sid)))
+      (finally
+        (runtime/close! rt)
+        (fixtures/remove-directory! directory)))))
+
+(deftest terminal-wait-timeout-remains-nonterminal-until-foreground-release
+  (let [directory (fixtures/temp-directory)
+        rt (runtime/open! {:cwd directory :home (str directory "/home")
+                           :data-dir (str directory "/data")
+                           :complete-fn (fn [_ _] (answer "Done"))})
+        sid (:id (runtime/create-session! rt {:config fixtures/config}))
+        release-var (ns-resolve 'arrodes.runtime 'release-foreground!)
+        release-foreground @release-var
+        entered (promise)
+        release (promise)]
+    (try
+      (with-redefs-fn
+        {release-var
+         (fn [runtime session-id operation-id]
+           (deliver entered operation-id)
+           @release
+           (release-foreground runtime session-id operation-id))}
+        (fn []
+          (let [first-operation (runtime/start! rt sid "First operation")]
+            (when (= ::timeout (deref entered 10000 ::timeout))
+              (throw (ex-info "Operation did not reach foreground release" {})))
+            (is (= :running
+                   (:status (runtime/wait! rt (:id first-operation) 0))))
+            (let [waiting (promise)
+                  next-operation
+                  (future
+                    (deliver waiting true)
+                    (runtime/wait! rt (:id first-operation) 10000)
+                    (runtime/start! rt sid "Second operation"))]
+              @waiting
+              (try
+                (is (= ::blocked (deref next-operation 100 ::blocked)))
+                (finally
+                  (deliver release true)))
+              (let [second-operation (deref next-operation 10000 ::timeout)]
+                (is (map? second-operation))
+                (is (= :completed
+                       (:status (runtime/wait! rt (:id second-operation) 10000)))))))))
+      (finally
+        (deliver release true)
+        (runtime/close! rt)
+        (fixtures/remove-directory! directory)))))
+
+(deftest terminal-publication-observes-released-foreground-snapshot
+  (let [directory (fixtures/temp-directory)
+        rt (runtime/open! {:cwd directory :home (str directory "/home")
+                           :data-dir (str directory "/data")
+                           :complete-fn (fn [_ _] (answer "Done"))})
+        sid (:id (runtime/create-session! rt {:config fixtures/config}))
+        observed (promise)
+        unsubscribe
+        (runtime/subscribe!
+         rt
+         (fn [event]
+           (when (and (= sid (:session-id event))
+                      (= :operation/completed (:type event)))
+             (deliver observed (runtime/session-view rt sid)))))]
+    (try
+      (runtime/run! rt sid "Settle coherently")
+      (let [view (deref observed 10000 ::timeout)]
+        (is (map? view))
+        (is (= :idle (get-in view [:state :phase])))
+        (is (nil? (get-in view [:state :operation-id])))
+        (is (nil? (get-in view [:state :operation])))
+        (is (= :idle (get-in view [:state :session :status]))))
+      (finally
+        (unsubscribe)
+        (runtime/close! rt)
+        (fixtures/remove-directory! directory)))))
+
+(deftest session-view-reports-cancelling-operation-until-worker-exits
+  (let [directory (fixtures/temp-directory)
+        entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        provider (fn [_ _]
+                   (.countDown entered)
+                   (await-uninterruptibly! release)
+                   (answer "Released"))
+        rt (runtime/open! {:cwd directory :home (str directory "/home")
+                           :data-dir (str directory "/data")
+                           :complete-fn provider})
+        sid (:id (runtime/create-session! rt {:config fixtures/config}))]
+    (try
+      (let [operation (runtime/start! rt sid "Wait for cancellation")]
+        (await-latch! entered)
+        (runtime/cancel-operation! rt (:id operation))
+        (let [view (runtime/session-view rt sid)]
+          (is (= :provider (get-in view [:state :phase])))
+          (is (= (:id operation) (get-in view [:state :operation-id])))
+          (is (= :cancelling (get-in view [:state :operation :status])))
+          (is (= (runtime/operation rt (:id operation))
+                 (get-in view [:state :operation]))))
+        (.countDown release)
+        (is (= :cancelled (:status (runtime/wait! rt (:id operation) 10000)))))
+      (finally
+        (.countDown release)
+        (runtime/close! rt)
+        (fixtures/remove-directory! directory)))))
+
+(deftest failed-mcp-cleanup-retains-runtime-store-ownership-until-retry
+  (let [directory (fixtures/temp-directory)
+        options {:cwd directory :home (str directory "/home")
+                 :data-dir (str directory "/data")}
+        rt (runtime/open! options)
+        sid (:id (runtime/create-session! rt {:config fixtures/config}))
+        fail-once? (atom true)
+        close-pool mcp/close!]
+    (try
+      (runtime/registry rt sid)
+      (with-redefs [mcp/close!
+                    (fn [pool]
+                      (if (compare-and-set! fail-once? true false)
+                        {:closed? true :cleanup-complete? false
+                         :errors [{:server "fixture" :message "Scope remains alive"}]}
+                        (close-pool pool)))]
+        (is (= :closing (:status (runtime/close! rt))))
+        (let [contender (try {:runtime (runtime/open! options)}
+                             (catch clojure.lang.ExceptionInfo error
+                               {:code (:error/code (ex-data error))}))]
+          (when-let [opened (:runtime contender)] (runtime/close! opened))
+          (is (= "store-in-use" (:code contender))))
+        (is (= :closed (:status (runtime/close! rt)))))
       (finally
         (runtime/close! rt)
         (fixtures/remove-directory! directory)))))

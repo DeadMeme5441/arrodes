@@ -17,6 +17,7 @@
 (def ^:private context-names ["AGENTS.override.md" "AGENTS.md" "AGENTS.MD" "CLAUDE.md" "CLAUDE.MD"])
 (def ^:private resource-kinds [:extensions :skills :prompts :themes])
 (def ^:private provider-leases (atom {}))
+(def ^:private settings-locks (atom {}))
 
 (defn- fail! [code message data] (value/fail! code message data))
 
@@ -74,7 +75,7 @@
                  {:path next-path}))
         (assert-no-secrets! child next-path)))
 
-    (sequential? value)
+    (or (sequential? value) (set? value))
     (doseq [[index child] (map-indexed vector value)]
       (assert-no-secrets! child (conj path index))))
   value)
@@ -324,17 +325,25 @@
     :else (fail! :resource/invalid-setting "Resource settings entries require a string path or {:path string}"
                  {:entry entry})))
 
+(defn- configured-path [base entry]
+  (let [path (u/path (:path entry))]
+    (if (.isAbsolute path)
+      (.normalize path)
+      (.normalize (.resolve (u/path base) path)))))
+
 (defn- resolve-configured-path [base entry]
   (let [raw (:path entry)
-        path (u/path raw)
-        resolved (if (.isAbsolute path) (.normalize path) (.normalize (.resolve (u/path base) path)))]
+        resolved (configured-path base entry)]
     (when-not (Files/exists resolved (make-array LinkOption 0))
       (fail! :resource/not-found "Configured resource path does not exist" {:path raw :base base}))
     (canonical-existing resolved)))
 
 (defn- discover-entry [kind root entry source scope]
-  (let [options (normalize-path-entry entry)]
-    (if (= false (:enabled? options))
+  (let [options (normalize-path-entry entry)
+        disabled? (= false (:enabled? options))
+        candidate (configured-path root options)]
+    (if (and disabled?
+             (not (Files/exists candidate (make-array LinkOption 0))))
       []
       (let [path (resolve-configured-path root options)
             resources
@@ -346,11 +355,13 @@
                         (scan-skills path source scope))
               :prompts (mapv #(prompt-descriptor % source scope) (flat-files path ".md"))
               :themes (mapv #(theme-descriptor % source scope) (flat-files path ".edn")))]
-        (when (empty? resources)
+        (when (and (empty? resources) (not disabled?))
           (fail! :resource/no-matches
                  "Configured resource path contains no resources of the requested type"
                  {:kind kind :path (:path options) :source source}))
-        resources))))
+        (if disabled?
+          (mapv #(assoc % :excluded? true) resources)
+          resources)))))
 
 (defn- discover-default [kind root source scope]
   (let [path (u/resolve-path root (name kind))]
@@ -376,6 +387,7 @@
   (->> groups
        (reduce (fn [by-name descriptor] (assoc by-name (:name descriptor) descriptor)) {})
        vals
+       (remove :excluded?)
        (sort-by :name)
        vec))
 
@@ -519,6 +531,21 @@
      :themes (mapv #(assoc (public-resource %) :data (:data %) :theme (:data %)) (get-in state [:catalog :themes]))
      :commands active-commands}))
 
+(defn- canonical-shared-path [path]
+  (loop [candidate (.normalize (.toAbsolutePath (u/path path)))
+         suffix ()]
+    (if (Files/exists candidate (make-array LinkOption 0))
+      (str (reduce (fn [^Path root ^Path child] (.resolve root child))
+                   (.toRealPath candidate (make-array LinkOption 0))
+                   suffix))
+      (recur (.getParent candidate) (conj suffix (.getFileName candidate))))))
+
+(defn- settings-lock [path]
+  (let [key (canonical-shared-path path)]
+    (get (swap! settings-locks
+                #(if (contains? % key) % (assoc % key (Object.))))
+         key)))
+
 (defn update-settings!
   "Atomically patches global or trusted project settings and reloads effective resources. nil removes a key."
   [manager changes {:keys [scope]}]
@@ -529,27 +556,28 @@
     (when (and (= scope :project) (not (trusted-project? manager)))
       (fail! :trust/required "Project must be trusted before project settings can be changed"
              {:cwd (:cwd manager)}))
-    (locking (:lock manager)
-      (let [path (if (= scope :global) (global-settings-path manager) (project-settings-path manager))
-            existed? (file? path)
-            existing (read-map-file path {} :settings/invalid)
-            updated (assert-no-secrets! (patch-map existing changes) [scope])]
-        (u/write-edn! path updated)
-        (try
-          (reload! manager)
-          {:settings (settings manager)
-           :application {:scope scope :changed (vec (sort (keys changes))) :reloaded? true}}
-          (catch Throwable error
-            (try
-              (if existed?
-                (u/write-edn! path existing)
-                (Files/deleteIfExists (u/path path)))
-              (catch Throwable restore-error
-                (throw (ex-info (ex-message error)
-                                (assoc (ex-data error)
-                                       :settings-restore-error (ex-message restore-error))
-                                error))))
-            (throw error)))))))
+    (let [path (if (= scope :global) (global-settings-path manager) (project-settings-path manager))]
+      (locking (settings-lock path)
+        (let [existed? (file? path)
+              existing (read-map-file path {} :settings/invalid)
+              updated (assert-no-secrets! (patch-map existing changes) [scope])]
+          (u/write-edn! path updated)
+          (try
+            (reload! manager)
+            {:settings (settings manager)
+             :application {:scope scope :changed (vec (sort (keys changes))) :reloaded? true}}
+            (catch Throwable error
+              (try
+                (when (= updated (read-map-file path {} :settings/invalid))
+                  (if existed?
+                    (u/write-edn! path existing)
+                    (Files/deleteIfExists (u/path path))))
+                (catch Throwable restore-error
+                  (throw (ex-info (ex-message error)
+                                  (assoc (ex-data error)
+                                         :settings-restore-error (ex-message restore-error))
+                                  error))))
+              (throw error))))))))
 
 (defn- find-named! [manager kind name code]
   (or (some #(when (= name (:name %)) %) (get-in @(:state manager) [:catalog kind]))
@@ -723,10 +751,17 @@
       true)))
 
 (defn- rollback! [effects]
-  (reduce (fn [errors cleanup]
-            (try (cleanup) errors
-                 (catch Throwable error (conj errors {:message (ex-message error) :data (ex-data error)}))))
-          [] (reverse @effects)))
+  (let [pending (volatile! [])
+        errors (reduce (fn [errors cleanup]
+                         (try
+                           (cleanup)
+                           errors
+                           (catch Throwable error
+                             (vswap! pending conj cleanup)
+                             (conj errors {:message (ex-message error) :data (ex-data error)}))))
+                       [] (reverse @effects))]
+    (reset! effects (vec (rseq @pending)))
+    errors))
 
 (defn- call-context! [context key args]
   (if-let [callback (get context key)]
@@ -1040,7 +1075,10 @@
         register! (resolve-api 'arrodes.capabilities/register-restorable!)
         restore! (resolve-api 'arrodes.capabilities/restore!)]
     ;; The pool exists before any receipt, so every partial activation can close it.
-    (swap! effects conj #(mcp/close! pool))
+    (swap! effects conj
+           #(let [report (mcp/close! pool)]
+              (value/check! (:cleanup-complete? report) :mcp/cleanup-incomplete
+                            "MCP clients did not finish shutting down" {:cleanup report})))
     (doseq [descriptor [(skill-capability manager owner)
                         (prompt-capability manager owner)
                         (mcp/gateway-descriptor pool owner)]]
@@ -1060,10 +1098,7 @@
   (when (:closed? @(:state manager))
     (fail! :resource/closed "Resource manager is closed" {}))
   (validate-activation-context! manager context)
-  (doseq [key (keep (fn [[key activation]]
-                      (when (= key (activation-key registry context)) key))
-                    @(:activations manager))]
-    (deactivate! manager key))
+  (deactivate! manager (activation-key registry context))
   (let [activation-id (u/id)
         effects (atom [])
         extensions (filter :enabled? (get-in @(:state manager) [:catalog :extensions]))
@@ -1117,14 +1152,14 @@
       {:status :not-active}
       (let [errors (rollback! (:effects record))
             id (:id record)]
+        (when (seq errors)
+          (fail! :extension/teardown-failed "One or more extension teardown callbacks failed"
+                 {:activation-id id :errors errors}))
         (swap! (:activations manager) dissoc key)
         (swap! (:commands manager) dissoc id)
         (swap! (:renderers manager) dissoc id)
         (swap! (:ui-entries manager) dissoc id)
-        (if (seq errors)
-          (fail! :extension/teardown-failed "One or more extension teardown callbacks failed"
-                 {:activation-id id :errors errors})
-          {:id id :status :inactive :extensions (:extensions record)})))))
+        {:id id :status :inactive :extensions (:extensions record)}))))
 
 (defn- active-command [manager registry context name]
   (let [activation (get @(:activations manager) (activation-key registry context))]
@@ -1247,10 +1282,13 @@
                                                   :message (ex-message error)
                                                   :data (ex-data error)}))))
                            [] records)]
-        (reset! (:commands manager) {})
-        (reset! (:renderers manager) {})
-        (reset! (:ui-entries manager) {})
-        (unload-generated-namespaces! @(:loaded-code manager))
-        (reset! (:loaded-code manager) {})
-        (swap! (:state manager) assoc :closed? true)
-        {:status :closed :already-closed? false :errors errors}))))
+        (if (seq errors)
+          {:status :closing :already-closed? false :errors errors}
+          (do
+            (reset! (:commands manager) {})
+            (reset! (:renderers manager) {})
+            (reset! (:ui-entries manager) {})
+            (unload-generated-namespaces! @(:loaded-code manager))
+            (reset! (:loaded-code manager) {})
+            (swap! (:state manager) assoc :closed? true)
+            {:status :closed :already-closed? false :errors []}))))))

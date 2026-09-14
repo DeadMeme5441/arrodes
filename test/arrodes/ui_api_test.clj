@@ -4,6 +4,7 @@
             [arrodes.session-test :as fixtures]
             [arrodes.store :as store]
             [arrodes.platform :as u]
+            [clojure.java.io :as io]
             [clojure.edn :as edn]
             [clojure.test :refer [deftest is testing]]))
 
@@ -144,3 +145,46 @@
           inspected (commands/dispatch! rt "result.inspect"
                                         {:session-id sid :result-id (get-in result [:result :id])})]
       (is (= {:status :ready "status" "literal"} (edn/read-string (:value-edn inspected)))))))
+
+(deftest registered-renderer-and-widget-use-the-runtime-ui-boundary
+  (let [directory (fixtures/temp-directory)
+        extension (io/file directory ".arrodes-mono" "extensions" "native_ui.clj")
+        requests (atom [])
+        runtime* (atom nil)]
+    (try
+      (io/make-parents extension)
+      (spit extension
+            "(fn [api]\n  ((:register-renderer! api) {:name \"fixture-renderer\" :fn (fn [event] (str \"rendered:\" (:content event)))})\n  ((:register-ui! api) {:name \"fixture-widget\" :kind :widget :content \"Ready\"})\n  nil)\n")
+      (let [rt (runtime/open! {:cwd directory :home (str directory "/home")
+                               :data-dir (str directory "/data") :trust true
+                               :complete-fn (fn [_ _] (answer "unused"))
+                               :ui! (fn [request]
+                                      (swap! requests conj request)
+                                      request)})
+            sid (:id (create-session rt))]
+        (reset! runtime* rt)
+        (runtime/registry rt sid)
+        (let [renderer (first (filter #(and (= :renderer (:kind %))
+                                            (not (:remove? %)))
+                                      @requests))
+              widget (first (filter #(and (= :widget (:kind %))
+                                          (not (:remove? %)))
+                                    @requests))]
+          (is (= sid (:session-id renderer)))
+          (is (= "rendered:answer" ((:render renderer) {:content "answer"})))
+          (is (= {:id "fixture-widget" :content "Ready" :session-id sid}
+                 (select-keys widget [:id :content :session-id]))))
+        (doseq [kind [:set-widget :render :editor]]
+          (is (= kind (:kind (runtime/ui! rt {:kind kind :id (name kind)})))))
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (runtime/ui! rt {:kind :unknown})))
+        (runtime/close! rt)
+        (is (= #{[:renderer "fixture-renderer"] [:widget "fixture-widget"]}
+               (->> @requests
+                    (filter :remove?)
+                    (map (juxt :kind :id))
+                    set))))
+      (finally
+        (when-let [rt @runtime*]
+          (runtime/close! rt))
+        (fixtures/remove-directory! directory)))))
