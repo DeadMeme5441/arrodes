@@ -1,6 +1,7 @@
 (ns arrodes.mcp
   "Session-owned, lazy Model Context Protocol clients and their REPL gateway."
   (:require [arrodes.capabilities :as capabilities]
+            [arrodes.owned-process :as owned-process]
             [arrodes.platform :as u]
             [arrodes.value :as value]
             [clojure.string :as str]
@@ -9,10 +10,13 @@
             [plumcp.core.api.mcp-client :as client]
             [plumcp.core.client.client-support :as client-support]
             [plumcp.core.client.http-client-transport :as http-transport]
-            [plumcp.core.client.stdio-client-transport :as stdio-transport]
+            [plumcp.core.protocol :as protocol]
             [plumcp.core.support.http-client :as http-client]
-            [plumcp.core.support.traffic-logger :as traffic])
-  (:import (java.net URI)
+            [plumcp.core.support.traffic-logger :as traffic]
+            [plumcp.core.util :as plum-util])
+  (:import (java.io BufferedReader InputStreamReader OutputStreamWriter)
+           (java.net URI)
+           (java.nio.charset StandardCharsets)
            (java.nio.file Files LinkOption)))
 
 (def ^:private default-timeout-ms 30000)
@@ -220,45 +224,145 @@
          (fn [state]
            (if (= token (:attempt state)) (f state) state))))
 
+(defn- daemon-thread [name f]
+  (doto (Thread. ^Runnable f)
+    (.setDaemon true)
+    (.setName name)
+    (.start)))
+
+(defn- stdio-client-transport [options]
+  (let [{:keys [command-tokens dir env on-server-exit on-stderr-text]} options
+        owner (atom nil)
+        writer (atom nil)
+        closing? (atom false)
+        start!
+        (fn [on-message]
+          (let [owned (owned-process/start! command-tokens {:cwd dir :env env})
+                process ^Process (:process owned)
+                stdin (OutputStreamWriter. (.getOutputStream process)
+                                           StandardCharsets/UTF_8)]
+            (reset! owner owned)
+            (reset! writer stdin)
+            (daemon-thread
+             "arrodes-mcp-stdout"
+             (fn []
+               (with-open [reader (BufferedReader.
+                                   (InputStreamReader. (.getInputStream process)
+                                                       StandardCharsets/UTF_8))]
+                 (loop []
+                   (when-let [line (.readLine reader)]
+                     (when-not @closing?
+                       (try (on-message (plum-util/json-parse line))
+                            (catch Throwable _ nil)))
+                     (recur))))))
+            (daemon-thread
+             "arrodes-mcp-stderr"
+             (fn []
+               (with-open [reader (BufferedReader.
+                                   (InputStreamReader. (.getErrorStream process)
+                                                       StandardCharsets/UTF_8))]
+                 (loop []
+                   (when-let [line (.readLine reader)]
+                     (when-not @closing? (on-stderr-text line))
+                     (recur))))))
+            (daemon-thread
+             "arrodes-mcp-exit"
+             (fn []
+               (let [exit (.waitFor process)]
+                 (when-not @closing?
+                   (try
+                     (owned-process/stop! owned)
+                     (compare-and-set! owner owned nil)
+                     (on-server-exit exit nil)
+                     (catch Throwable cleanup-error
+                       (on-server-exit exit cleanup-error)))))))))
+        stop!
+        (fn []
+          (reset! closing? true)
+          (when-let [owned @owner]
+            (owned-process/stop! owned)
+            (compare-and-set! owner owned nil))
+          (reset! writer nil))]
+    {:owner owner
+     :transport
+     (reify
+       protocol/IClientTransport
+       (client-transport-info [_] {:id :stdio :command-tokens command-tokens})
+       (start-client-transport [_ on-message] (start! on-message))
+       (stop-client-transport! [_ _] (stop!))
+       (send-message-to-server [_ message]
+         (if-let [output @writer]
+           (locking output
+             (.write ^OutputStreamWriter output (plum-util/json-write message))
+             (.write ^OutputStreamWriter output "\n")
+             (.flush ^OutputStreamWriter output))
+           (throw (ex-info "MCP stdio transport is not running"
+                           {:error/code "mcp/transport-closed"}))))
+       (upon-handshake-success [_ _] nil))}))
+
 (defn- make-transport [pool name config token]
   (case (:transport config)
     :stdio
-    (stdio-transport/run-command
+    (stdio-client-transport
      {:command-tokens (into [(expand-environment (:command config))]
                             (map expand-environment (:args config)))
       :dir (:cwd config)
       :env (some-> (:env config) expand-map)
       :on-server-exit
-      (fn [exit-code]
-        (update-attempt! pool name token
-                         #(-> %
-                              (assoc :status :error
-                                     :error (str "MCP server exited with code " exit-code))
-                              (dissoc :client :attempt))))
+      (fn [exit-code cleanup-error]
+        (update-attempt!
+         pool name token
+         #(cond-> (-> %
+                      (assoc :status (if cleanup-error :cleanup-failed :error)
+                             :error (if cleanup-error
+                                      (str "MCP server exited but cleanup failed: "
+                                           (ex-message cleanup-error))
+                                      (str "MCP server exited with code " exit-code)))
+                      (dissoc :client :attempt))
+            (nil? cleanup-error) (dissoc :owned))))
       :on-stderr-text
       (fn [text]
         (update-attempt! pool name token #(assoc % :last-stderr (str text))))})
 
     :streamable-http
-    (let [headers (some-> (:headers config) expand-map)
-          timeout-ms (:timeout-ms config)
-          transport-client
-          (http-client/make-http-client
-           (expand-environment (:url config))
-           :timeout-millis timeout-ms
-           :request-middleware
-           (fn [request]
-             (cond-> (assoc request :timeout-millis timeout-ms)
-               headers (update :headers merge headers))))]
-      (http-transport/make-streamable-http-transport transport-client))))
+    {:transport
+     (let [headers (some-> (:headers config) expand-map)
+           timeout-ms (:timeout-ms config)
+           transport-client
+           (http-client/make-http-client
+            (expand-environment (:url config))
+            :timeout-millis timeout-ms
+            :request-middleware
+            (fn [request]
+              (cond-> (assoc request :timeout-millis timeout-ms)
+                headers (update :headers merge headers))))]
+       (http-transport/make-streamable-http-transport transport-client))
+     :owner (atom nil)}))
 
 (defn- make-client [pool name config token]
-  (client/make-client
-   {:info (entity-support/make-info "Arrodes" "0.1.0" "Arrodes headless runtime")
-    :client-transport (make-transport pool name config token)
-    :traffic-logger traffic/nop-traffic-logger
-    :print-banner? false
-    :heartbeat-seconds 0}))
+  (let [{:keys [transport owner]} (make-transport pool name config token)]
+    (try
+      (let [mcp-client
+            (client/make-client
+             {:info (entity-support/make-info "Arrodes" "0.1.0" "Arrodes headless runtime")
+              :client-transport transport
+              :traffic-logger traffic/nop-traffic-logger
+              :print-banner? false
+              :heartbeat-seconds 0})]
+        {:client mcp-client :owned @owner})
+      (catch Throwable error
+        (when-let [owned @owner]
+          (try
+            (owned-process/stop! owned)
+            (catch Throwable cleanup-error
+              (swap! (:states pool) assoc name
+                     {:name name :status :cleanup-failed :owned owned
+                      :error (ex-message cleanup-error)})
+              (throw (ex-info (str "Could not clean up failed MCP connection " name)
+                              (merge (ex-data cleanup-error)
+                                     {:error/code "mcp/cleanup-failed" :server name})
+                              cleanup-error)))))
+        (throw error)))))
 
 (defn- remaining-ms [deadline server operation]
   (let [remaining (- deadline (System/currentTimeMillis))]
@@ -365,11 +469,28 @@
   (when-let [state (get @(:states pool) name)]
     (swap! (:states pool) update name #(-> % (assoc :status :disconnecting)
                                                   (dissoc :attempt)))
-    (when-let [mcp-client (:client state)]
-      (try (client/disconnect! mcp-client) (catch Throwable _ nil)))
-    (swap! (:states pool) update name
-           #(when % (-> (select-keys % [:name])
-                        (assoc :status status))))))
+    (let [client-error (when-let [mcp-client (:client state)]
+                         (try (client/disconnect! mcp-client) nil
+                              (catch Throwable error error)))
+          owner-error (when-let [owned (:owned state)]
+                        (try (owned-process/stop! owned) nil
+                             (catch Throwable error error)))
+          error (or owner-error client-error)]
+      (if error
+        (do
+          (swap! (:states pool) assoc name
+                 (cond-> (-> state
+                             (dissoc :attempt)
+                             (assoc :status :cleanup-failed :error (ex-message error)))
+                   (nil? owner-error) (dissoc :owned :client)))
+          (throw (ex-info (str "Could not clean up MCP server " name ": "
+                               (or (ex-message error) (.getName (class error))))
+                          (merge (ex-data error)
+                                 {:error/code "mcp/cleanup-failed" :server name})
+                          error)))
+        (swap! (:states pool) update name
+               #(when % (-> (select-keys % [:name])
+                            (assoc :status status))))))))
 
 (defn disconnect!
   "Disconnects one session-owned MCP client."
@@ -396,12 +517,14 @@
         (swap! (:states pool) assoc name {:name name :status :connecting :attempt token})
         (progress! {:type :mcp/connection :server name :status :connecting})
         (try
-          (let [mcp-client (make-client pool name config token)
-                _ (reset! candidate mcp-client)
-                initialized (initialize! mcp-client
+          (let [{:keys [client owned] :as connection} (make-client pool name config token)
+                _ (reset! candidate connection)
+                _ (update-attempt! pool name token
+                                   #(assoc % :client client :owned owned))
+                initialized (initialize! client
                                          (remaining-ms deadline name "initialize") name)
                 provisional {:name name :status :connecting :attempt token
-                             :client mcp-client :initialize initialized}
+                             :client client :owned owned :initialize initialized}
                 tools (if (supports? initialized :tools)
                         (list-items! provisional :tools deadline) [])
                 resources (if (supports? initialized :resources)
@@ -421,19 +544,40 @@
                 (progress! {:type :mcp/connection :server name :status :ready})
                 ready)
               (do
-                (client/disconnect! mcp-client)
+                (disconnect-locked! pool name :disconnected)
                 (fail! :mcp/connection-superseded
                        "MCP connection attempt was superseded" {:server name}))))
           (catch Throwable error
-            (when-let [mcp-client @candidate]
-              (try (client/disconnect! mcp-client) (catch Throwable _ nil)))
-            (update-attempt! pool name token
-                             #(-> (select-keys % [:name])
-                                  (assoc :status :error :error (ex-message error))))
-            (if (or (= "cancelled" (:error/code (ex-data error)))
-                    (u/cancelled? (:cancelled? (current-context))))
+            (let [cleanup-error
+                  (when-let [{mcp-client :client owned :owned} @candidate]
+                    (when mcp-client
+                      (try (client/disconnect! mcp-client) (catch Throwable _ nil)))
+                    (when owned
+                      (try (owned-process/stop! owned) nil
+                           (catch Throwable cleanup-error cleanup-error))))]
+              (update-attempt!
+               pool name token
+               #(if cleanup-error
+                  (-> % (assoc :status :cleanup-failed
+                               :error (str "Connection failed and cleanup was incomplete: "
+                                           (ex-message cleanup-error))))
+                  (-> (select-keys % [:name])
+                      (assoc :status :error :error (ex-message error)))))
+              (when cleanup-error
+                (throw (ex-info (str "Could not clean up failed MCP connection " name)
+                                (merge (ex-data cleanup-error)
+                                       {:error/code "mcp/cleanup-failed" :server name})
+                                cleanup-error))))
+            (cond
+              (= "mcp/cleanup-failed" (:error/code (ex-data error)))
+              (throw error)
+
+              (or (= "cancelled" (:error/code (ex-data error)))
+                  (u/cancelled? (:cancelled? (current-context))))
               (fail! :cancelled "MCP connection was cancelled"
                      {:server name :cause (ex-message error)})
+
+              :else
               (throw (ex-info (str "Could not connect to MCP server " name ": "
                                    (or (ex-message error) (.getName (class error))))
                               (merge (ex-data error)
@@ -463,6 +607,7 @@
                                  (select-keys (:serverInfo (:initialize state))
                                               [:name :version :title :description]))
       (:tools state) (assoc :tool-count (count (:tools state)))
+      (:owned state) (assoc :process-ownership (:kind (:owned state)))
       (:resources state) (assoc :resource-count (count (:resources state)))
       (:prompts state) (assoc :prompt-count (count (:prompts state))))))
 
@@ -638,18 +783,23 @@
             :details {:gateway :mcp :action action}}))})
 
 (defn close!
-  "Disconnects all session-owned clients and rejects subsequent operations."
+  "Disconnects all session-owned clients and rejects subsequent operations.
+   Cleanup failures are reported and retained so a later close can retry them."
   [pool]
-  (if (compare-and-set! (:closed? pool) false true)
-    (let [errors
-          (reduce
-           (fn [result name]
-             (locking (server-lock pool name)
-               (try
-                 (disconnect-locked! pool name :closed)
-                 result
-                 (catch Throwable error
-                   (conj result {:server name :message (ex-message error)})))))
-           [] (keys (:configs pool)))]
-      {:closed? true :already-closed? false :errors errors})
-    {:closed? true :already-closed? true :errors []}))
+  (let [first-close? (compare-and-set! (:closed? pool) false true)
+        errors
+        (reduce
+         (fn [result name]
+           (locking (server-lock pool name)
+             (try
+               (disconnect-locked! pool name :closed)
+               result
+               (catch Throwable error
+                 (conj result {:server name
+                               :code (:error/code (ex-data error))
+                               :message (ex-message error)})))))
+         [] (keys (:configs pool)))]
+    {:closed? true
+     :cleanup-complete? (empty? errors)
+     :already-closed? (not first-close?)
+     :errors errors}))

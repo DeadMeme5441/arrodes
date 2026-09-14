@@ -3,13 +3,13 @@
   absolute; this namespace deliberately does not claim to provide an OS sandbox."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
+            [arrodes.owned-process :as owned-process]
             [arrodes.platform :as util]
             [arrodes.value :as value])
   (:import (java.io BufferedReader ByteArrayOutputStream File InputStream InputStreamReader)
-           (java.nio ByteBuffer)
+           (java.nio ByteBuffer CharBuffer)
            (java.nio.charset CharacterCodingException CodingErrorAction StandardCharsets)
            (java.nio.file FileVisitResult Files LinkOption Path Paths SimpleFileVisitor)
-           (java.nio.file.attribute FileAttribute)
            (java.util Base64)
            (java.util.concurrent TimeUnit)
            (java.util.regex Pattern PatternSyntaxException)))
@@ -28,7 +28,6 @@
 (def ^:private max-search-file-lines 100000)
 (def ^:private max-directory-entries 100000)
 (def ^:private max-exact-edits 1000)
-(def ^:private max-process-handles 10000)
 (def ^:private ignored-directory-names
   #{".git" ".hg" ".svn" ".cache" ".gradle" ".idea" ".next" ".turbo"
     "build" "coverage" "dist" "node_modules" "out" "target"})
@@ -64,6 +63,11 @@
 (defn- resolve-path ^Path [cwd value]
   (let [path (Paths/get (str value) (make-array String 0))]
     (.normalize (.toAbsolutePath (if (.isAbsolute path) path (.resolve (Paths/get cwd (make-array String 0)) path))))))
+(defn- mutation-path ^Path [cwd value]
+  (let [target (resolve-path cwd value)]
+    (if (Files/exists target (make-array LinkOption 0))
+      (.toRealPath target (make-array LinkOption 0))
+      target)))
 
 (defn- require-regular-file! [^Path path display]
   (value/check! (Files/exists path (make-array LinkOption 0)) :not-found
@@ -192,7 +196,7 @@
 
 (defn- write-tool [cwd current-context {:keys [path content]}]
   (check-cancelled! current-context)
-  (let [target (resolve-path cwd path)]
+  (let [target (mutation-path cwd path)]
     (value/check! (string? content) :invalid-arguments "write content must be a string" {:path path})
     (let [bytes (alength (.getBytes content StandardCharsets/UTF_8))]
       (value/check! (<= bytes max-edit-bytes) :file-too-large
@@ -212,7 +216,7 @@
       (let [at (.indexOf content needle from)]
         (if (neg? at)
           positions
-          (recur (+ at (count needle)) (conj positions at)))))))
+          (recur (inc at) (conj positions at)))))))
 
 (defn- line-ending [text]
   (if (and (str/includes? text "\r\n")
@@ -266,7 +270,7 @@
 (defn- edit-tool [cwd current-context {:keys [path edits]}]
   (check-cancelled! current-context)
   (validate-edits! edits path)
-  (let [target (resolve-path cwd path)
+  (let [target (mutation-path cwd path)
         _ (require-regular-file! target path)
         size (Files/size target)
         _ (value/check! (<= size max-edit-bytes) :file-too-large
@@ -305,46 +309,59 @@
                   names))
           (str/split path (re-pattern separator)))))
 
+(defn- emit-decoded! [^java.nio.charset.CharsetDecoder decoder ^ByteBuffer bytes ^CharBuffer chars end? emit!]
+  (loop []
+    (let [result (.decode decoder bytes chars end?)]
+      (.flip chars)
+      (when (.hasRemaining chars)
+        (emit! (.toString chars)))
+      (.clear chars)
+      (when (.isOverflow result)
+        (recur))))
+  (when end?
+    (loop []
+      (let [result (.flush decoder chars)]
+        (.flip chars)
+        (when (.hasRemaining chars)
+          (emit! (.toString chars)))
+        (.clear chars)
+        (when (.isOverflow result)
+          (recur))))))
+
 (defn- stream-reader [^InputStream stream stream-name ^ByteArrayOutputStream output
                       truncated? current-context]
   (doto
     (Thread.
       (fn []
-        (let [buffer (byte-array 8192)]
+        (let [buffer (byte-array 8192)
+              bytes (ByteBuffer/allocate 8196)
+              chars (CharBuffer/allocate 8196)
+              decoder (doto (.newDecoder StandardCharsets/UTF_8)
+                        (.onMalformedInput CodingErrorAction/REPLACE)
+                        (.onUnmappableCharacter CodingErrorAction/REPLACE))
+              emit! #(progress! current-context
+                                {:type :capability/output :stream stream-name
+                                 :content %})]
           (loop []
             (let [n (try (.read stream buffer) (catch Throwable _ -1))]
-              (when (pos? n)
-                (let [remaining (- max-process-stream-bytes (.size output))
-                      retained (int (max 0 (min remaining n)))]
-                  (when (pos? retained) (.write output buffer 0 retained))
-                  (when (< retained n) (reset! truncated? true)))
-                (progress! current-context
-                           {:type :capability/output :stream stream-name
-                            :content (String. buffer 0 n StandardCharsets/UTF_8)})
-                (recur)))))))
+              (if (pos? n)
+                (do
+                  (let [remaining (- max-process-stream-bytes (.size output))
+                        retained (int (max 0 (min remaining n)))]
+                    (when (pos? retained) (.write output buffer 0 retained))
+                    (when (< retained n) (reset! truncated? true)))
+                  (.put bytes buffer 0 n)
+                  (.flip bytes)
+                  (emit-decoded! decoder bytes chars false emit!)
+                  (.compact bytes)
+                  (recur))
+                (do
+                  (.flip bytes)
+                  (emit-decoded! decoder bytes chars true emit!))))))))
     (.setDaemon true)
     (.setName (str "arrodes-" (name stream-name) "-reader"))
     (.start)))
 
-(defn- process-handles [^Process process]
-  (let [root (.toHandle process)]
-    (with-open [descendants (.limit (.descendants root) (long max-process-handles))]
-      (vec (iterator-seq (.iterator descendants))))))
-
-(defn- stop-process-tree!
-  ([^Process process] (stop-process-tree! process []))
-  ([^Process process known-descendants]
-   (let [current (try (process-handles process) (catch Throwable _ []))
-         descendants (->> (concat known-descendants current)
-                          (reduce (fn [by-pid handle] (assoc by-pid (.pid handle) handle)) {})
-                          vals reverse)]
-     (doseq [handle descendants]
-       (when (.isAlive handle) (try (.destroy handle) (catch Throwable _ nil))))
-     (when (.isAlive process) (try (.destroy process) (catch Throwable _ nil)))
-     (try (.waitFor process 250 TimeUnit/MILLISECONDS) (catch Throwable _ nil))
-     (doseq [handle descendants]
-       (when (.isAlive handle) (try (.destroyForcibly handle) (catch Throwable _ nil))))
-     (when (.isAlive process) (try (.destroyForcibly process) (catch Throwable _ nil))))))
 
 (defn- timeout-millis [timeout]
   (when (some? timeout)
@@ -359,33 +376,23 @@
 (defn- run-process [cwd current-context argv command timeout]
   (check-cancelled! current-context)
   (let [context (current-context)
-        current-context (constantly context)]
-  (let [dir (resolve-path cwd ".")
+        current-context (constantly context)
+        dir (resolve-path cwd ".")
         _ (value/check! (Files/isDirectory dir (make-array LinkOption 0)) :invalid-cwd
-                       (str "Working directory does not exist: " cwd) {:cwd cwd})
+                        (str "Working directory does not exist: " cwd) {:cwd cwd})
         timeout-ms (timeout-millis timeout)
         started (System/nanoTime)
-        process (try (.start (doto (ProcessBuilder. ^java.util.List argv) (.directory (.toFile dir))))
-                     (catch Throwable error
-                       (value/fail! :process-start-failed
-                                   (str "Could not start " (first argv) ": " (ex-message error))
-                                   {:program (first argv)})))
+        owned (try (owned-process/start! argv {:cwd (str dir)})
+                   (catch Throwable error
+                     (value/fail! :process-start-failed
+                                  (str "Could not start " (first argv) ": " (ex-message error))
+                                  {:program (first argv)
+                                   :cause (ex-data error)})))
+        process ^Process (:process owned)
         stdout (ByteArrayOutputStream.)
         stderr (ByteArrayOutputStream.)
         stdout-truncated? (atom false)
         stderr-truncated? (atom false)
-        known-descendants (atom {})
-        remember-descendants!
-        (fn []
-          (let [current (try (process-handles process) (catch Throwable _ []))]
-            (swap! known-descendants
-                   (fn [known]
-                     (->> (concat current (vals known))
-                          (filter #(.isAlive %))
-                          (take max-process-handles)
-                          (reduce (fn [by-pid handle]
-                                    (assoc by-pid (.pid handle) handle))
-                                  {}))))))
         _ (try (.close (.getOutputStream process)) (catch Throwable _ nil))
         out-thread (stream-reader (.getInputStream process) :stdout stdout
                                   stdout-truncated? current-context)
@@ -393,23 +400,22 @@
                                   stderr-truncated? current-context)]
     (try
       (loop []
-        (remember-descendants!)
         (cond
           (cancelled? current-context)
-          (do (stop-process-tree! process (vals @known-descendants))
+          (do (owned-process/stop! owned)
               (value/fail! :cancelled "Command execution was cancelled" {:command command}))
 
           (and timeout-ms (>= (/ (- (System/nanoTime) started) 1000000) timeout-ms))
-          (do (stop-process-tree! process (vals @known-descendants))
+          (do (owned-process/stop! owned)
               (value/fail! :timeout (str "Command timed out after " timeout " seconds")
-                          {:command command :timeout timeout}))
+                           {:command command :timeout timeout}))
 
           (.waitFor process 50 TimeUnit/MILLISECONDS) nil
           :else (recur)))
       (.join out-thread 1000)
       (.join err-thread 1000)
       (when (or (.isAlive out-thread) (.isAlive err-thread))
-        (stop-process-tree! process (vals @known-descendants))
+        (owned-process/stop! owned)
         (try (.close (.getInputStream process)) (catch Throwable _ nil))
         (try (.close (.getErrorStream process)) (catch Throwable _ nil))
         (.join out-thread 250)
@@ -432,14 +438,15 @@
                  :stderr-truncated? @stderr-truncated?}
          :content combined
          :details {:exit-code exit :command command
+                   :process-ownership (:kind owned)
                    :stdout-bytes (.size stdout) :stderr-bytes (.size stderr)
                    :stdout-truncated? @stdout-truncated?
                    :stderr-truncated? @stderr-truncated?}})
       (finally
-        (when (or (.isAlive process) (some #(.isAlive %) (vals @known-descendants)))
-          (stop-process-tree! process (vals @known-descendants)))
+        (when (owned-process/alive? owned)
+          (owned-process/stop! owned))
         (try (.close (.getInputStream process)) (catch Throwable _ nil))
-        (try (.close (.getErrorStream process)) (catch Throwable _ nil)))))))
+        (try (.close (.getErrorStream process)) (catch Throwable _ nil))))))
 
 (defn- bash-tool [cwd current-context {:keys [command timeout]}]
   (value/check! (string? command) :invalid-arguments "bash command must be a string" {})
@@ -473,11 +480,12 @@
             FileVisitResult/SKIP_SUBTREE FileVisitResult/CONTINUE))
         (visitFile [file attrs]
           (check-cancelled! current-context)
-          (vswap! files conj file)
-          (value/check! (<= (count @files) max-traversed-files) :traversal-limit
-                       (str "Traversal exceeded " max-traversed-files
-                            " files; narrow the search path")
-                       {:path (str root) :limit max-traversed-files})
+          (when (.isRegularFile attrs)
+            (vswap! files conj file)
+            (value/check! (<= (count @files) max-traversed-files) :traversal-limit
+                          (str "Traversal exceeded " max-traversed-files
+                               " files; narrow the search path")
+                          {:path (str root) :limit max-traversed-files}))
           FileVisitResult/CONTINUE)))
     (let [ordered (sort-by (fn [^Path file]
                              (let [relative (str (.relativize root file))]
@@ -494,17 +502,41 @@
 
 (defn- glob-matchers [pattern]
   (try
-    (let [filesystem (.getFileSystem (Paths/get "." (make-array String 0)))]
-      (cond-> [(.getPathMatcher filesystem (str "glob:" pattern))]
-        (str/starts-with? pattern "**/")
-        (conj (.getPathMatcher filesystem (str "glob:" (subs pattern 3))))))
+    (let [filesystem (.getFileSystem (Paths/get "." (make-array String 0)))
+          segments (str/split (str/replace pattern "\\" "/") #"/" -1)]
+      {:whole (.getPathMatcher filesystem (str "glob:" pattern))
+       :segments (mapv #(when-not (= "**" %)
+                          (.getPathMatcher filesystem (str "glob:" %)))
+                       segments)})
     (catch Throwable error
       (value/fail! :invalid-pattern (str "Invalid glob pattern: " (ex-message error)) {:pattern pattern}))))
 
-(defn- matches-glob? [matchers ^Path relative]
-  (boolean (some #(.matches % relative) matchers)))
+(defn- matches-glob? [{:keys [whole segments]} ^Path relative]
+  (or (.matches whole relative)
+      (let [parts (str/split (str/replace (str relative) File/separator "/") #"/" -1)
+            cache (atom {})]
+        (letfn [(match? [pattern-index path-index]
+                  (if-let [cached (find @cache [pattern-index path-index])]
+                    (val cached)
+                    (let [matched
+                          (cond
+                            (= pattern-index (count segments)) (= path-index (count parts))
+                            (nil? (nth segments pattern-index))
+                            (or (match? (inc pattern-index) path-index)
+                                (and (< path-index (count parts))
+                                     (match? pattern-index (inc path-index))))
+                            (= path-index (count parts)) false
+                            :else
+                            (and (.matches ^java.nio.file.PathMatcher
+                                           (nth segments pattern-index)
+                                           (Paths/get (nth parts path-index)
+                                                      (make-array String 0)))
+                                 (match? (inc pattern-index) (inc path-index))))]
+                      (swap! cache assoc [pattern-index path-index] matched)
+                      matched)))]
+          (match? 0 0)))))
 
-(defn- search-files [cwd current-context path]
+(defn- search-files [cwd path]
   (let [root (resolve-path cwd (or path "."))]
     (value/check! (Files/exists root (make-array LinkOption 0)) :not-found
                  (str "Path does not exist: " (or path ".")) {:path (str root)})
@@ -513,7 +545,7 @@
 (defn- find-tool [cwd current-context {:keys [pattern path limit]}]
   (value/check! (and (string? pattern) (not (empty? pattern))) :invalid-arguments
                "find pattern must be a non-empty glob" {})
-  (let [root (search-files cwd current-context path)
+  (let [root (search-files cwd path)
         limit (validate-limit limit max-find-results max-find-results :limit)
         matchers (glob-matchers pattern)
         results (volatile! [])
@@ -593,7 +625,7 @@
 (defn- grep-tool [cwd current-context {:keys [pattern path glob ignoreCase literal context limit]}]
   (value/check! (and (string? pattern) (not (empty? pattern))) :invalid-arguments
                "grep pattern must be a non-empty string" {})
-  (let [root (search-files cwd current-context path)
+  (let [root (search-files cwd path)
         limit (validate-limit limit max-search-results max-search-results :limit)
         context (or context 0)
         _ (value/check! (and (integer? context) (<= 0 context 20)) :invalid-arguments
@@ -661,7 +693,7 @@
   "Returns all built-in coding capability descriptors. current-context returns
   the dynamically bound invocation context from arrodes.capabilities."
   [{:keys [cwd current-context put-artifact!]}]
-  (let [path-key (fn [args] (str (resolve-path cwd (:path args))))
+  (let [path-key (fn [args] (str (mutation-path cwd (:path args))))
         shell-schema (schema-object
                        {:command (string-property "Shell command to execute")
                         :timeout {:type "number" :exclusiveMinimum 0

@@ -3,7 +3,7 @@
   (:require [arrodes.value :as value]
             [clojure.edn :as edn]
             [clojure.java.io :as io])
-  (:import (java.nio.file Files Path Paths StandardCopyOption LinkOption)
+  (:import (java.nio.file Files Path Paths StandardCopyOption)
            (java.nio.file.attribute FileAttribute PosixFilePermissions)
            (java.security MessageDigest)
            (java.util UUID HexFormat)))
