@@ -52,6 +52,8 @@ Durable `evaluation/started` and `evaluation/completed` events identify an evalu
 
 Stdout/stderr and shell progress are transient events; completion records preserve bounded final output. Observer callbacks retain their caller's dynamic bindings so rendering an event cannot be recaptured as program output. The core emits data, not ANSI or OpenTUI objects.
 
+Extension renderers stay in the JVM host. The RPC host can attach bounded `:presentation` text or a renderer error to an event; OpenTUI displays that advice without replacing canonical completion/error status. Session-owned widgets and render/editor requests use the existing reverse-request channel. Renderers must be pure: replay can render the same recorded event again.
+
 ## Values are not checkpoints
 
 `(result 42)` retrieves a native value by its session-local integer result ID. Small supported EDN is inline; larger bounded EDN is persisted as an artifact; arbitrary JVM objects remain live-only. `(artifact "uuid")` reads retained artifact content, with a bounded helper limit. Large previews do not require copying the entire value into model context.
@@ -60,17 +62,21 @@ Definitions survive ordinary continuation, model changes and compaction. Branch 
 
 Result descriptors remain structured in history. Provider-readable reference expressions are generated only when constructing requests, after fork/import remapping. This prevents a copied transcript from instructing the model to retrieve a stale numeric ID.
 
+Copying follows canonical result/artifact/entry descriptor locations, never arbitrary native maps. Labels whose targets are outside a selected branch are omitted without changing its provider-visible context. Imports close unresolved tool-call boundaries with explicit unavailable results, not replayed effects. Inline eligibility includes the enclosing history/event depth; deeper supported EDN uses the existing artifact representation.
+
 ## Durability and lifecycle
 
 Entries form a parent-linked history tree. Active-path and compaction projection select model context without deleting original history. Store commands commit entries, queues, session projections, operations and events in explicit SQLite transactions. Published durable events come from committed records.
 
-`session.view` reads the session projection, active entries, and event cursor under the session lock. Every new canonical entry emits `entry/committed` in its transaction. The TUI reconstructs observed activity from historical events through that cursor, keeps the atomic entry/queue snapshot authoritative, then applies later buffered events. Historical activity from abandoned branches is excluded.
+`session.view` reads the session projection, authoritative `:operation` descriptor (or nil), active entries, and event cursor under the session lock. Foreground admission is released before terminal publication, while the worker remains tracked for shutdown until it exits. Every new canonical entry emits `entry/committed` in its transaction. The TUI reconstructs observed activity through the cursor, keeps the atomic snapshot authoritative, then applies later buffered events; abandoned-branch activity is excluded.
 
 A file-backed store has one live runtime owner, enforced by an OS file lock before recovery or expiry. Each session admits at most one foreground operation; independent sessions can run concurrently.
 
 Cancellation is a request, not proof of termination. Shutdown waits for owned operation work and blocking callers. If they do not stop by the deadline, the runtime reports an incomplete closing state and retains ownership. Recovery repairs unresolved provider call/result boundaries without replaying external effects.
 
-Provider managers preserve per-session routing/settings while sharing appropriate authentication. Normal requests use a stable session cache scope and provider replay data. Unknown usage remains unknown. No padding or warmup requests manufacture cache hits.
+`owned-process` creates POSIX process groups before exec and assigns suspended Windows processes to kill-on-close Job Objects before resuming them. Shell and stdio MCP cleanup share this boundary, including escalation and scope-exit confirmation. Resource teardown retains failed cleanup callbacks for retry; an incomplete session cleanup does not release the runtime's store ownership. Deliberately daemonized hostile code remains outside the trusted-local contract.
+
+Provider managers preserve per-session routing/settings while sharing appropriate authentication. SDK 0.6.0 owns built-in completion and managed Codex OAuth; custom endpoints use request-local SDK profiles, codecs, framing, and accumulation without modifying the SDK's global registry. Credential refresh commits only against its originating version. Normal requests retain a stable session cache scope and provider replay data. Unknown usage remains unknown; no padding or warmup requests manufacture cache hits.
 
 Project trust controls executable resource loading, not OS isolation. Clojure, shell functions and trusted extensions run with the process's permissions. Sharing is explicit and belongs to optional hosts.
 

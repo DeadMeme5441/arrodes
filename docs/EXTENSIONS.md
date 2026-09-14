@@ -42,6 +42,12 @@ Hook descriptors have an ID, owner attribution, integer order, and function. Ord
 
 Tool replacement is deliberate: set `:replace? true` on a tool descriptor to override an existing capability. The runtime injects extension ownership and records the exact registration, so activation failure, deactivation, close, and failed reload restore the nearest prior implementation without removing unrelated owners. Omit `:replace?` for ordinary registration; accidental duplicate names still fail.
 
+Presentation registrations work through native hosts and the RPC/OpenTUI bridge. A renderer descriptor has `:name` (an event type such as `"evaluation/completed"` or capability name) and a pure `:fn` accepting an event. The function stays on the JVM; its bounded text is attached to the event for display, and renderer errors do not change the underlying operation result. Replay may invoke a renderer again, so rendering must not perform external effects.
+
+`:register-ui!` accepts a named `:widget` or `:set-widget` descriptor with text `:content` and a placement such as `:status`, `:header`, or `:footer`. Widgets belong to the session and are withdrawn on teardown. `:ui!` also supports portable `:render` and `:editor` requests. Failed teardown retains pending cleanup work; retry close/reload rather than treating an incomplete report as success.
+
+Explicit `{:path "..." :enabled? false}` resource entries override lower-precedence/default discovery before the catalog is filtered. Shared settings transactions are serialized by canonical file identity, including reload rollback. Local package sources are stored canonically, so updating from another working directory cannot silently select another package.
+
 ## REPL-defined tools
 
 Inside a live session:

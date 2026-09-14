@@ -70,6 +70,10 @@ jobs:
         run: java -jar target/arrodes-rpc.jar --help
       - name: Exercise CLI artifact help
         run: java -jar target/arrodes-cli.jar --help
+      - name: Exercise packaged RPC contracts
+        run: python scripts/verify-rpc.py java -jar target/arrodes-rpc.jar
+      - name: Exercise packaged CLI commands
+        run: python scripts/verify-terminal.py java -jar target/arrodes-cli.jar
       - name: Exercise explicit legacy CLI launcher
         run: python scripts/verify-launcher.py
       - uses: actions/upload-artifact@v4

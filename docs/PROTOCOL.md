@@ -46,6 +46,8 @@ Runtime events arrive independently as `event` records. Durable events have a gl
 
 `session.view` accepts `session-id` and returns `{"state": SESSION_STATE, "entries": ACTIVE_PATH, "cursor": SEQUENCE}`. These are one consistent observation under the session lock. `entry/committed` contains the full assigned entry and is committed atomically with that entry; legacy assistant-message events are not another insertion.
 
+`state.operation` is an authoritative operation descriptor or `null`; `operation-id` and `phase` are not substitutes for its status. Terminal publication happens after foreground admission is released. A controller must not resurrect running/cancelling work from stale phase hints or recreate delivered queue items from late acceptance responses.
+
 A reconnecting controller buffers live events while loading the view. Replay historical events through the snapshot cursor to reconstruct call activity, without replacing the snapshot's entries or queue with older mutations. Apply buffered events newer than the snapshot after this reconstruction. Correlate by sequence/call ID and retain only activity belonging to the active path or current operation. Do not replay external effects.
 
 `session.queue.update` accepts `session-id`, `queue-id`, and `content`; it returns `{"item": UPDATED_ITEM}`. It preserves queue identity, order, timestamp, and delivery options. `session.queue.drop` accepts those IDs and returns `{"removed": REMOVED_ITEM}`. Both reject an item that has already been delivered or removed.
@@ -66,6 +68,8 @@ It does not undo already accepted effects. A running request ID remains reserved
 
 `result.inspect` returns the retained descriptor. Inline results also include `value-edn` (a redacted, bounded native representation) and `value-truncated?`. Prefer this representation when displaying Clojure types: JSON `value` is a projection and can collapse distinctions such as keyword and string keys. Artifact-backed results use the descriptor's artifact ID and `artifact.read` paging; live-only values must not be presented as persisted checkpoints.
 
+Nonfinite floating-point values use a JSON-safe projection such as `{"type":"number","encoding":"edn","value":"##NaN"}` (also `##Inf` and `##-Inf`). Their native value remains available through evaluation and `value-edn`. If response encoding itself fails, the request receives `serialization-error` with `data.unknown-outcome? = true`; reconcile state rather than resending accepted effects.
+
 Durable evaluation events are `evaluation/started` and `evaluation/completed`; nested functions emit `capability/started` and `capability/completed`. Their data includes `call-id` and `parent-call-id`. The event envelope includes `session-id`, `operation-id`, and sequence. Starts carry source or arguments. Completions carry content, details, `error?`, and a retained `result`. Stdout/stderr and shell progress arrive through transient `tool-progress` events with the same call correlation; use final completion output for replay.
 
 The same observation data serves direct user evaluations and agent evaluations. Controllers must not parse source or ANSI output to discover calls, infer parentage, or decide whether an operation completed. These records are UI-independent data, not an MCP protocol.
@@ -83,6 +87,8 @@ Reply with the same host request ID:
 ```
 
 UI requests use the same reverse-request mechanism. Host waits and queues are bounded and cancellable. Capability attachment is connection-owned; a connection cannot detach another owner's capability.
+
+Portable presentation requests also support `widget`, `set-widget`, `render`, and `editor`. Widget IDs are scoped by `request.session-id`; `remove?` withdraws the widget. Native renderer functions remain inside the JVM RPC host and never cross JSON. Events and replay results may include an advisory `presentation` object containing `content` or `error`; canonical event status remains authoritative.
 
 ## Shutdown
 

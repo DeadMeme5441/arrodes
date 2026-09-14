@@ -1,4 +1,4 @@
-# Conversation-first OpenTUI host
+# Runtime and terminal verification
 
 The ClojureScript/OpenTUI interface is implemented on top of the headless REPL-first core. Conversation and composer are primary; evaluation is an inspectable execution mechanism, not the default screen. Pi/OMP remains an interaction-behaviour reference, not a functionality checklist.
 
@@ -14,29 +14,44 @@ The ClojureScript/OpenTUI interface is implemented on top of the headless REPL-f
 
 Arrodes remains an MCP **client**, not a server. No subagent system, workspace model, operating-system sandbox or durable JVM checkpointing was added.
 
+The repository-hardening checkpoint integrates the published `clojure-llm-sdk` **0.6.0** release and addresses the 35 end-to-end review findings. It also verifies that failed MCP cleanup propagates through resource teardown without releasing runtime store ownership. Six `gpt-5.6-sol` implementation workers followed Ponytail full-mode rules; `ponytail-review` guided worker and final integration simplification.
+
 ## Current verification evidence
 
 | Check | Observed result |
 | --- | --- |
-| Offline behavioral suite | **49 tests, 220 assertions; zero failures/errors** |
-| Actual renderer with real JVM backend | Keyboard/mouse send, steer, follow-up, queue identity-preserving edit/drop, real read/edit/shell work, replay, draft retention, cancellation and reconnect |
-| Reverse host interaction | Real trusted JVM extension requests input/confirmation; exact response, conservative default decline, cancellation without invented output and composer preservation |
-| Navigation regressions | Keyboard sessions/history/branch, unchanged files after branch, scroll and draft restoration, native text selection, text attachment add/remove and visible evaluation failure |
-| Popup keyboard scrolling | `bun run test:tui` passes native layout/paint checks at **120×40**, **78×24** and **78×16**: both arrow directions, all menu adapters, filtering, wrapped rows and a fresh short popup. Selection scrolling waits for measured bounds; rows are reused and the scroll extent includes overflowing descriptions. |
-| Native values | Keyword/string key distinction survives the inspector's EDN representation; real large retained EDN supports Value-tab Next/Prev paging and exact return to original content |
-| Responsive rendering | Actual OpenTUI captures at **120×40** and **78×24**, visually inspected; narrow inspector takes the available width rather than squeezing the transcript |
-| Startup recovery | Invalid explicit session is reported; choosing a new valid session restores a usable connection |
-| Startup/reconnect command ordering | Real JVM regression: commands submitted during startup/reconnect execute once after readiness; initialization UI replies do not deadlock; `store-in-use` remains visible after process exit; releasing the owner allows explicit recovery without replay or stale error banners. The rebuilt PTY launcher also reaches Idle against an isolated copy of saved sessions. |
-| Process failure boundaries | Fragmented UTF-8, expired mutation marked unknown, later correlated response, malformed stream, missing executable, restart admission and confirmed SIGKILL of a child ignoring SIGTERM |
-| Actual PTY launcher | `bin/arrodes` reaches Idle, F3 opens the palette, explicit Clojure input evaluates to `42`, Ctrl+D exits **0** and tears down the terminal/core |
-| Source and packaged RPC | Both pass **16 commands, 32 durable events**, host roundtrip, cancellation/request-ID ownership, JSONL-only stdout, stderr diagnostics, registration and namespace reset |
-| Legacy terminal and launcher | Redirected quoting/EDN/reload/quit smoke and external-directory launcher smoke with spaces and relative cwd/home pass |
-| Build | Final ClojureScript frontend and headless core/RPC/CLI artifacts build; TUI bootstrap help runs through Bun/OpenTUI |
-| Privacy guard | **70 text files** checked; no embedded machine paths or credentials |
+| Offline behavioral suite | **92 tests, 403 assertions; zero failures/errors** |
+| Provider/authentication boundaries | No credentials inherited by custom unauthenticated endpoints; streaming errors fail; refresh/logout/login interleavings, alias ownership, token retention, callback cleanup, discovery headers and catalog replacement pass |
+| Durable data | Native reference collisions, imported pending calls, excluded labels, empty compaction ranges, set-contained secrets and deep retained values pass |
+| Bounded artifact reads | A one-byte page from a **128 MiB** file-backed artifact succeeds with a **48 MiB** JVM heap; same-size corruption is rejected in that heap |
+| Process ownership | Readiness-gated reparented workers are stopped; resistant MCP servers terminate across reconnect/close; a failed MCP cleanup retains the store lock until successful retry |
+| TUI controller | Real isolated JVM startup/reconnect, delayed model/reload responses across navigation, delivered queues with late receipts and acknowledged saved drafts pass |
+| Native renderer | Popup layout/scrolling, inspector selection ownership, session widgets, render/editor requests and cancelled active/return overlays pass |
+| Actual PTY launcher | Reaches Idle; Ctrl+P opens the command palette; explicit evaluation returns **42**; Ctrl+D exits **0** and closes the owned core |
+| Source and packaged RPC | Both pass **21 commands, 38 durable events**, including native nonfinite results, serialization-error reconciliation, extension presentation, reverse calls and cancellation/correlation |
+| Legacy CLI and launcher | Source/packaged rename, quoting, EDN settings, reload and quit pass; external-directory launcher with spaces and relative cwd/home passes |
+| Packaging | Core, RPC, CLI and production ClojureScript builds pass; the core JAR evaluates and runs a native shell without RPC, CLI or JLine on its classpath |
+| Privacy guard | **75 text files** checked; no embedded machine paths or credentials |
+| Static analysis | **30 production files, zero errors**; 56 stable-lock-accessor warnings remain unsuppressed |
 
-The renderer probes use real OpenTUI input/layout/rendering and a real JVM runtime with a deterministic provider for offline effects. They are not a live-provider substitute. Temporary projects, servers and probe sources are not product components.
+The current UI checks use the actual OpenTUI renderer and a real JVM with a deterministic provider. Earlier interface verification also covered attachments, branch navigation without filesystem restoration, text selection, artifact Next/Prev inspection, and wide/narrow layouts. Live provider verification for this SDK upgrade is recorded separately below.
 
-## Live proof through the TUI
+## Live OAuth proof with SDK 0.6.0
+
+Both requested models were discovered through ChatGPT OAuth and run explicitly with `:provider :codex-backend`, `:thinking :high`, and fallback disabled. The workflows ran concurrently in separate sessions/projects within one runtime, sharing the SDK's in-process managed-auth coordination.
+
+| Model | Provider responses | Recorded evaluations | Execution errors | Uncached input | Cached input | Output |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `gpt-5.6-sol` | 12 | 11 | **0** | 21,590 | 29,696 | 722 |
+| `gpt-5.6-luna` | 12 | 11 | **0** | 21,599 | 30,720 | 805 |
+
+Every assistant response recorded the selected model. Each agent read the installed Ponytail skill, used **read, edit, bash and an external MCP math server**, repaired its isolated program, executed it, and retained `verified` with answer **42**. An independent process printed **42** for each repaired program. A live follow-up used the existing REPL binding rather than redefining it.
+
+The evaluation counts include the direct retained-value check. After restart, definitions were absent as specified and the durable result still returned **42**. Shutdown reported `:closed`, completed foreground work, terminated executors and no cleanup errors. Usage is provider-reported aggregate data from real work and continuation, not a cache benchmark or padded warmup.
+
+These live checks exercised the runtime/SDK path; native TUI and PTY checks above separately exercise the host. Credentials and raw live transcripts are not committed.
+
+## Earlier TUI live checkpoint
 
 - Authentication: **Codex OAuth**.
 - Provider: **`:codex-backend`**.
@@ -52,10 +67,10 @@ No credentials or raw live transcript are committed. This was not a cache-effici
 ## Explicit limits
 
 - The exercised native platform is macOS arm64 with Bun **1.3.14**, OpenTUI **0.5.11**, ClojureScript **1.11.132**, and Java **21**.
-- Windows/PowerShell and other terminal/OS combinations were not exercised. CI includes frozen dependency installation, frontend compilation and bootstrap help, but the cross-platform matrix has not been observed running for this change.
+- Windows/PowerShell, Windows Job Objects, and the Linux native-launch ABI were not exercised locally. Their implementations and platform-specific checks are included; the cross-platform CI matrix has not been observed running for this change.
 - Broad interaction verification used OpenTUI's actual captured renderer; the fresh PTY check specifically covered launch, palette, evaluation and clean exit, not every keyboard/terminal combination.
 - Draft/navigation state is preserved within the running interface, not advertised as crash-persistent editor state.
 - Arbitrary JVM values, definitions, unjoined futures and external effects are not durable checkpoints or an OS sandbox. Branching does not restore files.
-- Historical provider/package breadth is not comprehensively verified by this UI work. Only the explicitly requested live OAuth/model route was exercised.
+- Live provider verification covers the two explicitly requested ChatGPT OAuth models, not every provider, model, account or region. Git/Maven package breadth is not exhaustively live-tested.
 
-The earlier core checkpoint established session ownership/recovery, reversible extension registration, provider-view isolation and MCP stdio/HTTP client behaviour. Existing regressions remain in the suite; this checkpoint adds the actual terminal interface rather than another architecture scaffold.
+File-backed artifact paging uses bounded capture but intentionally verifies the full SHA-256 on every page, so it remains O(file size) in I/O. Development skills are installed locally, not vendored as application dependencies. The existing native platform and non-checkpoint/non-sandbox limits remain unchanged.

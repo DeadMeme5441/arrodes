@@ -26,7 +26,7 @@ Pi/OMP is a reference for interaction behaviour, not a requirement to reproduce 
 - Bun 1.3.14 or newer for the OpenTUI interface.
 - Provider credentials for live model requests.
 
-The provider layer uses a pinned revision of [clojure-llm-sdk](https://github.com/DeadMeme5441/clojure-llm-sdk). Session storage uses SQLite and immutable artifact files, not Datahike.
+The provider layer uses the published [clojure-llm-sdk 0.6.0](https://github.com/DeadMeme5441/clojure-llm-sdk/releases/tag/v0.6.0) release. Session storage uses SQLite and immutable artifact files, not Datahike. JNA supplies the native process-group/Job Object boundary shared by shell commands and stdio MCP clients; it does not add an OS sandbox.
 
 ## Start the terminal interface
 
