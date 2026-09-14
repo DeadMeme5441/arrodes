@@ -27,6 +27,7 @@ jobs:
             platform: windows
             arch: x64
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.platform == 'windows' }}
     timeout-minutes: 45
     env:
       ARRODES_TEST_OFFLINE: '1'

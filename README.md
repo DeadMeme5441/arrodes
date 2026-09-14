@@ -14,9 +14,10 @@ Download the executable for your system and its matching `.sha256` file from thi
 | macOS Intel | `arrodes-darwin-x64` |
 | Linux arm64, glibc | `arrodes-linux-arm64` |
 | Linux x64, glibc | `arrodes-linux-x64` |
-| Windows x64 | `arrodes-windows-x64.exe` |
 
 The executable is self-contained. End users do not need to install a language runtime or package manager.
+
+Windows support is experimental and is not included in this release.
 
 ### macOS
 
@@ -43,17 +44,6 @@ mv arrodes-linux-x64 ~/.local/bin/arrodes
 ```
 
 Use the `arm64` filename on arm64. The preview targets glibc-based Linux systems.
-
-### Windows
-
-In PowerShell, compare the hash with the first value in the downloaded `.sha256` file:
-
-```powershell
-(Get-FileHash .\arrodes-windows-x64.exe -Algorithm SHA256).Hash.ToLower()
-Get-Content .\arrodes-windows-x64.exe.sha256
-```
-
-Rename the executable to `arrodes.exe` and place it in a directory on `PATH`. This private preview is unsigned, so Windows may show SmartScreen. Continue only after verifying the checksum and source.
 
 Confirm the install:
 

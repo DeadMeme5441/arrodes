@@ -20,13 +20,9 @@ Then place it on `PATH` as `arrodes`.
 
 The private preview is not Developer ID signed or notarized. Verify the release checksum first, then use **System Settings → Privacy & Security → Open Anyway** if you trust the artifact. Do not bypass Gatekeeper for an unverified download.
 
-### Windows SmartScreen appears
-
-The private preview is unsigned. Compare `Get-FileHash -Algorithm SHA256` with the downloaded checksum, confirm the artifact came from the private release, then use the SmartScreen continuation only if you trust it.
-
 ### Unsupported platform
 
-Use an artifact matching your operating system and processor: macOS arm64/x64, glibc Linux arm64/x64, or Windows x64. Other targets are not supported. When reporting a platform-specific problem, include `arrodes --version`, your operating system and terminal, and the exact error.
+Use an artifact matching your operating system and processor: macOS arm64/x64 or glibc Linux arm64/x64. Windows remains experimental and is not included in this release. When reporting a platform-specific problem, include `arrodes --version`, your operating system and terminal, and the exact error.
 
 ## Setup and provider errors
 

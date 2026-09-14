@@ -1,4 +1,4 @@
-"""Stage a private draft release only after all native artifacts passed CI."""
+"""Stage a private macOS/Linux release from verified artifacts."""
 import hashlib
 import json
 import os
@@ -23,9 +23,9 @@ def main():
     tag = os.environ.get("GITHUB_REF_NAME", "")
     if tag != f"v{version}":
         raise RuntimeError(f"Release tag must match application version v{version}")
-    directory = root / "target" / "release"
+    directory = Path(os.environ.get("ARRODES_RELEASE_DIRECTORY", str(root / "target" / "release")))
     assets = []
-    for target in ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-x64.exe"]:
+    for target in ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]:
         binary = directory / f"arrodes-{target}"
         checksum = binary.with_name(binary.name + ".sha256")
         expected = checksum.read_text().split()[0]
@@ -35,14 +35,24 @@ def main():
             raise RuntimeError(f"Checksum mismatch: {binary.name}")
         assets.extend([str(binary), str(checksum)])
     if "--check" in sys.argv[1:]:
-        print(f"Private release {tag}: all five native artifacts verified; nothing published")
+        print(f"Private release {tag}: all four supported artifacts verified; nothing published")
+        return
+    existing = subprocess.run(["gh", "release", "view", tag, "--repo", repository, "--json", "assets"],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if existing.returncode == 0:
+        published_names = {asset["name"] for asset in json.loads(existing.stdout)["assets"]}
+        if not {Path(asset).name for asset in assets} <= published_names:
+            raise RuntimeError(f"Existing release {tag} is missing supported artifacts; refusing to overwrite it")
+        print(f"Release {tag} already exists; leaving its assets unchanged")
         return
     subprocess.run(
         ["gh", "release", "create", tag, "--repo", repository, "--verify-tag", "--draft",
          "--title", f"Arrodes {version}", "--notes",
-         "Private preview. Self-contained executables and SHA-256 checksums. "
-         "No Java, Clojure CLI, or Bun installation required. "
-         "Application state stays under ~/.arrodes. This release does not change repository visibility.",
+         f"Arrodes {version} for macOS and Linux (arm64 and x64). "
+         "Self-contained executables with SHA-256 checksums; no language runtimes to install. "
+         "First-launch sign-in, persistent sessions, and all Arrodes state under ~/.arrodes. "
+         "No project dotfolder. Windows remains experimental and is not included. "
+         "This release and its repository are private. macOS binaries are not Developer ID signed or notarized.",
          *assets], check=True)
 
 

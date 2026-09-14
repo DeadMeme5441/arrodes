@@ -65,6 +65,8 @@ def isolated_environment(root):
     tools = root / "system-tools"
     tools.mkdir()
     if os.name == "nt":
+        # A normal Windows user profile already has its roaming-data directory.
+        (user / "AppData" / "Roaming").mkdir(parents=True)
         system = Path(environment["SYSTEMROOT"]) / "System32"
         search = os.pathsep.join([str(system), str(system / "WindowsPowerShell" / "v1.0")])
     else:
@@ -376,6 +378,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="arrodes installed ") as temporary:
         root = Path(temporary).resolve()
         environment = isolated_environment(root)
+        baseline_profile = {str(path.relative_to(environment["HOME"]))
+                            for path in Path(environment["HOME"]).rglob("*")}
         environment["ARRODES_HOME"] = str(root / "unused environment home")
         home = root / "private home"
         project = root / "repo with spaces"
@@ -417,8 +421,8 @@ def main():
             (terminal_home / "config" / "settings.edn").write_text(fixture_settings)
             terminal = terminal_smoke(installed, terminal_home, project, environment)
             assert not Path(environment["ARRODES_HOME"]).exists(), "--home did not override ARRODES_HOME"
-            outside = [str(path.relative_to(environment["HOME"])) for path in Path(environment["HOME"]).rglob("*")]
-            assert not outside, ("Application wrote outside its explicit home", outside)
+            profile = {str(path.relative_to(environment["HOME"])) for path in Path(environment["HOME"]).rglob("*")}
+            assert profile == baseline_profile, ("Application changed the OS user profile", sorted(profile ^ baseline_profile))
             asyncio.run(startup_checks(installed, root, environment))
         finally:
             server.shutdown()
