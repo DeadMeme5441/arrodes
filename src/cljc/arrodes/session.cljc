@@ -32,6 +32,7 @@
                            (secret-path v (conj path k))))
                        value)
     (sequential? value) (some identity (map-indexed #(secret-path %2 (conj path %1)) value))
+    (set? value) (some #(secret-path % (conj path :set-member)) value)
     :else nil))
 
 (defn normalize-config

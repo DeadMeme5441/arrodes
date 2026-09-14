@@ -79,3 +79,19 @@
       (is (= 42 (:value result)))
       (is (= "program\n" (get-in result [:details :stdout])))
       (is (.contains (str host-output) "host")))))
+
+(deftest deeply-nested-durable-values-use-an-envelope-safe-result
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))
+          result (runtime/evaluate! rt sid "(nth (iterate vector 0) 30)")
+          result-id (get-in result [:result :id])]
+      (is (false? (:error? result)))
+      (is (= :artifact (get-in result [:result :kind])))
+      (is (some #(and (= :evaluation/completed (:type %))
+                      (= result-id (get-in % [:data :result :id])))
+                (runtime/events-since rt {:session-id sid :after 0})))
+      (runtime/reload! rt sid)
+      (is (true? (:value
+                  (runtime/evaluate!
+                   rt sid
+                   (str "(= (nth (iterate vector 0) 30) (result " result-id "))"))))))))

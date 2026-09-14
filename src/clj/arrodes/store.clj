@@ -2,13 +2,12 @@
   "Transactional SQLite persistence for sessions, histories, queues, operations, and events."
   (:refer-clojure :exclude [uuid?])
   (:require [clojure.edn :as edn]
-            [clojure.java.io :as io]
             [clojure.set :as set]
             [clojure.string :as str]
             [arrodes.session :as session-model]
             [arrodes.platform :as util]
             [arrodes.value :as value])
-  (:import (java.sql Connection DriverManager PreparedStatement ResultSet Statement)
+  (:import (java.sql Connection DriverManager PreparedStatement ResultSet)
            (java.nio.channels FileChannel FileLock OverlappingFileLockException)
            (java.nio.file FileAlreadyExistsException Files StandardCopyOption StandardOpenOption OpenOption LinkOption)
            (java.nio.file.attribute FileAttribute PosixFilePermissions)
@@ -519,10 +518,11 @@
     (let [kept (:first-kept-entry-id data)
           ancestors (set (map :id (session-model/active-path
                                    (all-entries connection sid) parent-id)))]
-      (require-uuid! kept :first-kept-entry-id)
-      (value/check! (contains? ancestors kept) :invalid-entry
-                   "Compaction retained entry must be on its preceding active path"
-                   {:first-kept-entry-id kept})
+      (when kept
+        (require-uuid! kept :first-kept-entry-id)
+        (value/check! (contains? ancestors kept) :invalid-entry
+                     "Compaction retained entry must be on its preceding active path"
+                     {:first-kept-entry-id kept}))
       (value/check! (string? (:summary data)) :invalid-entry
                    "Compaction summary must be a string" {})
       (value/check! (map? (or (:usage data) {})) :invalid-entry
@@ -798,44 +798,57 @@
                         :session session-changes
                         :events [{:type :session/branched :data {:entry-id leaf}}]})))
 
-(defn- remap-entry-refs [data id-map]
-  (let [reference-keys #{:first-kept-entry-id :from-id :entry-id :fork-entry}]
-    (letfn [(walk [value]
-              (cond
-                (map? value)
-                (reduce-kv
-                 (fn [result key nested]
-                   (if (and (contains? reference-keys key) (string? nested))
-                     (if-let [replacement (get id-map nested)]
-                       (assoc result key replacement)
-                       (if (= :from-id key)
-                         result
-                         (assoc result key nested)))
-                     (assoc result key (walk nested))))
-                 {} value)
-                (vector? value) (mapv walk value)
-                (set? value) (set (map walk value))
-                (sequential? value) (mapv walk value)
-                :else value))]
-      (walk data))))
+(defn- remap-labels [labels id-map]
+  (into []
+        (keep (fn [label]
+                (when-let [entry-id (get id-map (:entry-id label))]
+                  (assoc label :entry-id entry-id))))
+        labels))
 
-(declare remap-entry-result-refs)
+(defn- remap-entry-refs [{:keys [kind data] :as entry} id-map compaction-id-map]
+  (case kind
+    :compaction
+    (let [kept (get compaction-id-map (:first-kept-entry-id data))]
+      (if (and kept (not= kept (:id entry)))
+        (assoc-in entry [:data :first-kept-entry-id] kept)
+        (update entry :data dissoc :first-kept-entry-id)))
+
+    :branch-summary
+    (if-let [from-id (get id-map (:from-id data))]
+      (assoc-in entry [:data :from-id] from-id)
+      (update entry :data dissoc :from-id))
+
+    :label
+    (assoc-in entry [:data :entry-id] (get id-map (:entry-id data)))
+
+    entry))
+
+(defn- canonical-result-descriptor [{:keys [kind data]}]
+  (case kind
+    :message (:message/result data)
+    :evaluation (get-in data [:result :result])
+    :custom (get-in data [:result :result])
+    nil))
 
 (defn- referenced-result-ids [entries]
-  (letfn [(walk [value]
-            (cond
-              (map? value)
-              (reduce-kv (fn [ids key item]
-                           (let [ids (if (and (contains? #{:result :message/result} key)
-                                              (map? item) (integer? (:id item)))
-                                       (conj ids (:id item))
-                                       ids)]
-                             (into ids (walk item))))
-                         #{} value)
-              (sequential? value) (reduce into #{} (map walk value))
-              (set? value) (reduce into #{} (map walk value))
-              :else #{}))]
-    (reduce into #{} (map #(walk (:data %)) entries))))
+  (into #{}
+        (keep (fn [entry]
+                (let [descriptor (canonical-result-descriptor entry)]
+                  (when (and (map? descriptor) (integer? (:id descriptor)))
+                    (:id descriptor)))))
+        entries))
+
+(defn- remap-entry-result-refs [entry imported-results]
+  (let [descriptor (canonical-result-descriptor entry)
+        replacement (when (and (map? descriptor) (integer? (:id descriptor)))
+                      (get imported-results (:id descriptor)))]
+    (if-not replacement
+      entry
+      (case (:kind entry)
+        :message (assoc-in entry [:data :message/result] replacement)
+        :evaluation (assoc-in entry [:data :result :result] replacement)
+        :custom (assoc-in entry [:data :result :result] replacement)
+        entry))))
 
 (defn- artifact-descriptor? [value]
   (and (map? value)
@@ -845,42 +858,30 @@
        (integer? (:bytes value))
        (contains? #{:text :edn :binary} (:kind value))))
 
-(defn- referenced-artifact-ids [value]
-  (letfn [(walk [item]
-            (cond
-              (map? item)
-              (reduce-kv
-               (fn [ids key nested]
-                 (let [ids (if (and (= :artifact-id key) (uuid? nested))
-                             (conj ids nested)
-                             ids)]
-                   (into ids (walk nested))))
-               (if (artifact-descriptor? item) #{(:id item)} #{})
-               item)
-              (sequential? item) (reduce into #{} (map walk item))
-              (set? item) (reduce into #{} (map walk item))
-              :else #{}))]
-    (walk value)))
+(defn- result-artifact-ids [descriptor]
+  (cond-> #{}
+    (and (= :artifact (:kind descriptor)) (uuid? (:artifact-id descriptor)))
+    (conj (:artifact-id descriptor))
 
-(defn- remap-artifact-refs [value artifact-by-old]
-  (letfn [(walk [item]
-            (cond
-              (map? item)
-              (if-let [replacement (when (artifact-descriptor? item)
-                                     (get artifact-by-old (:id item)))]
-                replacement
-                (into {}
-                      (map (fn [[key nested]]
-                             [key (if (and (= :artifact-id key)
-                                           (contains? artifact-by-old nested))
-                                    (:id (get artifact-by-old nested))
-                                    (walk nested))]))
-                      item))
-              (vector? item) (mapv walk item)
-              (set? item) (set (map walk item))
-              (sequential? item) (mapv walk item)
-              :else item))]
-    (walk value)))
+    (artifact-descriptor? (get-in descriptor [:details :artifact]))
+    (conj (get-in descriptor [:details :artifact :id]))))
+
+(defn- referenced-artifact-ids [descriptors]
+  (reduce into #{} (map result-artifact-ids descriptors)))
+
+(defn- remap-result-details [details artifact-by-old]
+  (if-let [replacement (let [artifact (:artifact details)]
+                         (when (artifact-descriptor? artifact)
+                           (get artifact-by-old (:id artifact))))]
+    (assoc details :artifact replacement)
+    details))
+
+(defn- remap-entry-artifact-refs [entry artifact-by-old]
+  (let [details (get-in entry [:data :result :details])]
+    (if (and (contains? #{:evaluation :custom} (:kind entry)) (map? details))
+      (assoc-in entry [:data :result :details]
+                (remap-result-details details artifact-by-old))
+      entry)))
 
 (defn- copy-value-records! [store ^Connection connection old-sid new-sid entries now]
   (let [wanted (referenced-result-ids entries)
@@ -892,8 +893,7 @@
         _ (value/check! (= wanted found) :result-not-found
                        "Copied history references missing durable results"
                        {:result-ids (vec (sort (set/difference wanted found)))})
-        artifact-ids (set/union (referenced-artifact-ids entries)
-                                (referenced-artifact-ids source-results))
+        artifact-ids (referenced-artifact-ids source-results)
         source-artifacts
         (mapv (fn [artifact-id]
                 (let [row (first (query-sql connection "SELECT * FROM artifacts WHERE session_id=? AND id=?"
@@ -943,7 +943,7 @@
                                            :session-id new-sid
                                            :kind (:kind descriptor)
                                            :content (or (:content descriptor) "")
-                                           :details (remap-artifact-refs
+                                           :details (remap-result-details
                                                      (or (:details descriptor) {})
                                                      artifact-by-old)
                                            :available? (case (:kind descriptor)
@@ -968,12 +968,31 @@
     {:results imported-results :artifacts artifact-by-old}))
 
 (defn- copy-path! [store ^Connection connection source-row source-path opts]
-  (let [new-sid (or (:id opts) (util/id))
+  (let [copy-path
+        (loop [remaining source-path
+               included #{}
+               result []]
+          (if-let [entry (first remaining)]
+            (if (and (= :label (:kind entry))
+                     (not (contains? included (get-in entry [:data :entry-id]))))
+              (recur (next remaining) included result)
+              (recur (next remaining) (conj included (:id entry)) (conj result entry)))
+            result))
+        new-sid (or (:id opts) (util/id))
         _ (require-uuid! new-sid :session-id)
-        id-map (into {} (map (fn [entry] [(:id entry) (util/id)]) source-path))
+        id-map (into {} (map (fn [entry] [(:id entry) (util/id)]) copy-path))
+        compaction-id-map
+        (loop [remaining (rseq source-path)
+               following nil
+               result id-map]
+          (if-let [entry (first remaining)]
+            (if-let [copied-id (get id-map (:id entry))]
+              (recur (next remaining) copied-id result)
+              (recur (next remaining) following (assoc result (:id entry) following)))
+            result))
         now (util/now)
         config (session-model/effective-config (::base-config source-row) source-path)
-        copied-source-head (get id-map (:id (last source-path)))
+        copied-source-head (get id-map (:id (last copy-path)))
         raw-boundary (tool-boundary-entries source-path)
         final-head (or (:id (last raw-boundary)) copied-source-head)
         snapshot (-> (session-model/new-snapshot
@@ -985,7 +1004,7 @@
                         :status :idle
                         :created-at now
                         :metadata (or (:metadata opts) (:metadata source-row))
-                        :labels (remap-entry-refs (:labels source-row) id-map)
+                        :labels (remap-labels (:labels source-row) id-map)
                         :parent-id (:id source-row)
                         :fork-entry (:source-leaf opts)}))
                      (assoc :head final-head))]
@@ -993,21 +1012,20 @@
                  "Session ID already exists" {:session-id new-sid})
     (insert-session! connection snapshot (::base-config source-row))
     (let [value-records (copy-value-records! store connection (:id source-row)
-                                             new-sid source-path now)
+                                             new-sid copy-path now)
           imported-results (:results value-records)
-          imported-artifacts (:artifacts value-records)
           copied-source
-          (mapv (fn [entry]
+          (mapv (fn [index entry]
                   (-> entry
                       (assoc :id (get id-map (:id entry))
                              :session-id new-sid
-                             :parent-id (get id-map (:parent-id entry))
-                             :data (-> (:data entry)
-                                       (remap-entry-refs id-map)
-                                       (remap-entry-result-refs imported-results)
-                                       (remap-artifact-refs imported-artifacts)))))
-                source-path)
-          start-seq (inc (long (reduce max 0 (map :seq source-path))))
+                             :parent-id (when (pos? index)
+                                          (get id-map (:id (nth copy-path (dec index))))))
+                      (remap-entry-refs id-map compaction-id-map)
+                      (remap-entry-result-refs imported-results)
+                      (remap-entry-artifact-refs (:artifacts value-records))))
+                (range) copy-path)
+          start-seq (inc (long (reduce max 0 (map :seq copy-path))))
           boundary
           (loop [remaining raw-boundary
                  parent copied-source-head
@@ -1249,7 +1267,7 @@
                               [] operation-row)
             by-session (group-by :session-id active)
             now (util/now)
-            events (transient [])]
+            events (volatile! (transient []))]
         (doseq [[sid ops] by-session]
           (let [snapshot (require-session connection sid)
                 all (all-entries connection sid)
@@ -1288,14 +1306,14 @@
             (doseq [op ops]
               (execute-sql! connection "UPDATE operations SET status='interrupted',finished_at=?,error=? WHERE id=?"
                             [now (encode {:code "interrupted" :message "Process restarted before the operation completed"}) (:id op)])
-              (conj! events (insert-event! connection sid
+              (vswap! events conj! (insert-event! connection sid
                                            {:operation-id (:id op)
                                             :type :operation/interrupted
                                             :data {:reason :restart}
                                             :time now})))
             (update-session! connection (assoc snapshot :head @final-head :status :interrupted
                                                :revision (inc (:revision snapshot)) :updated-at now))))
-        (persistent! events)))))
+        (persistent! @events)))))
 
 (defn- export-artifact-row [store connection ^ResultSet rs]
   (let [descriptor (cond-> {:id (.getString rs "id")
@@ -1503,6 +1521,10 @@
                  "Export session metadata must be a map" {})
     (value/check! (vector? (:labels snapshot)) :invalid-import
                  "Export session labels must be a vector" {})
+    (doseq [label (:labels snapshot)]
+      (value/check! (and (map? label) (contains? id-set (:entry-id label)))
+                   :invalid-import "Session label references a missing entry"
+                   {:entry-id (:entry-id label)}))
     (require-uuid! (:id snapshot) :session-id)
     (value/check! (= (count ids) (count id-set)) :invalid-import
                  "Export contains duplicate entry IDs" {})
@@ -1542,9 +1564,10 @@
         (let [kept (get-in entry [:data :first-kept-entry-id])
               ancestors (set (map :id (session-model/active-path
                                        entries (:parent-id entry))))]
-          (value/check! (contains? ancestors kept) :invalid-import
-                       "Compaction retained entry must be on its preceding active path"
-                       {:entry-id (:id entry) :first-kept-entry-id kept})
+          (when kept
+            (value/check! (contains? ancestors kept) :invalid-import
+                         "Compaction retained entry must be on its preceding active path"
+                         {:entry-id (:id entry) :first-kept-entry-id kept}))
           (value/check! (string? (get-in entry [:data :summary])) :invalid-import
                        "Compaction summary must be text" {:entry-id (:id entry)})
           (value/check! (map? (or (get-in entry [:data :usage]) {})) :invalid-import
@@ -1578,7 +1601,7 @@
                                             artifact-availability)
           referenced (referenced-result-ids entries)
           present (set (map :id results))
-          artifact-referenced (referenced-artifact-ids [entries results])
+          artifact-referenced (referenced-artifact-ids results)
           artifact-present (set (keys artifact-availability))]
       (value/check! (set/subset? referenced present) :invalid-import
                    "History references results missing from the export"
@@ -1590,24 +1613,6 @@
       {:snapshot snapshot :base-config base-config :entries entries
        :artifacts artifacts :results results})))
 
-(defn- remap-entry-result-refs [data imported-results]
-  (letfn [(walk [value]
-            (cond
-              (map? value)
-              (into {}
-                    (map (fn [[key item]]
-                           [key (if (and (contains? #{:result :message/result} key)
-                                         (map? item)
-                                         (integer? (:id item))
-                                         (contains? imported-results (:id item)))
-                                  (get imported-results (:id item))
-                                  (walk item))]))
-                    value)
-              (vector? value) (mapv walk value)
-              (set? value) (set (map walk value))
-              (sequential? value) (mapv walk value)
-              :else value))]
-    (walk data)))
 
 (defn- copy-graph! [^Connection connection source-row source-entries opts]
   (let [source-entries (vec (sort-by :seq source-entries))
@@ -1616,26 +1621,41 @@
         id-map (into {} (map (fn [entry] [(:id entry) (util/id)]) source-entries))
         now (util/now)
         base-config (session-model/normalize-config (::base-config source-row))
-        snapshot (session-model/new-snapshot
-                  {:id new-sid
-                   :name (or (:name opts) (:name source-row))
-                   :cwd (or (:cwd opts) (:cwd source-row))
-                   :config (session-model/normalize-config (:config source-row))
-                   :status :idle
-                   :created-at now
-                   :metadata (or (:metadata opts) (:metadata source-row))
-                   :labels (remap-entry-refs (:labels source-row) id-map)})
-        snapshot (assoc snapshot :head (get id-map (:head source-row)))
-        copied (mapv (fn [entry]
-                       (-> entry
-                           (assoc :id (get id-map (:id entry))
-                                  :session-id new-sid
-                                  :parent-id (get id-map (:parent-id entry))
-                                  :data (-> (:data entry)
-                                            (remap-entry-refs id-map)
-                                            (remap-entry-result-refs (:imported-results opts))
-                                            (remap-artifact-refs (:imported-artifacts opts))))))
-                     source-entries)]
+        copied-source-head (get id-map (:head source-row))
+        raw-boundary (tool-boundary-entries
+                      (session-model/active-path source-entries (:head source-row)))
+        final-head (or (:id (last raw-boundary)) copied-source-head)
+        snapshot (-> (session-model/new-snapshot
+                      {:id new-sid
+                       :name (or (:name opts) (:name source-row))
+                       :cwd (or (:cwd opts) (:cwd source-row))
+                       :config (session-model/normalize-config (:config source-row))
+                       :status :idle
+                       :created-at now
+                       :metadata (or (:metadata opts) (:metadata source-row))
+                       :labels (remap-labels (:labels source-row) id-map)})
+                     (assoc :head final-head))
+        copied-source (mapv (fn [entry]
+                              (-> entry
+                                  (assoc :id (get id-map (:id entry))
+                                         :session-id new-sid
+                                         :parent-id (get id-map (:parent-id entry)))
+                                  (remap-entry-refs id-map id-map)
+                                  (remap-entry-result-refs (:imported-results opts))
+                                  (remap-entry-artifact-refs (:imported-artifacts opts))))
+                            source-entries)
+        start-seq (inc (long (reduce max 0 (map :seq source-entries))))
+        boundary
+        (loop [remaining raw-boundary
+               parent copied-source-head
+               seq start-seq
+               result []]
+          (if-let [raw (first remaining)]
+            (let [entry (assoc raw :session-id new-sid :parent-id parent
+                               :seq seq :created-at now)]
+              (recur (next remaining) (:id entry) (inc seq) (conj result entry)))
+            result))
+        copied (into copied-source boundary)]
     (value/check! (nil? (find-session connection new-sid)) :session-exists
                  "Session ID already exists" {:session-id new-sid})
     (insert-session! connection snapshot base-config)
@@ -1688,7 +1708,7 @@
                                           :session-id new-sid
                                           :kind kind
                                           :content (or (:content descriptor) "")
-                                          :details (remap-artifact-refs
+                                          :details (remap-result-details
                                                     (or (:details descriptor) {})
                                                     artifact-by-old-id)
                                           :available? (case kind

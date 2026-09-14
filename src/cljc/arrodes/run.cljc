@@ -235,10 +235,12 @@
       entries
       (let [marker (nth entries marker-index)
             kept-id (get-in marker [:data :first-kept-entry-id])
-            kept-index (first (keep-indexed
-                               (fn [index entry]
-                                 (when (= kept-id (:id entry)) index))
-                               entries))]
+            kept-index (if kept-id
+                         (first (keep-indexed
+                                 (fn [index entry]
+                                   (when (= kept-id (:id entry)) index))
+                                 entries))
+                         marker-index)]
         (vec (concat [marker]
                      (subvec entries kept-index marker-index)
                      (subvec entries (inc marker-index))))))))

@@ -3,7 +3,8 @@
             [arrodes.store :as store]
             [arrodes.platform :as u]
             [clojure.test :refer [deftest is testing]])
-  (:import (java.nio.file Files Path)
+  (:import (java.nio.charset StandardCharsets)
+           (java.nio.file Files OpenOption Path)
            (java.nio.file.attribute FileAttribute)))
 
 (def config {:provider :openai :model "gpt-4o-mini" :thinking :medium
@@ -137,3 +138,42 @@
             (is (= "A durable result" (:content (artifacts/read! reopened sid (:id artifact) {}))))
             (finally (store/close! reopened)))))
       (finally (store/close! first-store) (remove-directory! directory)))))
+
+(deftest file-artifact-pages-preserve-text-and-binary-offset-units
+  (with-store [database]
+    (let [sid (:id (new-session database))
+          text-artifact (artifacts/put! database sid "Aé中🙂Z" {:name "unicode"})
+          text-page (artifacts/read! database sid (:id text-artifact)
+                                     {:offset 2 :limit 4})
+          final-text-page (artifacts/read! database sid (:id text-artifact)
+                                           {:offset (:next-offset text-page) :limit 2})
+          binary (byte-array [0 1 2 3 -1 127])
+          binary-artifact (artifacts/put! database sid binary
+                                          {:name "binary" :kind :binary})
+          binary-page (artifacts/read! database sid (:id binary-artifact)
+                                       {:offset 2 :limit 3})]
+      (is (= "é中🙂" (:content text-page)))
+      (is (= 6 (:next-offset text-page)))
+      (is (true? (:truncated? text-page)))
+      (is (= "Z" (:content final-text-page)))
+      (is (nil? (:next-offset final-text-page)))
+      (is (= :base64 (:encoding binary-page)))
+      (is (= [1 2 3]
+             (vec (.decode (java.util.Base64/getDecoder) ^String (:content binary-page)))))
+      (is (= 5 (:next-offset binary-page)))
+      (is (true? (:truncated? binary-page))))))
+
+(deftest file-artifact-page-detects-same-size-corruption
+  (with-store [database]
+    (let [sid (:id (new-session database))
+          artifact (artifacts/put! database sid "integrity" {:name "corruption"})
+          path (-> (u/path (:artifact-dir database))
+                   (.resolve (subs (:sha256 artifact) 0 2))
+                   (.resolve (:sha256 artifact)))]
+      (Files/write path (.getBytes "corrupt!!" StandardCharsets/UTF_8)
+                   (make-array OpenOption 0))
+      (let [error (try
+                    (artifacts/read! database sid (:id artifact) {:offset 1 :limit 1})
+                    nil
+                    (catch clojure.lang.ExceptionInfo error error))]
+        (is (= "artifact-corrupt" (:error/code (ex-data error))))))))

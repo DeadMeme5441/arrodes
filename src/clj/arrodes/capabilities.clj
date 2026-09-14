@@ -1,7 +1,6 @@
 (ns arrodes.capabilities
   "Session-local capability registry, invocation pipeline, hooks, ownership,
   locking, durable result projection, and persistent REPL namespace."
-  (:refer-clojure :exclude [catalog])
   (:require [clojure.data.json :as json]
             [clojure.edn :as edn]
             [clojure.string :as str]
@@ -20,6 +19,7 @@
 (def ^:private max-output-lines 2000)
 (def ^:private max-inline-value-bytes (* 32 1024))
 (def ^:private max-durable-result-bytes (* 4 1024 1024))
+(def ^:private inline-result-envelope-depth 3)
 (def ^:private max-artifact-helper-bytes (* 32 1024 1024))
 (def ^:private max-content-parts 256)
 (def ^:private max-retained-output-characters (* 16 1024 1024))
@@ -599,47 +599,51 @@
                     hard-truncated? (assoc :output-hard-truncated? true
                                            :retained-characters (count text)))}))))
 
-(defn- durable-value? [value]
-  (let [nodes (volatile! 0)
-        characters (volatile! 0)
-        max-characters (quot max-durable-result-bytes 4)]
-    (letfn [(scalar-text? [item]
-              (<= (vswap! characters + (count (str item))) max-characters))
-            (durable? [item depth]
-              (vswap! nodes inc)
-              (and (<= @nodes max-durable-nodes)
-                   (< depth 32)
-                   (cond
-                     (nil? item) true
-                     (or (string? item) (keyword? item) (symbol? item) (char? item))
-                     (scalar-text? item)
-                     (or (number? item) (instance? Boolean item)) true
-                     (vector? item) (and (<= (count item) 10000)
-                                         (every? #(durable? % (inc depth)) item))
-                     (list? item) (and (<= (count item) 10000)
+(defn- durable-value?
+  ([value] (durable-value? value 0))
+  ([value initial-depth]
+   (let [nodes (volatile! 0)
+         characters (volatile! 0)
+         max-characters (quot max-durable-result-bytes 4)]
+     (letfn [(scalar-text? [item]
+               (<= (vswap! characters + (count (str item))) max-characters))
+             (durable? [item depth]
+               (vswap! nodes inc)
+               (and (<= @nodes max-durable-nodes)
+                    (< depth 32)
+                    (cond
+                      (nil? item) true
+                      (or (string? item) (keyword? item) (symbol? item) (char? item))
+                      (scalar-text? item)
+                      (or (number? item) (instance? Boolean item)) true
+                      (vector? item) (and (<= (count item) 10000)
+                                          (every? #(durable? % (inc depth)) item))
+                      (list? item) (and (<= (count item) 10000)
+                                        (every? #(durable? % (inc depth)) item))
+                      (set? item) (and (<= (count item) 10000)
                                        (every? #(durable? % (inc depth)) item))
-                     (set? item) (and (<= (count item) 10000)
-                                      (every? #(durable? % (inc depth)) item))
-                     (and (map? item) (not (record? item)))
-                     (and (<= (count item) 10000)
-                          (every? (fn [[key child]]
-                                    (and (durable? key (inc depth))
-                                         (durable? child (inc depth))))
-                                  item))
-                     :else false)))]
-      (durable? value 0))))
+                      (and (map? item) (not (record? item)))
+                      (and (<= (count item) 10000)
+                           (every? (fn [[key child]]
+                                     (and (durable? key (inc depth))
+                                          (durable? child (inc depth))))
+                                   item))
+                      :else false)))]
+       (durable? value initial-depth)))))
 
 (defn- result-descriptor! [registry call-id value content details error?]
   (let [text (:text (content-text content))
-        durable? (durable-value? value)
+        inline-depth-safe? (durable-value? value inline-result-envelope-depth)
+        durable? (or inline-depth-safe? (durable-value? value))
         printed (when durable?
                   (binding [*print-length* 10001 *print-level* 33] (pr-str value)))
         durable? (and durable? (<= (utf8-bytes printed) max-durable-result-bytes))
+        inline? (and durable? inline-depth-safe?
+                     (<= (utf8-bytes printed) max-inline-value-bytes))
         base {:content text :details (assoc details :call-id call-id :error? error?)
               :available? true}
         pending (cond
-                  (and durable? (<= (utf8-bytes printed) max-inline-value-bytes))
-                  (assoc base :kind :inline :value value)
+                  inline? (assoc base :kind :inline :value value)
 
                   durable?
                   (let [artifact (artifacts/put! (:store registry) (:session-id registry) printed
@@ -865,7 +869,7 @@
 
 (defn create!
   "Create a session's functions, evaluation state, and result/artifact helpers."
-  [{:keys [session-id cwd store config emit! get-session] :as options}]
+  [{:keys [session-id cwd store config emit! get-session]}]
   (value/check! (and (string? session-id) (not (str/blank? session-id))) :invalid-session-id
                "Capability registry requires a session id" {})
   (value/check! (and (string? cwd) (not (str/blank? cwd))) :invalid-cwd

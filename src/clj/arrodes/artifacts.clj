@@ -1,16 +1,17 @@
 (ns arrodes.artifacts
   "Immutable artifacts and durable result descriptors backed by arrodes.store."
   (:require [clojure.edn :as edn]
-            [clojure.java.io :as io]
             [clojure.string :as str]
             [arrodes.store :as store]
             [arrodes.platform :as util]
             [arrodes.value :as value])
-  (:import (java.nio.charset StandardCharsets)
+  (:import (java.io BufferedInputStream ByteArrayOutputStream InputStreamReader)
+           (java.nio.charset StandardCharsets)
            (java.nio.file Files StandardCopyOption LinkOption OpenOption)
            (java.nio.file.attribute FileAttribute PosixFilePermissions)
+           (java.security DigestInputStream MessageDigest)
            (java.sql Connection PreparedStatement ResultSet)
-           (java.util Base64 UUID)))
+           (java.util Base64 HexFormat UUID)))
 
 (def ^:private artifact-kinds #{:text :edn :binary})
 (def ^:private result-kinds #{:inline :artifact :live})
@@ -196,18 +197,14 @@
                    [sid] artifact-row)))]
     (mapv #(actual-availability store %) descriptors)))
 
-(defn- artifact-bytes [store descriptor]
-  (if (:memory? store)
-    (store/store-read store
-      (fn [connection]
-        (first (query connection "SELECT content FROM artifacts WHERE id=? AND session_id=?"
-                      [(:id descriptor) (:session-id descriptor)]
-                      #(.getBytes ^ResultSet % "content")))))
-    (let [path (artifact-path store (:sha256 descriptor))]
-      (when (and (not (Files/isSymbolicLink path))
-                 (Files/isRegularFile path (into-array LinkOption [LinkOption/NOFOLLOW_LINKS])))
-        (Files/readAllBytes path)))))
-(defn- page-bounds [length opts]
+(defn- memory-artifact-bytes [store descriptor]
+  (store/store-read store
+    (fn [connection]
+      (first (query connection "SELECT content FROM artifacts WHERE id=? AND session_id=?"
+                    [(:id descriptor) (:session-id descriptor)]
+                    #(.getBytes ^ResultSet % "content"))))))
+
+(defn- page-request [opts]
   (let [raw-offset (or (:offset opts) 1)
         raw-limit (or (:limit opts) default-page-size)]
     (value/check! (and (integer? raw-offset) (pos? raw-offset)
@@ -218,13 +215,83 @@
                       (<= raw-limit Long/MAX_VALUE))
                  :invalid-limit "Artifact page limit must be a positive integer"
                  {:limit raw-limit})
-    (let [offset (long raw-offset)
-          limit (long raw-limit)
-          start (min length (dec offset))
-          end (+ start (min limit (- length start)))]
-      {:offset offset :start start :end end
-       :next-offset (when (< end length) (inc end))
-       :truncated? (< end length)})))
+    {:offset (long raw-offset)
+     :start (dec (long raw-offset))
+     :limit (long raw-limit)}))
+
+(defn- page-bounds [length opts]
+  (let [{:keys [offset start limit]} (page-request opts)
+        start (min length start)
+        end (+ start (min limit (- length start)))]
+    {:offset offset :start start :end end
+     :next-offset (when (< end length) (inc end))
+     :truncated? (< end length)}))
+
+(defn- verified-file-read [store descriptor read-content]
+  ;; ponytail: integrity is O(n) I/O per page; use trusted digest metadata only if repeated paging proves costly.
+  (let [path (artifact-path store (:sha256 descriptor))]
+    (value/check! (and (not (Files/isSymbolicLink path))
+                       (Files/isRegularFile path (into-array LinkOption [LinkOption/NOFOLLOW_LINKS])))
+                  :artifact-unavailable "Artifact content is unavailable"
+                  {:artifact-id (:id descriptor) :session-id (:session-id descriptor)})
+    (let [digest (MessageDigest/getInstance "SHA-256")
+          result
+          (with-open [input (DigestInputStream.
+                             (BufferedInputStream.
+                              (Files/newInputStream path (make-array OpenOption 0)))
+                             digest)]
+            (read-content input))
+          sha (.formatHex (HexFormat/of) (.digest digest))]
+      (value/check! (and (= (:bytes descriptor) (Files/size path))
+                         (= (:sha256 descriptor) sha))
+                    :artifact-corrupt "Artifact content failed integrity verification"
+                    {:artifact-id (:id descriptor) :session-id (:session-id descriptor)})
+      result)))
+
+(defn- binary-file-page [store descriptor opts]
+  (let [{:keys [start end] :as bounds} (page-bounds (:bytes descriptor) opts)
+        piece
+        (verified-file-read
+         store descriptor
+         (fn [input]
+           (let [buffer (byte-array 8192)
+                 output (ByteArrayOutputStream.)]
+             (loop [position 0]
+               (let [read (.read input buffer)]
+                 (if (neg? read)
+                   (.toByteArray output)
+                   (let [chunk-end (+ position read)
+                         from (max start position)
+                         to (min end chunk-end)]
+                     (when (< from to)
+                       (.write output buffer (int (- from position)) (int (- to from))))
+                     (recur chunk-end))))))))]
+    [bounds piece]))
+
+(defn- text-file-page [store descriptor opts]
+  (let [{:keys [offset start limit]} (page-request opts)
+        requested-end (if (> limit (- Long/MAX_VALUE start))
+                        Long/MAX_VALUE
+                        (+ start limit))
+        {:keys [content length]}
+        (verified-file-read
+         store descriptor
+         (fn [input]
+           (with-open [reader (InputStreamReader. input StandardCharsets/UTF_8)]
+             (let [buffer (char-array 8192)
+                   output (StringBuilder.)]
+               (loop [position 0]
+                 (let [read (.read reader buffer)]
+                   (if (neg? read)
+                     {:content (str output) :length position}
+                     (let [chunk-end (+ position read)
+                           from (max start position)
+                           to (min requested-end chunk-end)]
+                       (when (< from to)
+                         (.append output buffer (int (- from position)) (int (- to from))))
+                       (recur chunk-end)))))))))
+        bounds (page-bounds length {:offset offset :limit limit})]
+    [bounds content]))
 
 (defn read!
   "Reads a bounded artifact page. Text offsets are character-based; binary offsets are bytes."
@@ -232,29 +299,33 @@
   (let [descriptor (get-artifact store sid id)]
     (value/check! (:available? descriptor) :artifact-unavailable
                  "Artifact content is unavailable" {:artifact-id id :session-id sid})
-    (let [bytes (artifact-bytes store descriptor)]
-      (value/check! bytes :artifact-unavailable "Artifact content is unavailable"
-                   {:artifact-id id :session-id sid})
-      (value/check! (and (= (:bytes descriptor) (alength ^bytes bytes))
-                        (= (:sha256 descriptor) (util/sha256 bytes)))
-                   :artifact-corrupt "Artifact content failed integrity verification"
-                   {:artifact-id id :session-id sid})
-      (if (= :binary (:kind descriptor))
-        (let [{:keys [offset start end next-offset truncated?]} (page-bounds (alength ^bytes bytes) opts)
-              piece (java.util.Arrays/copyOfRange ^bytes bytes (int start) (int end))]
-          {:artifact descriptor
-           :content (.encodeToString (Base64/getEncoder) piece)
-           :encoding :base64
-           :offset offset
-           :next-offset next-offset
-           :truncated? truncated?})
-        (let [text (String. ^bytes bytes StandardCharsets/UTF_8)
-              {:keys [offset start end next-offset truncated?]} (page-bounds (count text) opts)]
-          {:artifact descriptor
-           :content (subs text start end)
-           :offset offset
-           :next-offset next-offset
-           :truncated? truncated?})))))
+    (let [[{:keys [offset next-offset truncated?]} content]
+          (if (:memory? store)
+            (let [bytes (memory-artifact-bytes store descriptor)]
+              (value/check! bytes :artifact-unavailable "Artifact content is unavailable"
+                           {:artifact-id id :session-id sid})
+              (value/check! (and (= (:bytes descriptor) (alength ^bytes bytes))
+                                 (= (:sha256 descriptor) (util/sha256 bytes)))
+                           :artifact-corrupt "Artifact content failed integrity verification"
+                           {:artifact-id id :session-id sid})
+              (if (= :binary (:kind descriptor))
+                (let [bounds (page-bounds (alength ^bytes bytes) opts)]
+                  [bounds (java.util.Arrays/copyOfRange
+                           ^bytes bytes (int (:start bounds)) (int (:end bounds)))])
+                (let [text (String. ^bytes bytes StandardCharsets/UTF_8)
+                      bounds (page-bounds (count text) opts)]
+                  [bounds (subs text (:start bounds) (:end bounds))])))
+            (if (= :binary (:kind descriptor))
+              (binary-file-page store descriptor opts)
+              (text-file-page store descriptor opts)))]
+      (cond-> {:artifact descriptor
+               :content (if (= :binary (:kind descriptor))
+                          (.encodeToString (Base64/getEncoder) ^bytes content)
+                          content)
+               :offset offset
+               :next-offset next-offset
+               :truncated? truncated?}
+        (= :binary (:kind descriptor)) (assoc :encoding :base64)))))
 
 (defn- bounded-edn-shape? [value]
   (let [remaining (volatile! max-inline-nodes)]
