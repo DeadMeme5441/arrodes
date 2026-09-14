@@ -27,6 +27,10 @@
   (contains? #{:running :cancelling :starting} (get-in (state view) [:view :operation :status])))
 (defn- basename [path]
   (or (last (remove str/blank? (str/split (str (or path "")) #"[/\\]"))) "project"))
+(defn- secret-mask [text]
+  (->> (array-seq (.split (str (or text "")) "\n"))
+       (map #(apply str (repeat (alength (js/Array.from %)) "•")))
+       (str/join "\n")))
 (defn- row-list [view]
   (let [m (:view (state view))
         source (select-keys m [:entries :activities :activity-order :presentations
@@ -134,7 +138,7 @@
           :models
           (mapv (fn [m]
                   {:label (:id m) :description (str (name (keyword (:provider m)))
-                                                       "  " (str/join "/" (map name (:thinking-levels m))))
+                                                    "  " (str/join "/" (map name (:thinking-levels m))))
                    :choose (fn []
                              (let [current (get-in s [:view :session :config :thinking])
                                    levels (mapv keyword (:thinking-levels m))
@@ -280,6 +284,10 @@
                                                (fn [items] (vec (remove (fn [x] (= (:path x) (:path item))) items))))
                                           (close-overlay! view))})
                              (get-in (state view) [:ui :attachments]))}))}
+   {:label "Provider setup" :description "/setup"
+    :choose #(do (close-overlay! view) (fire! view :setup {}))}
+   {:label "Provider login" :description "/login"
+    :choose #(do (close-overlay! view) (fire! view :setup {}))}
    {:label "Choose model" :description "/models" :choose #(open-models! view)}
    {:label "Refresh model catalog" :description "/refresh-models" :choose #(do (close-overlay! view) (fire! view :models {:refresh? true}))}
    {:label "Thinking level" :description "/thinking"
@@ -287,7 +295,7 @@
     (fn []
       (let [s (state view) config (get-in s [:view :session :config])
             current (some (fn [m] (when (and (= (:id m) (:model config))
-                                            (= (keyword (:provider m)) (keyword (:provider config)))) m)) (:models s))
+                                             (= (keyword (:provider m)) (keyword (:provider config)))) m)) (:models s))
             levels (or (seq (:thinking-levels current)) [:none :low :medium :high :xhigh :max])]
         (open-overlay! view {:kind :choices :title "Thinking level" :query ""
                              :items (mapv (fn [level]
@@ -313,8 +321,8 @@
                (fn [] (fire! view :reconnect {})))}
    {:label "Copy conversation" :description "/copy" :choose
     #(do (copy! view (str/join "\n\n" (map (fn [row]
-                                              (str (present/row-title row) "\n"
-                                                   (or (present/inline-content row true) ""))) (row-list view))))
+                                             (str (present/row-title row) "\n"
+                                                  (or (present/inline-content row true) ""))) (row-list view))))
          (close-overlay! view))}
    {:label "Export HTML" :description "/export  Local file only; no sharing" :choose
     #(input-dialog! view "Export conversation as HTML" "arrodes-session.html"
@@ -604,14 +612,26 @@
         (w/content! (:modal-title view) (:title overlay))
         (w/content! (:modal-hint view)
                     (str (:hint overlay) (when (:error overlay) (str "\nError: " (:error overlay)))))
-        (set! (.-visible (:modal-input view)) query?)
-        (set! (.-height (:modal-input view)) (if input? (min 7 (max 3 (- height 12))) 1))
-        (set! (.-textColor (:modal-input view)) (if (:secret? overlay) (:surface w/colors) (:text w/colors)))
-        (set! (.-focusedTextColor (:modal-input view)) (if (:secret? overlay) (:surface w/colors) (:text w/colors)))
-        (set! (.-selectionFg (:modal-input view)) (if (:secret? overlay) (:surface w/colors) (:text w/colors)))
-        (set! (.-selectionBg (:modal-input view)) (if (:secret? overlay) (:surface w/colors) (:selection w/colors)))
+        (set! (.-visible (:modal-input-frame view)) query?)
+        (when (and (:secret? overlay)
+                   (not= (:token overlay) (:modal-token @(:local view))))
+          (.setText (:modal-input view) ""))
+        (let [input-height (if input? (min 7 (max 3 (- height 12))) 1)
+              secret? (boolean (:secret? overlay))
+              input-value (.-plainText (:modal-input view))]
+          (set! (.-visible (:modal-input view)) (and query? (not secret?)))
+          (set! (.-height (:modal-input view)) input-height)
+          (set! (.-visible (:modal-mask view)) secret?)
+          (set! (.-selectable (:modal-input view)) (not secret?))
+          (set! (.-textColor (:modal-input view)) (if secret? (:surface w/colors) (:text w/colors)))
+          (set! (.-focusedTextColor (:modal-input view)) (if secret? (:surface w/colors) (:text w/colors)))
+          (set! (.-selectionFg (:modal-input view)) (if secret? (:surface w/colors) (:text w/colors)))
+          (set! (.-selectionBg (:modal-input view)) (if secret? (:surface w/colors) (:selection w/colors)))
+          (set! (.-height (:modal-mask view)) input-height)
+          (w/content! (:modal-mask view) (secret-mask input-value)))
         (set! (.-placeholder (:modal-input view)) (if input? "Enter a value..." "Type to filter..."))
-        (when (not= (.-plainText (:modal-input view)) (or (:query overlay) ""))
+        (when (and (not (:secret? overlay))
+                   (not= (.-plainText (:modal-input view)) (or (:query overlay) "")))
           (.setText (:modal-input view) (or (:query overlay) "")))
         (when (not= (:token overlay) (:modal-token @(:local view)))
           (swap! (:local view) assoc :modal-token (:token overlay))
@@ -634,7 +654,7 @@
               (let [row (w/box renderer {:id (str "choice-" i) :width "100%" :paddingX 1 :paddingY 0
                                          :marginBottom 1 :backgroundColor (if (= i index) (:raised w/colors) (:surface w/colors))})
                     button (w/button renderer (:label item) (:choose item) {:id (str "choice-" i "-label") :width "100%"
-                                                                          :fg (if (= i index) (:accent w/colors) (:text w/colors))})
+                                                                            :fg (if (= i index) (:accent w/colors) (:text w/colors))})
                     description (w/text renderer (:description item) {:width "100%" :fg (:muted w/colors)})]
                 (w/add! row button description)
                 (.add (:modal-list view) row)))))
@@ -726,15 +746,16 @@
 
           :select
           (open-overlay! view {:kind :choices :host-id id :title title :query ""
+                               :hint (:message request)
                                :items (conj (mapv (fn [item]
-                                                   {:label (if (map? item) (or (:label item) (:name item) (str (:value item))) (str item))
-                                                    :description (or (:description item) "")
-                                                    :choose #(respond-host! view id
+                                                    {:label (if (map? item) (or (:label item) (:name item) (str (:value item))) (str item))
+                                                     :description (or (:description item) "")
+                                                     :choose #(respond-host! view id
                                                                              (if (and (map? item) (contains? item :value))
                                                                                (:value item)
                                                                                (if (map? item) (or (:id item) (:label item)) item))
                                                                              false)})
-                                                 (or (:items request) (:options request))) cancel)})
+                                                  (or (:items request) (:options request))) cancel)})
 
           (open-overlay! view {:kind :confirm :host-id id :title "Unsupported host capability"
                                :hint (str "No frontend implementation is registered for " (:name request)
@@ -1125,7 +1146,7 @@
         pending-title (w/text renderer "PENDING" {:fg (:accent w/colors) :height 1})
         pending-items (w/box renderer {:width "100%"})
         pending-more (w/button renderer "" (fn [] (open-overlay! @view-ref {:kind :pending :title "Pending messages" :query ""
-                                                                           :hint "Enter edits; Delete drops a still-pending message."}))
+                                                                            :hint "Enter edits; Delete drops a still-pending message."}))
                                {:visible false :height 1 :fg (:muted w/colors)})
         widget-box (w/box renderer {:id "session-widgets" :visible false :width "100%"
                                     :maxHeight 6 :paddingX 2 :border ["top"]
@@ -1182,21 +1203,30 @@
         modal-title (w/text renderer "" {:height 1 :flexGrow 1 :flexShrink 1 :fg (:accent w/colors) :truncate true :wrapMode "none"})
         modal-close (w/button renderer "[x]" (fn [] (escape! @view-ref)) {:width 3})
         modal-hint (w/text renderer "" {:width "100%" :maxHeight 4 :fg (:muted w/colors) :marginBottom 1})
+        modal-input-frame (w/box renderer {:width "100%" :height 1})
         modal-input (w/create renderer "TextareaRenderable"
-                             {:id "dialog-input" :width "100%" :height 1 :initialValue ""
-                              :backgroundColor (:surface w/colors) :focusedBackgroundColor (:surface w/colors)
-                              :textColor (:text w/colors) :focusedTextColor (:text w/colors)
-                              :selectionBg (:selection w/colors) :cursorColor (:accent w/colors)
-                              :keyBindings [{:name "return" :action "submit"} {:name "return" :shift true :action "newline"}]
-                              :onSubmit (fn [_] (choose-overlay! @view-ref))
-                              :onContentChange
-                              (fn [_]
-                                (when-let [view @view-ref]
-                                  (when-let [overlay (get-in (state view) [:ui :overlay])]
-                                    (let [query (.-plainText (:modal-input view))]
-                                      (when (not= query (:query overlay))
-                                        (ui! view update :overlay assoc :query query :index 0)
-                                        (when (= :files (:kind overlay)) (file-query! view query)))))))})
+                              {:id "dialog-input" :position "absolute" :top 0 :left 0
+                               :width "100%" :height 1 :initialValue ""
+                               :backgroundColor (:surface w/colors) :focusedBackgroundColor (:surface w/colors)
+                               :textColor (:text w/colors) :focusedTextColor (:text w/colors)
+                               :selectionBg (:selection w/colors) :cursorColor (:accent w/colors)
+                               :keyBindings [{:name "return" :action "submit"} {:name "return" :shift true :action "newline"}]
+                               :onSubmit (fn [_] (choose-overlay! @view-ref))
+                               :onContentChange
+                               (fn [_]
+                                 (when-let [view @view-ref]
+                                   (when-let [overlay (get-in (state view) [:ui :overlay])]
+                                     (let [query (.-plainText (:modal-input view))]
+                                       (if (:secret? overlay)
+                                         (do
+                                           (w/content! (:modal-mask view) (secret-mask query))
+                                           (.requestRender (:renderer view)))
+                                         (when (not= query (:query overlay))
+                                           (ui! view update :overlay assoc :query query :index 0)
+                                           (when (= :files (:kind overlay)) (file-query! view query))))))))})
+        modal-mask (w/text renderer "" {:id "dialog-secret-mask" :position "absolute" :top 0 :left 0
+                                        :zIndex 2 :width "100%" :height 1 :visible false
+                                        :selectable false :fg (:text w/colors) :bg (:surface w/colors)})
         modal-list (w/scrollbox renderer {:id "dialog-choices" :width "100%" :marginTop 1})
         modal-footer (w/text renderer "" {:width "100%" :height 1 :fg (:faint w/colors) :wrapMode "none" :truncate true})
         view {:app application :renderer renderer :root root :local local :closed? closed?
@@ -1212,7 +1242,8 @@
               :notice-box notice-box :notice-text notice-text :composer-box composer-box :composer composer
               :attachment-row attachment-row :attachment-items attachment-items :footer-status footer-status :footer-keys footer-keys
               :modal-shade modal-shade :modal modal :modal-title modal-title :modal-hint modal-hint
-              :modal-input modal-input :modal-list modal-list :modal-footer modal-footer
+              :modal-input-frame modal-input-frame :modal-input modal-input :modal-mask modal-mask
+              :modal-list modal-list :modal-footer modal-footer
               :on-quit (or (:on-quit options) (fn [] (-> (app/close! application) (.finally (fn [] (.destroy renderer))))))}
         key-handler (fn [event] (key! view event))
         frame-handler (fn [_] (frame! view))
@@ -1233,7 +1264,8 @@
     (w/add! composer-box composer attachment-row)
     (w/add! footer footer-status footer-keys)
     (w/add! modal-header modal-title modal-close)
-    (w/add! modal modal-header modal-hint modal-input modal-list modal-footer)
+    (w/add! modal-input-frame modal-input modal-mask)
+    (w/add! modal modal-header modal-hint modal-input-frame modal-list modal-footer)
     (w/add! modal-shade modal)
     (w/add! root header body new-activity pending widget-box notice-box composer-box footer modal-shade)
     (.add (.-root renderer) root)

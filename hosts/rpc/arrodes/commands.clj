@@ -7,6 +7,7 @@
             [arrodes.provider :as provider]
             [arrodes.resources :as resources]
             [arrodes.runtime :as runtime]
+            [arrodes.setup :as setup]
             [arrodes.platform :as u]
             [arrodes.value :as value]
             [clojure.data.json :as json]
@@ -30,7 +31,8 @@
    "capability.list" "capability.set" "capability.attach" "capability.detach"
    "result.list" "result.inspect" "artifact.list" "artifact.read" "artifact.inspect" "artifact.write"
    "resource.list" "skill.read" "prompt.render" "prompt.run" "model.list" "model.refresh"
-   "auth.status" "auth.login" "auth.logout" "settings.get" "settings.update" "project.trust"
+   "auth.status" "auth.login" "auth.logout" "settings.get" "settings.update"
+   "setup.status" "setup.run" "project.info" "project.trust"
    "package.list" "package.install" "package.remove" "package.update" "event.replay"])
 
 (defn public-value
@@ -44,8 +46,8 @@
     (instance? Throwable value) (public-value (value/redact (value/error-map value)))
     (fn? value) {:type :function :available? false}
     (map? value) (into {} (keep (fn [[k v]]
-                                (when-not (contains? #{:fn :implementation :namespace :thread :future :executor :connection} k)
-                                  [k (public-value v)]))) value)
+                                  (when-not (contains? #{:fn :implementation :namespace :thread :future :executor :connection} k)
+                                    [k (public-value v)]))) value)
     (set? value) (mapv public-value (sort-by pr-str value))
     (sequential? value) (mapv public-value value)
     (bytes? value) {:type :binary :encoding :base64 :data (.encodeToString (java.util.Base64/getEncoder) value)}
@@ -56,7 +58,7 @@
 (defn- required-string [params key]
   (let [value (get params key)]
     (value/check! (and (string? value) (not (str/blank? value))) :invalid-params
-              (str "Expected a non-empty " (name key)) {:parameter key})
+                  (str "Expected a non-empty " (name key)) {:parameter key})
     value))
 (defn- sid [params] (required-string params :session-id))
 (defn- oid [params] (required-string params :operation-id))
@@ -65,7 +67,7 @@
 (defn- required-provider [params]
   (let [value (:provider params)]
     (value/check! (or (keyword? value) (and (string? value) (not (str/blank? value))))
-              :invalid-params "Provider must be a name" {:parameter :provider})
+                  :invalid-params "Provider must be a name" {:parameter :provider})
     (keyword-value value)))
 (defn normalize-config [config]
   (value/check! (map? config) :invalid-params "Configuration must be a map" {})
@@ -96,7 +98,7 @@
 (defn- positive-int [value field default maximum]
   (let [n (or value default)]
     (value/check! (and (integer? n) (<= 1 n maximum)) :invalid-params
-              (str (name field) " is outside its supported range") {:parameter field :maximum maximum})
+                  (str (name field) " is outside its supported range") {:parameter field :maximum maximum})
     n))
 (defn- resource-manager [rt params]
   (if (:session-id params) (runtime/resource-manager rt (sid params)) (:resources rt)))
@@ -129,11 +131,11 @@
   "A versioned JSONL envelope preserves EDN values without lossy keyword coercion."
   [{:keys [entries] :as packet}]
   (str (json/write-str {:type "session" :format (:format packet) :version (:version packet)
-                       :encoding "edn" :data (pr-str (dissoc packet :entries))}) "\n"
+                        :encoding "edn" :data (pr-str (dissoc packet :entries))}) "\n"
        (apply str (map #(str (json/write-str {:type "entry" :data (pr-str %)}) "\n") entries))))
 (defn import-content [text]
   (value/check! (and (string? text) (<= (count text) (* 32 1024 1024)))
-            :invalid-import "Session import must be text of at most 32 MiB" {})
+                :invalid-import "Session import must be text of at most 32 MiB" {})
   (try
     (let [text (str/trim text)]
       (value/check! (seq text) :invalid-import "Session import is empty" {})
@@ -141,8 +143,8 @@
         (let [lines (remove str/blank? (str/split text #"\n"))
               header (json/read-str (first lines) :key-fn keyword)]
           (value/check! (and (= "session" (:type header)) (= "arrodes-session" (:format header))
-                        (= 1 (:version header)) (= "edn" (:encoding header)))
-                    :invalid-import "Unsupported JSONL session format" {})
+                             (= 1 (:version header)) (= "edn" (:encoding header)))
+                        :invalid-import "Unsupported JSONL session format" {})
           (let [metadata (edn/read-string (:data header))]
             (value/check! (map? metadata) :invalid-import "Session header data must be a map" {})
             (assoc metadata :entries
@@ -282,16 +284,16 @@
                           (capabilities/register! registry descriptor)
                           (dissoc descriptor :fn))
     "capability.detach" (let [name (required-string params :name)
-                             registry (runtime/registry rt (sid params))
-                             descriptor (some #(when (= name (:name %)) %) (capabilities/catalog registry))
-                             owner (or (:connection-id params) "host")]
-                         (value/check! (and descriptor (= owner (:owner descriptor)))
-                                   :capability-not-owned "This connection does not own the capability" {:name name})
-                         (capabilities/unregister! registry name)
-                         {:removed name})
+                              registry (runtime/registry rt (sid params))
+                              descriptor (some #(when (= name (:name %)) %) (capabilities/catalog registry))
+                              owner (or (:connection-id params) "host")]
+                          (value/check! (and descriptor (= owner (:owner descriptor)))
+                                        :capability-not-owned "This connection does not own the capability" {:name name})
+                          (capabilities/unregister! registry name)
+                          {:removed name})
     "result.list" {:results (artifacts/results (:store rt) (sid params))}
     "result.inspect" (result-view (artifacts/result (:store rt) (sid params)
-                                                   (positive-int (:result-id params) :result-id nil Long/MAX_VALUE)))
+                                                    (positive-int (:result-id params) :result-id nil Long/MAX_VALUE)))
     "artifact.list" {:artifacts (artifacts/list-artifacts (:store rt) (sid params))}
     "artifact.inspect" (artifacts/get-artifact (:store rt) (sid params) (required-string params :artifact-id))
     "artifact.read" (artifacts/read! (:store rt) (sid params) (required-string params :artifact-id) (select-keys params [:offset :limit]))
@@ -303,21 +305,36 @@
                              (resources/read-skill (resource-manager rt params) (:name params)))}
     "prompt.render" {:content (resources/render-prompt (resource-manager rt params) (required-string params :name) (or (:arguments params) {}))}
     "prompt.run" (runtime/start! rt (sid params)
-                                  (resources/render-prompt (resource-manager rt params) (required-string params :name) (or (:arguments params) {}))
-                                  (run-options params))
+                                 (resources/render-prompt (resource-manager rt params) (required-string params :name) (or (:arguments params) {}))
+                                 (run-options params))
     "model.list" {:models (provider/catalog (provider-manager rt params))}
     "model.refresh" {:models (if (:provider params) (provider/refresh! (provider-manager rt params) (keyword-value (:provider params))) (provider/refresh! (provider-manager rt params)))}
     "auth.status" (value/redact (provider/status (provider-manager rt params)))
-    "auth.login" (value/redact (provider/login! (provider-manager rt params) (required-provider params)
-                                           (assoc params
-                                                  :input (fn [prompt] (runtime/ui! rt {:kind :input :prompt prompt :secret? true}))
-                                                  :on-event (fn [event] (runtime/ui! rt (assoc event :kind :notify))))))
+    "auth.login" (value/redact
+                  (provider/login! (provider-manager rt params) (required-provider params)
+                                   (assoc params
+                                          :input (fn [prompt]
+                                                   (runtime/ui! rt
+                                                                {:kind :input
+                                                                 :title (or (:message prompt) "Provider authentication")
+                                                                 :prompt (not-empty (dissoc prompt :type :message))
+                                                                 :secret? (contains? #{:secret :manual-code} (keyword-value (:type prompt)))}))
+                                          :on-event #(setup/auth-event! rt %))))
     "auth.logout" (provider/logout! (provider-manager rt params) (required-provider params))
     "settings.get" {:settings (value/redact (resources/settings (resource-manager rt params)))}
     "settings.update" (value/redact (resources/update-settings! (resource-manager rt params) (or (:changes params) {})
-                                                           {:scope (keyword-value (or (:scope params) :project))}))
+                                                                {:scope (keyword-value (or (:scope params) :project))}))
+    "setup.status" (setup/status rt (update params :config #(when % (normalize-config %))))
+    "setup.run" (let [result (setup/run! rt (update params :config #(when % (normalize-config %))))]
+                  (if (:session-id params)
+                    (assoc result :session
+                           (runtime/configure! rt (sid params)
+                                               {:config (select-keys (:config result)
+                                                                     [:provider :model :thinking])}))
+                    result))
+    "project.info" (setup/project-info rt)
     "project.trust" (do (value/check! (boolean? (:trusted? params)) :invalid-params "trusted? must be a boolean" {})
-                         (resources/trust! (:resources rt) (or (:cwd params) (cwd rt)) (:trusted? params)))
+                        (resources/trust! (:resources rt) (or (:cwd params) (cwd rt)) (:trusted? params)))
     "package.list" {:packages (packages/list-packages (home rt) (cwd rt))}
     "package.install" (packages/install! (home rt) (cwd rt) (required-string params :source)
                                          (update params :scope #(keyword-value (or % :global))))

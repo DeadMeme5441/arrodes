@@ -39,7 +39,7 @@
 (defn- package-root [home cwd scope]
   (case (scope-key scope)
     :global (u/resolve-path home "packages")
-    :project (u/resolve-path cwd ".arrodes/packages")))
+    :project (u/resolve-path (u/project-dir home cwd) "packages")))
 
 
 (defn- index-path [root] (u/resolve-path root "packages.edn"))
@@ -76,12 +76,12 @@
     (or (= r c) (.startsWith c r))))
 (defn- verify-package-root! [home cwd scope root]
   (when (Files/exists (u/path root) (make-array LinkOption 0))
-    (let [base (case (scope-key scope) :global home :project cwd)
+    (let [base (case (scope-key scope) :global home :project (u/project-dir home cwd))
           real-base (.toRealPath (u/path base) (make-array LinkOption 0))
           real-root (.toRealPath (u/path root) (make-array LinkOption 0))]
       (when-not (path-under? real-base real-root)
         (fail! :package/path-escape
-               "Package root resolves outside its home or project directory"
+               "Package root resolves outside Arrodes home state"
                {:scope (scope-key scope) :root (str root)}))))
   root)
 
@@ -142,7 +142,7 @@
                   (Files/createDirectories (.getParent output) (make-array FileAttribute 0))
                   (Files/copy entry output
                               (into-array StandardCopyOption [StandardCopyOption/COPY_ATTRIBUTES
-                                                             StandardCopyOption/REPLACE_EXISTING])))))))))))
+                                                              StandardCopyOption/REPLACE_EXISTING])))))))))))
 
 (defn- move-replacing! [source target]
   (try

@@ -6,7 +6,7 @@
 
 (def usage
   (str "Arrodes headless RPC host\n\n"
-       "Usage: clojure -M:host [options]\n\n"
+       "Usage: arrodes --rpc [options]\n\n"
        "  --cwd <directory>       Default project directory\n"
        "  --home <directory>      Arrodes home directory\n"
        "  --data-dir <directory>  Runtime data directory\n"

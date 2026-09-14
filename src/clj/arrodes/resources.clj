@@ -9,10 +9,11 @@
             [clojure.string :as str])
   (:import (clojure.lang LineNumberingPushbackReader)
            (java.io StringReader)
+           (java.nio.channels FileChannel)
            (java.nio.charset StandardCharsets)
-           (java.nio.file Files LinkOption Path)))
+           (java.nio.file Files LinkOption OpenOption Path StandardOpenOption)))
 
-(declare reload! activate! deactivate!)
+(declare reload! activate! deactivate! with-settings-lock)
 
 (def ^:private context-names ["AGENTS.override.md" "AGENTS.md" "AGENTS.MD" "CLAUDE.md" "CLAUDE.MD"])
 (def ^:private resource-kinds [:extensions :skills :prompts :themes])
@@ -109,9 +110,11 @@
                  {:root (str root) :path relative}))
         (str real)))))
 
-(defn- global-settings-path [manager] (u/resolve-path (:home manager) "settings.edn"))
-(defn- project-settings-path [manager] (u/resolve-path (:cwd manager) ".arrodes/settings.edn"))
-(defn- trust-path [manager] (u/resolve-path (:home manager) "trust.edn"))
+(defn- global-config-path [manager name]
+  (u/resolve-path (u/resolve-path (:home manager) "config") name))
+(defn- global-settings-path [manager] (global-config-path manager "settings.edn"))
+(defn- project-settings-path [manager] (u/resolve-path (:project-dir manager) "settings.edn"))
+(defn- trust-path [manager] (global-config-path manager "trust.edn"))
 
 (defn- read-trust-store [manager]
   (let [value (read-map-file (trust-path manager) {:version 1 :projects {}} :trust/invalid-store)]
@@ -119,40 +122,47 @@
       (fail! :trust/invalid-store "Trust store is malformed" {:path (trust-path manager)}))
     value))
 
-(defn- ancestor-paths [cwd]
-  (loop [path (.normalize (.toAbsolutePath (u/path cwd))) result []]
-    (if-let [parent (.getParent path)]
-      (recur parent (conj result (str path)))
-      (conj result (str path)))))
+(defn- ancestor-paths [root cwd]
+  (let [root (u/path root)]
+    (loop [path (u/path cwd) result []]
+      (cond
+        (= path root) (conj result (str path))
+        (and (.getParent path) (.startsWith path root))
+        (recur (.getParent path) (conj result (str path)))
+        :else [(str root)]))))
 
-(defn- persisted-trust [manager cwd]
-  (let [projects (:projects (read-trust-store manager))]
-    (some (fn [path]
-            (when (contains? projects path)
-              (let [entry (get projects path)]
-                {:trusted? (boolean (if (map? entry) (:trusted? entry) entry))
-                 :matched path
-                 :inherited? (not= path (normalized-path cwd))})))
-          (ancestor-paths cwd))))
+(defn- persisted-trust [manager]
+  (let [root (get-in manager [:project :root])
+        projects (:projects (read-trust-store manager))
+        entry (get projects root)]
+    (when (contains? projects root)
+      {:trusted? (boolean (if (map? entry) (:trusted? entry) entry))
+       :configured? true
+       :root root
+       :updated-at (when (map? entry) (:updated-at entry))})))
 
 (defn- trusted-project? [manager]
   (if (some? @(:trust-override manager))
     (boolean @(:trust-override manager))
-    (boolean (:trusted? (persisted-trust manager (:cwd manager))))))
+    (boolean (:trusted? (persisted-trust manager)))))
 
 (defn trust!
   "Persists a trust decision for the next session reload; it never activates project code immediately."
   [manager cwd trusted?]
-  (locking (:lock manager)
-    (let [path (if (directory? cwd) (canonical-existing cwd) (normalized-path cwd))
-          store (read-trust-store manager)
-          updated (assoc-in store [:projects path]
-                            {:trusted? (boolean trusted?) :updated-at (u/now)})]
-      (u/write-edn! (trust-path manager) updated)
-      {:cwd path
-       :trusted? (boolean trusted?)
-       :inherited? false
-       :application :session-reload})))
+  (with-settings-lock
+    (trust-path manager)
+    (fn []
+      (let [path (u/project-root cwd)
+            store (read-trust-store manager)
+            updated (assoc-in store [:projects path]
+                              {:trusted? (boolean trusted?) :updated-at (u/now)})]
+        (u/write-edn! (trust-path manager) updated)
+        {:cwd path
+         :root path
+         :trusted? (boolean trusted?)
+         :configured? true
+         :inherited? false
+         :application :session-reload}))))
 
 (defn- context-file [dir]
   (some (fn [name]
@@ -162,8 +172,11 @@
                :content (read-text! path :resource/context-read-failed)})))
         context-names))
 
-(defn- project-context-files [cwd]
-  (->> (ancestor-paths cwd)
+(defn- context-present? [dir]
+  (some #(file? (.resolve (u/path dir) %)) context-names))
+
+(defn- project-context-files [root cwd]
+  (->> (ancestor-paths root cwd)
        reverse
        (keep context-file)
        vec))
@@ -421,9 +434,11 @@
                    (read-map-file (project-settings-path manager) {} :settings/invalid) [:project])
                   {})
         initial (assert-no-secrets! (:initial-settings manager) [:explicit])
-        global-keybindings (read-map-file (u/resolve-path (:home manager) "keybindings.edn") {} :keybindings/invalid)
+        global-keybindings (read-map-file (global-config-path manager "keybindings.edn")
+                                          {} :keybindings/invalid)
         project-keybindings (if trusted?
-                              (read-map-file (u/resolve-path (:cwd manager) ".arrodes/keybindings.edn") {} :keybindings/invalid)
+                              (read-map-file (u/resolve-path (:project-dir manager) "keybindings.edn")
+                                             {} :keybindings/invalid)
                               {})
         effective (-> (patch-map global project)
                       (patch-map initial)
@@ -440,7 +455,7 @@
         global-configured (configured-resources global (:home manager) :settings :global)
         initial-configured (configured-resources initial (:cwd manager) :explicit :global)
         project-configured (if trusted?
-                             (configured-resources project (:cwd manager) :settings :project)
+                             (configured-resources project (:project-dir manager) :settings :project)
                              (zipmap resource-kinds (repeat [])))
         catalog (reduce (fn [result kind]
                           (let [package-resources-by-scope
@@ -456,13 +471,16 @@
                                      (when trusted?
                                        (package-resources-by-scope :project))
                                      (when trusted?
-                                       (discover-default kind (u/resolve-path (:cwd manager) ".arrodes")
+                                       (discover-default kind (:project-dir manager)
                                                          :local :project))
                                      (get project-configured kind)
                                      (get initial-configured kind))))))
                         {} resource-kinds)
         global-context (context-file (:home manager))
-        project-context (if trusted? (project-context-files (:cwd manager)) [])
+        project-context (if trusted?
+                          (project-context-files (get-in manager [:project :root])
+                                                 (:cwd manager))
+                          [])
         system (context-setting (:system-prompt effective) (:cwd manager) "System prompt")
         instructions (context-setting (:instructions effective) (:cwd manager) "Instructions")
         append-value (:append-system-prompt effective)
@@ -482,15 +500,17 @@
      :closed? false}))
 
 (defn create!
-  "Creates a resource manager rooted only at the supplied cwd and home paths."
+  "Creates a resource manager for cwd using global and HOME-backed project state."
   [{:keys [cwd home settings trust] :or {settings {}}}]
   (when-not (and cwd home)
     (fail! :resource/invalid-options "Resource manager requires :cwd and :home" {:cwd cwd :home home}))
   (let [cwd (if (directory? cwd) (canonical-existing cwd) (normalized-path cwd))
         home (normalized-path home)
-        _ (u/ensure-dir! home)
+        project (:metadata (u/open-project! home cwd))
         manager {:cwd cwd
                  :home home
+                 :project project
+                 :project-dir (:directory project)
                  :initial-settings (or settings {})
                  :trust-override (atom trust)
                  :state (atom nil)
@@ -511,6 +531,29 @@
 
 (defn context [manager]
   (:context @(:state manager)))
+
+(defn- nonempty-directory? [directory]
+  (when (directory? directory)
+    (with-open [stream (Files/list (u/path directory))]
+      (.isPresent (.findAny stream)))))
+
+(defn project-trust
+  "Returns exact-root trust and whether project state or instructions require a decision."
+  [manager]
+  (let [persisted (persisted-trust manager)
+        root (get-in manager [:project :root])
+        project-dir (:project-dir manager)
+        context? (some context-present? (ancestor-paths root (:cwd manager)))
+        state? (or (some #(file? (u/resolve-path project-dir %))
+                         ["settings.edn" "keybindings.edn"])
+                   (some #(nonempty-directory? (u/resolve-path project-dir %))
+                         ["packages" "extensions" "skills" "prompts" "themes"]))]
+    {:root root
+     :directory project-dir
+     :trusted? (trusted-project? manager)
+     :configured? (boolean persisted)
+     :required? (boolean (or context? state?))
+     :updated-at (:updated-at persisted)}))
 
 (defn- public-resource [descriptor]
   (dissoc descriptor :content :data :enabled?))
@@ -546,6 +589,22 @@
                 #(if (contains? % key) % (assoc % key (Object.))))
          key)))
 
+(defn- with-settings-lock [path f]
+  (let [lock (settings-lock path)]
+    (if (Thread/holdsLock lock)
+      (f)
+      (locking lock
+        (let [owner (u/path (str path ".lock"))]
+          (u/ensure-dir! (str (.getParent owner)))
+          (when (Files/isSymbolicLink owner)
+            (fail! :settings/insecure-lock "Settings lock cannot be a symbolic link" {:path (str owner)}))
+          (with-open [channel (FileChannel/open
+                               owner (into-array OpenOption [StandardOpenOption/CREATE
+                                                             StandardOpenOption/WRITE
+                                                             LinkOption/NOFOLLOW_LINKS]))
+                      file-lock (.lock channel)]
+            (f)))))))
+
 (defn update-settings!
   "Atomically patches global or trusted project settings and reloads effective resources. nil removes a key."
   [manager changes {:keys [scope]}]
@@ -557,27 +616,28 @@
       (fail! :trust/required "Project must be trusted before project settings can be changed"
              {:cwd (:cwd manager)}))
     (let [path (if (= scope :global) (global-settings-path manager) (project-settings-path manager))]
-      (locking (settings-lock path)
-        (let [existed? (file? path)
-              existing (read-map-file path {} :settings/invalid)
-              updated (assert-no-secrets! (patch-map existing changes) [scope])]
-          (u/write-edn! path updated)
-          (try
-            (reload! manager)
-            {:settings (settings manager)
-             :application {:scope scope :changed (vec (sort (keys changes))) :reloaded? true}}
-            (catch Throwable error
-              (try
-                (when (= updated (read-map-file path {} :settings/invalid))
-                  (if existed?
-                    (u/write-edn! path existing)
-                    (Files/deleteIfExists (u/path path))))
-                (catch Throwable restore-error
-                  (throw (ex-info (ex-message error)
-                                  (assoc (ex-data error)
-                                         :settings-restore-error (ex-message restore-error))
-                                  error))))
-              (throw error))))))))
+      (with-settings-lock path
+        (fn []
+          (let [existed? (file? path)
+                existing (read-map-file path {} :settings/invalid)
+                updated (assert-no-secrets! (patch-map existing changes) [scope])]
+            (u/write-edn! path updated)
+            (try
+              (reload! manager)
+              {:settings (settings manager)
+               :application {:scope scope :changed (vec (sort (keys changes))) :reloaded? true}}
+              (catch Throwable error
+                (try
+                  (when (= updated (read-map-file path {} :settings/invalid))
+                    (if existed?
+                      (u/write-edn! path existing)
+                      (Files/deleteIfExists (u/path path))))
+                  (catch Throwable restore-error
+                    (throw (ex-info (ex-message error)
+                                    (assoc (ex-data error)
+                                           :settings-restore-error (ex-message restore-error))
+                                    error))))
+                (throw error)))))))))
 
 (defn- find-named! [manager kind name code]
   (or (some #(when (= name (:name %)) %) (get-in @(:state manager) [:catalog kind]))
@@ -703,7 +763,7 @@
   "Expands a leading /prompt or /skill:name invocation. Other input is returned unchanged."
   [manager text]
   (if-let [[_ command argument-text] (and (string? text)
-                                           (re-matches #"(?s)^/([^\s]+)(?:\s+(.*))?$" text))]
+                                          (re-matches #"(?s)^/([^\s]+)(?:\s+(.*))?$" text))]
     (if (str/starts-with? command "skill:")
       (let [name (subs command 6)
             skill (read-skill manager name)]
@@ -860,7 +920,7 @@
      :send-message!
      (fn
        ([content] (call-context! context :command!
-                                ["session.run" {:session-id (:session-id context) :prompt content}]))
+                                 ["session.run" {:session-id (:session-id context) :prompt content}]))
        ([content {:keys [mode] :or {mode :run}}]
         (let [method (case mode
                        :run "session.run"

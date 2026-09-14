@@ -2,9 +2,11 @@
   "Manager-local provider catalog, authentication, and real llm.sdk request routing."
   (:require [clojure.string :as str]
             [arrodes.auth :as auth]
+            [arrodes.platform :as u]
             [llm.sdk :as sdk]
             [llm.sdk.errors :as sdk-errors]
             [llm.sdk.http :as sdk-http]
+            [llm.sdk.models-dev :as models-dev]
             [llm.sdk.pricing :as pricing]
             [llm.sdk.sse :as sdk-sse]
             [llm.sdk.stream :as sdk-stream]
@@ -395,22 +397,23 @@
      :source (:model/source entry)}))
 
 (defn- profile-models [manager provider-id p]
-  (if (contains? @(:live-models manager) provider-id)
-    (get @(:live-models manager) provider-id)
-    (if-let [parent (:parent manager)]
-      (let [parent-profile (get @(:profiles parent) provider-id)]
-        (if (= p parent-profile)
-          (profile-models parent provider-id parent-profile)
-          (cond
-            (seq (:models p)) (:models p)
-            (:sdk-id p) (mapv #(sdk-model->descriptor provider-id p %)
-                              (sdk/list-models (:sdk-id p)))
-            :else [])))
-      (cond
-        (seq (:models p)) (:models p)
-        (:sdk-id p) (mapv #(sdk-model->descriptor provider-id p %)
-                          (sdk/list-models (:sdk-id p)))
-        :else []))))
+  (binding [models-dev/*cache-dir* (u/resolve-path (:home manager) "cache/models")]
+    (if (contains? @(:live-models manager) provider-id)
+      (get @(:live-models manager) provider-id)
+      (if-let [parent (:parent manager)]
+        (let [parent-profile (get @(:profiles parent) provider-id)]
+          (if (= p parent-profile)
+            (profile-models parent provider-id parent-profile)
+            (cond
+              (seq (:models p)) (:models p)
+              (:sdk-id p) (mapv #(sdk-model->descriptor provider-id p %)
+                                (sdk/list-models (:sdk-id p)))
+              :else [])))
+        (cond
+          (seq (:models p)) (:models p)
+          (:sdk-id p) (mapv #(sdk-model->descriptor provider-id p %)
+                            (sdk/list-models (:sdk-id p)))
+          :else [])))))
 
 (defn catalog
   "Return the manager-local model catalog without network access."
@@ -468,7 +471,7 @@
       {:provider provider-id :id id :name (or (:display_name item) id)
        :context-window (or (:context_window item) (:max_context_window item))
        :thinking-levels (if (> (count levels) 1) levels
-                          (reasoning-levels provider-id id (:capabilities p) nil))
+                            (reasoning-levels provider-id id (:capabilities p) nil))
        :input (let [xs (set (:input_modalities item))]
                 (cond-> [:text] (contains? xs "image") (conj :image)))
        :cost :unknown :source :live
@@ -525,9 +528,9 @@
                  (keep (fn [item]
                          (model-from-openai provider-id p
                                             (assoc item :id (some-> (:name item)
-                                                                   (str/replace #"^models/" ""))
-                                                        :name (:displayName item)
-                                                        :context_length (:inputTokenLimit item)))))
+                                                                    (str/replace #"^models/" ""))
+                                                   :name (:displayName item)
+                                                   :context_length (:inputTokenLimit item)))))
                  vec))
 
           (or (= (:kind p) :openai-compatible)
@@ -799,30 +802,31 @@
 (defn complete!
   "Complete one logical provider attempt. Selected provider is opts :provider."
   [manager canonical-request {:keys [provider] :as options}]
-  (open-manager! manager)
-  (when-not provider
-    (fail! :provider/selection "Provider selection is required in opts :provider" {}))
-  (let [provider-id (keyword provider)
-        p (profile manager provider-id)]
-    (validate-request! provider-id canonical-request)
-    (when (auth/cancelled? options) (throw (cancelled-ex)))
-    (try
-      (if-let [complete-fn (:complete-fn manager)]
-        (complete-fn canonical-request options)
-        (case (:kind p)
-          :copilot (copilot-complete! manager provider-id p canonical-request options)
-          :azure-openai (azure-complete! manager provider-id p canonical-request options)
-          :profile-alias (sdk-complete! manager provider-id p canonical-request options)
-          :openai-compatible (custom-openai-complete!
-                              manager provider-id p canonical-request options)
-          (sdk-complete! manager provider-id p canonical-request options)))
-      (catch clojure.lang.ExceptionInfo e
-        (case (:error/type (ex-data e))
-          :provider/cancelled (throw e)
-          :auth/cancelled (throw (cancelled-ex))
-          (throw (classified-ex provider-id e))))
-      (catch Exception e
-        (throw (classified-ex provider-id e))))))
+  (binding [models-dev/*cache-dir* (u/resolve-path (:home manager) "cache/models")]
+    (open-manager! manager)
+    (when-not provider
+      (fail! :provider/selection "Provider selection is required in opts :provider" {}))
+    (let [provider-id (keyword provider)
+          p (profile manager provider-id)]
+      (validate-request! provider-id canonical-request)
+      (when (auth/cancelled? options) (throw (cancelled-ex)))
+      (try
+        (if-let [complete-fn (:complete-fn manager)]
+          (complete-fn canonical-request options)
+          (case (:kind p)
+            :copilot (copilot-complete! manager provider-id p canonical-request options)
+            :azure-openai (azure-complete! manager provider-id p canonical-request options)
+            :profile-alias (sdk-complete! manager provider-id p canonical-request options)
+            :openai-compatible (custom-openai-complete!
+                                manager provider-id p canonical-request options)
+            (sdk-complete! manager provider-id p canonical-request options)))
+        (catch clojure.lang.ExceptionInfo e
+          (case (:error/type (ex-data e))
+            :provider/cancelled (throw e)
+            :auth/cancelled (throw (cancelled-ex))
+            (throw (classified-ex provider-id e))))
+        (catch Exception e
+          (throw (classified-ex provider-id e)))))))
 
 (defn close!
   "Close a provider manager or session view. Idempotent.

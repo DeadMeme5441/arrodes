@@ -258,7 +258,8 @@
   (let [temporary (.mkdtempSync fs (.join path (.tmpdir os) "arrodes-client-test-"))
         script (.join path temporary "host.clj")
         root (or (aget (.-env js/process) "ARRODES_TUI_ROOT") (.cwd js/process))
-        options {:runtime-root root :cwd temporary :home (.join path temporary "home") :trust false
+        options {:runtime-root root :cwd temporary :home (.join path temporary "home")
+                 :trust false :setup? false
                  :rpc-command ["clojure" "-Srepro" "-Sdeps"
                                "{:paths [\"src/clj\" \"src/cljc\" \"hosts/rpc\" \"resources\"]}"
                                "-M" script]}

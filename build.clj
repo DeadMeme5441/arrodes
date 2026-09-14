@@ -5,7 +5,6 @@
 (def version "0.1.0")
 (def core-source-dirs ["src/clj" "src/cljc"])
 (def host-source-dirs (conj core-source-dirs "hosts/rpc"))
-(def cli-source-dirs (conj host-source-dirs "hosts/cli"))
 
 (def pom-data
   [[:description "Durable Clojure agent sessions with a persistent evaluator"]
@@ -45,7 +44,7 @@
     {:artifact artifact :version version}))
 
 (defn uber
-  "Build the default headless core artifact. It contains neither host nor CLI code."
+  "Build the headless SDK artifact."
   [_]
   (package! {:artifact "target/arrodes.jar"
              :class-dir "target/classes-core"
@@ -53,7 +52,7 @@
              :ns-compile '[arrodes.runtime]}))
 
 (defn rpc
-  "Build the optional standalone JSONL RPC host without JLine."
+  "Build the standalone JSONL RPC host."
   [_]
   (package! {:aliases [:host]
              :artifact "target/arrodes-rpc.jar"
@@ -62,12 +61,3 @@
              :ns-compile '[arrodes.rpc-main]
              :main 'arrodes.rpc-main}))
 
-(defn cli
-  "Build the optional legacy terminal host and its JLine dependency."
-  [_]
-  (package! {:aliases [:run]
-             :artifact "target/arrodes-cli.jar"
-             :class-dir "target/classes-cli"
-             :source-dirs cli-source-dirs
-             :ns-compile '[arrodes.cli]
-             :main 'arrodes.cli}))

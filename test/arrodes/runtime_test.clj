@@ -170,3 +170,66 @@
     (is (= ["latest-user" "latest-assistant"]
            (mapv :id (:kept-entries plan))))
     (is (= "latest-user" (:first-kept-entry-id plan)))))
+
+(deftest default-runtime-storage-is-project-scoped-while-session-cwd-is-preserved
+  (let [directory (fixtures/temp-directory)
+        home (str directory "/home")
+        repository-a (str directory "/a/repo")
+        cwd-a (str repository-a "/src/deep")
+        repository-b (str directory "/b/repo")]
+    (try
+      (u/ensure-dir! (str repository-a "/.git"))
+      (u/ensure-dir! cwd-a)
+      (u/ensure-dir! (str repository-b "/.git"))
+      (let [rt-a (runtime/open! {:cwd cwd-a :home home
+                                 :complete-fn (fn [_ _] (answer "A"))})]
+        (try
+          (let [rt-b (runtime/open! {:cwd repository-b :home home
+                                     :complete-fn (fn [_ _] (answer "B"))})]
+            (try
+              (is (= (str (u/project-dir home cwd-a) "/data") (:data-dir rt-a)))
+              (is (= (str (u/project-dir home repository-b) "/data") (:data-dir rt-b)))
+              (is (not= (:data-dir rt-a) (:data-dir rt-b)))
+              (is (= (u/real-path cwd-a)
+                     (:cwd (runtime/create-session! rt-a {:config fixtures/config}))))
+              (is (= (u/real-path repository-b)
+                     (:cwd (runtime/create-session! rt-b {:config fixtures/config}))))
+              (finally (runtime/close! rt-b))))
+          (finally (runtime/close! rt-a))))
+      (finally (fixtures/remove-directory! directory)))))
+
+(deftest explicit-runtime-data-directory-retains-precedence
+  (let [directory (fixtures/temp-directory)
+        explicit (str directory "/custom-data")
+        rt (runtime/open! {:cwd directory :home (str directory "/home")
+                           :data-dir explicit
+                           :complete-fn (fn [_ _] (answer "Done"))})]
+    (try
+      (is (= (u/canonical-path explicit) (:data-dir rt)))
+      (finally
+        (runtime/close! rt)
+        (fixtures/remove-directory! directory)))))
+
+(deftest legacy-global-history-requires-an-explicit-data-directory
+  (let [directory (fixtures/temp-directory)
+        home (str directory "/home")
+        legacy-data (str home "/data")
+        options {:cwd directory :home home :data-dir legacy-data
+                 :complete-fn (fn [_ _] (answer "Done"))}
+        first-runtime (runtime/open! options)]
+    (try
+      (runtime/create-session! first-runtime {:config fixtures/config})
+      (runtime/close! first-runtime)
+      (let [error (try
+                    (runtime/open! (dissoc options :data-dir))
+                    nil
+                    (catch clojure.lang.ExceptionInfo error error))]
+        (is (= "legacy-data" (:error/code (ex-data error))))
+        (is (= legacy-data (:path (ex-data error)))))
+      (let [reopened (runtime/open! options)]
+        (try
+          (is (= 1 (count (runtime/list-sessions reopened {}))))
+          (finally (runtime/close! reopened))))
+      (finally
+        (runtime/close! first-runtime)
+        (fixtures/remove-directory! directory)))))

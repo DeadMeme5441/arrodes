@@ -148,14 +148,15 @@
 
 (deftest registered-renderer-and-widget-use-the-runtime-ui-boundary
   (let [directory (fixtures/temp-directory)
-        extension (io/file directory ".arrodes" "extensions" "native_ui.clj")
+        home (str directory "/home")
+        extension (io/file (u/project-dir home directory) "extensions" "native_ui.clj")
         requests (atom [])
         runtime* (atom nil)]
     (try
       (io/make-parents extension)
       (spit extension
             "(fn [api]\n  ((:register-renderer! api) {:name \"fixture-renderer\" :fn (fn [event] (str \"rendered:\" (:content event)))})\n  ((:register-ui! api) {:name \"fixture-widget\" :kind :widget :content \"Ready\"})\n  nil)\n")
-      (let [rt (runtime/open! {:cwd directory :home (str directory "/home")
+      (let [rt (runtime/open! {:cwd directory :home home
                                :data-dir (str directory "/data") :trust true
                                :complete-fn (fn [_ _] (answer "unused"))
                                :ui! (fn [request]

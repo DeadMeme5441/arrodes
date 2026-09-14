@@ -8,7 +8,7 @@
             :typescript-extension-compatibility false}
  :domains {:durable-session [:identity :tree :branches :configuration :messages :operations :queues :events :results]
            :live-session [:provider-loop :repl-evaluation :capabilities :cancellation :resources :mcp-client]
-           :interfaces [:sdk :optional-stdio-rpc :optional-cli]}
+           :interfaces [:terminal :rpc :sdk]}
  :required
  [{:id :session-lifecycle :features [:create :open :list :resume :rename :labels :delete :ephemeral]}
   {:id :history :features [:append-only-tree :active-branch :prompt-edit :fork :clone :import :export :branch-summary]}
@@ -24,7 +24,7 @@
   {:id :mcp-client :features [:stdio :streamable-http :discovery :calls :resources :prompts :session-ownership]}
   {:id :packages :features [:install :list :configure :update :remove :pinned-references]}
   {:id :terminal :features [:multiline :completion :file-references :clipboard :external-editor :selectors :tree :themes :keybindings :extension-rendering]}
-  {:id :programmatic :features [:embedding :print :json :rpc :host-requests :export :share]}]
+  {:id :programmatic :features [:embedding :rpc :host-requests :export :share]}]
  :excluded [:generalized-workspace :subagents :advisors :mcp-server :planning-mode :todo-manager
             :background-job-manager :distributed-runtime :replication :os-sandbox
             :jvm-checkpointing :legacy-arrodes-migration]

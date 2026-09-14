@@ -31,7 +31,7 @@
 (defn- with-environment [extension-source body]
   (let [directory (fixtures/temp-directory)
         home (str directory "/home")
-        extension-dir (str directory "/.arrodes/extensions")
+        extension-dir (str (u/project-dir home directory) "/extensions")
         extension-path (str extension-dir "/replacement.clj")
         sample-path (str directory "/sample.txt")
         database (store/open! {:memory? true})

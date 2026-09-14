@@ -1,6 +1,7 @@
 (ns arrodes.runtime-lifecycle-test
   (:require [arrodes.runtime :as runtime]
             [arrodes.mcp :as mcp]
+            [arrodes.platform :as u]
             [arrodes.session-test :as fixtures]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -70,13 +71,14 @@
 
 (deftest reload-excludes-a-concurrent-start-through-handle-replacement
   (let [directory (fixtures/temp-directory)
-        extension (io/file directory ".arrodes" "extensions" "blocking_close.clj")
+        home (str directory "/home")
+        extension (io/file (u/project-dir home directory) "extensions" "blocking_close.clj")
         entered (promise)
         release (promise)]
     (io/make-parents extension)
     (spit extension
           "(fn [{:keys [on-close!]}]\n  (on-close! arrodes.runtime-lifecycle-test/block-close!))\n")
-    (let [rt (runtime/open! {:cwd directory :home (str directory "/home")
+    (let [rt (runtime/open! {:cwd directory :home home
                              :data-dir (str directory "/data") :trust true
                              :complete-fn (fn [_ _] (answer "Started after reload"))})
           sid (:id (runtime/create-session! rt {:config fixtures/config}))]

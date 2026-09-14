@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 import tempfile
 import sys
@@ -9,7 +10,8 @@ async def main():
     with tempfile.TemporaryDirectory(prefix="arrodes-rpc-") as temporary:
         root = Path(temporary)
         project = root / "project"
-        extensions = project / ".arrodes" / "extensions"
+        project.mkdir()
+        extensions = root / "home" / "extensions"
         extensions.mkdir(parents=True)
         (extensions / "probe.clj").write_text('''(println "LOAD_DIAGNOSTIC")
 (fn [api]
@@ -38,7 +40,8 @@ async def main():
         process = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE)
+            stderr=asyncio.subprocess.PIPE,
+            env=dict(os.environ, ARRODES_HOME=str(root / "home")))
         diagnostics = []
         events = []
         slow_started = asyncio.Event()

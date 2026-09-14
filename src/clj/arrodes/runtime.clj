@@ -14,7 +14,7 @@
 
 (defn- ensure-open! [runtime]
   (value/check! (= :open @(:lifecycle runtime)) :runtime-closed
-               "Runtime is not open" {:status @(:lifecycle runtime)}))
+                "Runtime is not open" {:status @(:lifecycle runtime)}))
 
 (defn- session-lock [runtime sid]
   (or (get @(:session-locks runtime) sid)
@@ -51,7 +51,7 @@
   "Installs or removes the single host-interaction callback."
   [runtime callback]
   (value/check! (or (nil? callback) (fn? callback)) :invalid-ui-callback
-               "UI callback must be a function or nil" {})
+                "UI callback must be a function or nil" {})
   (reset! (:ui runtime) callback)
   runtime)
 
@@ -59,13 +59,13 @@
   "Invokes the current host callback or fails rather than inventing an answer."
   [runtime request]
   (value/check! (map? request) :invalid-ui-request
-               "UI request must be a map" {})
+                "UI request must be a map" {})
   (value/check! (contains? ui-kinds (:kind request)) :unsupported-ui-request
-               "Unsupported UI request kind" {:kind (:kind request)})
+                "Unsupported UI request kind" {:kind (:kind request)})
   (if-let [callback @(:ui runtime)]
     (callback request)
     (value/fail! :host-unavailable "No host is available for this interaction"
-                {:kind (:kind request)})))
+                 {:kind (:kind request)})))
 
 (defn subscribe!
   "Subscribes to durable and transient runtime events and returns an idempotent unsubscribe function."
@@ -195,7 +195,7 @@
 (defn- ensure-idle! [runtime sid]
   (when-let [slot (foreground runtime sid)]
     (value/fail! :session-busy "Session already has a foreground operation"
-                {:session-id sid :operation-id (:operation-id slot)})))
+                 {:session-id sid :operation-id (:operation-id slot)})))
 
 (defn- acquire-foreground! [runtime sid kind oid]
   (locking (session-lock runtime sid)
@@ -306,7 +306,7 @@
       config
       (if (true? (get-in config [:settings :fallback-model?]))
         (if-let [fallback (first (filter #(= (:provider config) (:provider %))
-                                        (provider/catalog manager)))]
+                                         (provider/catalog manager)))]
           (assoc config :model (:id fallback))
           config)
         config))))
@@ -356,7 +356,7 @@
                       :session (store/session (:store runtime) sid)}
         transformed (capabilities/apply-hooks registry :transform-context hook-context messages)]
     (value/check! (vector? transformed) :invalid-hook-result
-                 "transform-context hooks must return a message vector" {})
+                  "transform-context hooks must return a message vector" {})
     transformed))
 
 (defn- session-cache [request sid]
@@ -373,7 +373,7 @@
                     (session-cache sid)
                     repl-wire/request)]
     (value/check! (map? request) :invalid-hook-result
-                 "transform-request hooks must return a request map" {})
+                  "transform-request hooks must return a request map" {})
     request))
 
 (defn- complete-request! [runtime sid slot config request callback]
@@ -403,7 +403,7 @@
                   registry source
                   {:id id :cancelled? (:cancelled slot) :on-event callback
                    :on-progress #(transient-event! runtime sid (:operation-id slot)
-                                                    :tool-progress % callback)
+                                                   :tool-progress % callback)
                    :context {:runtime runtime :session-id sid
                              :operation-id (:operation-id slot)
                              :tool-selection (:tools config)}})]
@@ -433,7 +433,7 @@
     (when-not plan
       (when-not automatic?
         (value/fail! :nothing-to-compact
-                    "The session does not contain a safe compaction boundary" {:session-id sid})))
+                     "The session does not contain a safe compaction boundary" {:session-id sid})))
     (when plan
       (set-phase! slot :compacting)
       (let [hook-context {:runtime runtime :session-id sid
@@ -445,13 +445,13 @@
                          (run/summary-request config (:summary-entries plan) instructions))
                         (session-cache sid))
             _ (value/check! (map? request) :invalid-hook-result
-                           "transform-request hooks must return a request map" {})
+                            "transform-request hooks must return a request map" {})
             response (provider-complete! runtime sid slot config request callback)
             summary (run/response-text response)]
         (value/check! (not (str/blank? summary)) :empty-compaction
-                     "Provider returned an empty compaction summary" {})
+                      "Provider returned an empty compaction summary" {})
         (value/check! (not= :length (:response/finish-reason response)) :compaction-truncated
-                     "Compaction summary was truncated by the provider" {})
+                      "Compaction summary was truncated by the provider" {})
         (locking (session-lock runtime sid)
           (util/check-cancelled! (:cancelled slot))
           (commit! runtime sid
@@ -492,7 +492,7 @@
         prepared (capabilities/apply-hooks registry :before-run context
                                            {:prompt input :config config})]
     (value/check! (map? prepared) :invalid-hook-result
-                 "before-run hooks must return {:prompt ... :config ...}" {})
+                  "before-run hooks must return {:prompt ... :config ...}" {})
     (let [config (provider-config runtime sid
                                   (run/effective-config
                                    (store/session (:store runtime) sid)
@@ -534,8 +534,8 @@
     (loop [step 0
            config config]
       (value/check! (< step max-steps) :step-budget-exhausted
-                   "Agent exceeded its configured continuation step budget"
-                   {:max-steps max-steps})
+                    "Agent exceeded its configured continuation step budget"
+                    {:max-steps max-steps})
       (util/check-cancelled! (:cancelled slot))
       (let [path (store/active-path (:store runtime) sid)
             initial-request (prepare-completion-request runtime sid slot registry manager config)
@@ -553,8 +553,8 @@
         (commit-assistant! runtime sid slot assistant response)
         (when (= :length (:response/finish-reason response))
           (value/fail! :output-truncated
-                      "Provider stopped because its output limit was reached"
-                      {:message assistant}))
+                       "Provider stopped because its output limit was reached"
+                       {:message assistant}))
         (if (seq calls)
           (do
             (evaluate-calls! runtime sid slot registry calls config callback)
@@ -574,7 +574,7 @@
                                        estimated-input-tokens))
                 (let [final (capabilities/apply-hooks registry :after-run hook-context assistant)]
                   (value/check! (map? final) :invalid-hook-result
-                               "after-run hooks must return an assistant message" {})
+                                "after-run hooks must return an assistant message" {})
                   final)))))))))
 
 (defn- compact-operation! [runtime sid slot opts]
@@ -640,9 +640,27 @@
   "Opens the durable runtime, repairs interrupted work, and creates its owned executor."
   [{:keys [cwd home data-dir memory? settings trust complete-fn ui! command!]
     :or {cwd "." settings {}}}]
-  (let [cwd (util/canonical-path cwd)
+  (let [cwd (util/real-path cwd)
         home (util/home-dir {:home home})
-        data-dir (util/canonical-path (or data-dir (str home "/data")))
+        migration (util/migrate-legacy-home! home cwd)
+        _ (when (= :blocked (:status migration))
+            (value/fail! :migration/blocked
+                         "Legacy Arrodes config requires manual conflict resolution"
+                         {:conflicts (:conflicts migration)}))
+        project-info (util/project-info home cwd)
+        legacy-data (some #(when (= :data (:kind %)) %) (:entries migration))
+        _ (when (and legacy-data (nil? data-dir) (not memory?))
+            (value/fail!
+             :migration/legacy-data
+             (str "Legacy session history remains at " (:source legacy-data)
+                  ". Restart with --data-dir " (:source legacy-data)
+                  " to access it; Arrodes did not move or hide that history.")
+             {:path (:source legacy-data)
+              :data-dir-option (:source legacy-data)
+              :project-data-dir (util/resolve-path (:directory project-info) "data")}))
+        project (util/open-project! home cwd)
+        data-dir (util/canonical-path
+                  (or data-dir (util/resolve-path (:directory project) "data")))
         opened (atom [])]
     (try
       (util/ensure-dir! home)
@@ -661,7 +679,9 @@
             threads (long (max 1 (min 16 (or (:operation-threads settings)
                                              (.availableProcessors (Runtime/getRuntime))))))
             runtime {:store store :provider provider :resources root-resources
-                     :cwd cwd :home home :trust trust :initial-settings settings
+                     :cwd cwd :home home :data-dir data-dir :project project
+                     :home-migration migration
+                     :trust trust :initial-settings settings
                      :settings (atom (resources/settings root-resources))
                      :handles (atom {}) :operations (atom {}) :listeners (atom {})
                      :foreground (atom {}) :session-locks (atom {}) :handle-lock (Object.)
@@ -703,7 +723,7 @@
 
 (defn create-session! [runtime opts]
   (ensure-open! runtime)
-  (let [cwd (util/canonical-path (or (:cwd opts) (:cwd runtime)))
+  (let [cwd (util/real-path (or (:cwd opts) (:cwd runtime)))
         defaults (cwd-session-defaults runtime cwd)
         config (value/deep-merge run/default-config defaults (:config opts))]
     (store/create-session! (:store runtime)
@@ -786,14 +806,14 @@
 (defn label! [runtime sid entry-id label opts]
   (ensure-open! runtime)
   (value/check! (and (string? label) (not (str/blank? label))) :invalid-label
-               "Label must be a non-empty string" {})
+                "Label must be a non-empty string" {})
   (locking (session-lock runtime sid)
     (let [snapshot (store/session (:store runtime) sid)
           exists? (some #(= entry-id (:id %)) (store/entries (:store runtime) sid))
           labels (conj (vec (remove #(= entry-id (:entry-id %)) (:labels snapshot)))
                        {:entry-id entry-id :label label})]
       (value/check! exists? :entry-not-found "Label target does not exist in this session"
-                   {:session-id sid :entry-id entry-id})
+                    {:session-id sid :entry-id entry-id})
       (commit! runtime sid
                {:expected-revision (:expected-revision opts)
                 :entries [{:kind :label :data {:entry-id entry-id :label label}}]
@@ -822,14 +842,14 @@
                         (run/summary-request config abandoned (:instructions opts)))
                        (session-cache sid))
            _ (value/check! (map? request) :invalid-hook-result
-                          "transform-request hooks must return a request map" {})
+                           "transform-request hooks must return a request map" {})
            response (provider-complete! runtime sid slot config request (:on-event opts))
            summary (run/response-text response)]
        (value/check! (not (str/blank? summary)) :empty-branch-summary
-                    "Provider returned an empty branch summary" {})
+                     "Provider returned an empty branch summary" {})
        (value/check! (not= :length (:response/finish-reason response))
-                    :branch-summary-truncated
-                    "Branch summary was truncated by the provider" {})
+                     :branch-summary-truncated
+                     "Branch summary was truncated by the provider" {})
        (locking (session-lock runtime sid)
          (util/check-cancelled! (:cancelled slot))
          (reset! (:cancellable? slot) false)
@@ -856,9 +876,9 @@
           (let [snapshot (store/session (:store runtime) sid)
                 _ (when (contains? opts :expected-revision)
                     (value/check! (= (:expected-revision opts) (:revision snapshot))
-                                 :stale-revision "Session revision has changed"
-                                 {:session-id sid :expected (:expected-revision opts)
-                                  :actual (:revision snapshot)}))
+                                  :stale-revision "Session revision has changed"
+                                  {:session-id sid :expected (:expected-revision opts)
+                                   :actual (:revision snapshot)}))
                 source {:snapshot snapshot
                         :current-path (store/active-path (:store runtime) sid)
                         :target-path (if leaf
@@ -962,15 +982,15 @@
     (locking (session-lock runtime sid)
       (let [slot (foreground runtime sid)]
         (value/check! (= oid (:operation-id slot)) :operation-not-active
-                     "Operation is not the session's current foreground operation"
-                     {:operation-id oid :session-id sid
-                      :current-operation-id (:operation-id slot)})
+                      "Operation is not the session's current foreground operation"
+                      {:operation-id oid :session-id sid
+                       :current-operation-id (:operation-id slot)})
         (value/check! (contains? #{:run :continue} (:kind slot)) :operation-not-steerable
-                     "Only running agent operations accept queued input"
-                     {:operation-id oid :kind (:kind slot)})
+                      "Only running agent operations accept queued input"
+                      {:operation-id oid :kind (:kind slot)})
         (value/check! @(:accepting-input? slot) :operation-not-active
-                     "Operation has crossed its final input boundary"
-                     {:operation-id oid :session-id sid})
+                      "Operation has crossed its final input boundary"
+                      {:operation-id oid :session-id sid})
         (let [item {:id (util/id) :session-id sid :operation-id oid :kind kind
                     :content (run/prompt-content content) :options (or opts {})
                     :created-at (util/now)}]
@@ -1041,9 +1061,9 @@
           op
           (let [slot (foreground runtime sid)]
             (value/check! (= oid (:operation-id slot)) :operation-not-active
-                         "Operation is not the session's current foreground operation"
-                         {:operation-id oid :session-id sid
-                          :current-operation-id (:operation-id slot)})
+                          "Operation is not the session's current foreground operation"
+                          {:operation-id oid :session-id sid
+                           :current-operation-id (:operation-id slot)})
             (if-not @(:cancellable? slot)
               op
               (do
@@ -1154,79 +1174,79 @@
                       (vec (vals @(:operations runtime))))
               current (Thread/currentThread)
               cancellation-errors (atom [])]
-            (doseq [slot slots]
-              (try
-                (cancel-operation! runtime (:operation-id slot))
-                (catch Throwable error
-                  (swap! cancellation-errors conj (value/error-map error))
-                  (reset! (:cancelled slot) true)
-                  (when-let [thread @(:thread slot)]
-                    (when-not (identical? thread current)
-                      (.interrupt ^Thread thread))))))
+          (doseq [slot slots]
+            (try
+              (cancel-operation! runtime (:operation-id slot))
+              (catch Throwable error
+                (swap! cancellation-errors conj (value/error-map error))
+                (reset! (:cancelled slot) true)
+                (when-let [thread @(:thread slot)]
+                  (when-not (identical? thread current)
+                    (.interrupt ^Thread thread))))))
             ;; Graceful shutdown prevents an operation that invoked close! from
             ;; interrupting its own caller thread. Explicit cancellation above
             ;; still interrupts every other running driver.
-            (.shutdown ^ExecutorService (:executor runtime))
-            (let [timeout-ms (long (max 0 (or (:close-timeout-ms (:initial-settings runtime))
-                                              10000)))
-                  deadline (+ (System/nanoTime) (* timeout-ms 1000000))
-                  self-slots (filterv #(identical? current @(:thread %)) slots)
-                  _ (doseq [slot slots
-                            :when (not (some #(identical? slot %) self-slots))]
-                      (await-operation! slot deadline))
-                  incomplete (filterv #(not (realized? (:finished %))) slots)
-                  foreground-complete? (empty? incomplete)
-                  executor-terminated?
-                  (if foreground-complete?
-                    (try
-                      (.awaitTermination ^ExecutorService (:executor runtime)
-                                         (remaining-close-millis deadline)
-                                         TimeUnit/MILLISECONDS)
-                      (catch InterruptedException _
-                        (.interrupt current)
-                        false))
-                    (.isTerminated ^ExecutorService (:executor runtime)))]
-              (if-not (and foreground-complete? executor-terminated?)
-                {:status :closing :already-closed? false
-                 :foreground-complete? foreground-complete?
-                 :active-operation-ids (mapv :operation-id incomplete)
-                 :executor-terminated? executor-terminated?
-                 :store-closed? false :handles-closed? false
-                 :errors
-                 (into @cancellation-errors
-                       (cond-> []
-                         (not foreground-complete?)
-                         (conj {:code "foreground-timeout"
-                                :message "Foreground execution did not finish before the close deadline"})
-                         (not executor-terminated?)
-                         (conj {:code "executor-timeout"
-                                :message "Operation executor did not terminate before the close deadline"})))}
-                (let [errors (atom @cancellation-errors)
-                      handles (mapv (fn [sid]
-                                      (try (close-handle! runtime sid)
-                                           (catch Throwable error
-                                             (swap! errors conj (value/error-map error)) nil)))
-                                    (keys @(:handles runtime)))
-                      root (try (resources/close! (:resources runtime))
-                                (catch Throwable error
-                                  (swap! errors conj (value/error-map error)) nil))]
-                  (if (or (seq @(:handles runtime)) (not= :closed (:status root)))
-                    {:status :closing :already-closed? false
+          (.shutdown ^ExecutorService (:executor runtime))
+          (let [timeout-ms (long (max 0 (or (:close-timeout-ms (:initial-settings runtime))
+                                            10000)))
+                deadline (+ (System/nanoTime) (* timeout-ms 1000000))
+                self-slots (filterv #(identical? current @(:thread %)) slots)
+                _ (doseq [slot slots
+                          :when (not (some #(identical? slot %) self-slots))]
+                    (await-operation! slot deadline))
+                incomplete (filterv #(not (realized? (:finished %))) slots)
+                foreground-complete? (empty? incomplete)
+                executor-terminated?
+                (if foreground-complete?
+                  (try
+                    (.awaitTermination ^ExecutorService (:executor runtime)
+                                       (remaining-close-millis deadline)
+                                       TimeUnit/MILLISECONDS)
+                    (catch InterruptedException _
+                      (.interrupt current)
+                      false))
+                  (.isTerminated ^ExecutorService (:executor runtime)))]
+            (if-not (and foreground-complete? executor-terminated?)
+              {:status :closing :already-closed? false
+               :foreground-complete? foreground-complete?
+               :active-operation-ids (mapv :operation-id incomplete)
+               :executor-terminated? executor-terminated?
+               :store-closed? false :handles-closed? false
+               :errors
+               (into @cancellation-errors
+                     (cond-> []
+                       (not foreground-complete?)
+                       (conj {:code "foreground-timeout"
+                              :message "Foreground execution did not finish before the close deadline"})
+                       (not executor-terminated?)
+                       (conj {:code "executor-timeout"
+                              :message "Operation executor did not terminate before the close deadline"})))}
+              (let [errors (atom @cancellation-errors)
+                    handles (mapv (fn [sid]
+                                    (try (close-handle! runtime sid)
+                                         (catch Throwable error
+                                           (swap! errors conj (value/error-map error)) nil)))
+                                  (keys @(:handles runtime)))
+                    root (try (resources/close! (:resources runtime))
+                              (catch Throwable error
+                                (swap! errors conj (value/error-map error)) nil))]
+                (if (or (seq @(:handles runtime)) (not= :closed (:status root)))
+                  {:status :closing :already-closed? false
+                   :foreground-complete? true :executor-terminated? true
+                   :store-closed? false :handles-closed? false
+                   :handles handles :resources root
+                   :errors (into @errors (:errors root))}
+                  (let [provider (try (provider/close! (:provider runtime))
+                                      (catch Throwable error
+                                        (swap! errors conj (value/error-map error)) nil))
+                        store (try (store/close! (:store runtime))
+                                   (catch Throwable error
+                                     (swap! errors conj (value/error-map error)) nil))
+                        closed? (empty? @errors)]
+                    (when closed?
+                      (reset! (:listeners runtime) {})
+                      (reset! (:lifecycle runtime) :closed))
+                    {:status (if closed? :closed :closing) :already-closed? false
                      :foreground-complete? true :executor-terminated? true
-                     :store-closed? false :handles-closed? false
-                     :handles handles :resources root
-                     :errors (into @errors (:errors root))}
-                    (let [provider (try (provider/close! (:provider runtime))
-                                        (catch Throwable error
-                                          (swap! errors conj (value/error-map error)) nil))
-                          store (try (store/close! (:store runtime))
-                                     (catch Throwable error
-                                       (swap! errors conj (value/error-map error)) nil))
-                          closed? (empty? @errors)]
-                      (when closed?
-                        (reset! (:listeners runtime) {})
-                        (reset! (:lifecycle runtime) :closed))
-                      {:status (if closed? :closed :closing) :already-closed? false
-                       :foreground-complete? true :executor-terminated? true
-                       :handles handles :resources root :provider provider :store store
-                       :errors @errors}))))))))))
+                     :handles handles :resources root :provider provider :store store
+                     :errors @errors}))))))))))

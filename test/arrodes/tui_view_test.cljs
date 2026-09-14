@@ -35,7 +35,7 @@
                              (predicate) nil
                              (> (js/Date.now) deadline)
                              (throw (js/Error. (str (if (fn? message) (message) message)
-                                                   "\n" (.captureCharFrame terminal))))
+                                                    "\n" (.captureCharFrame terminal))))
                              :else
                              (-> (js/Promise. (fn [resolve] (js/setTimeout resolve 15)))
                                  (.then poll)))))))]
@@ -78,8 +78,8 @@
                         :models (mapv (fn [label] {:id label :provider :codex-backend}) labels))
                  (assoc-in [:view :queue] (mapv (fn [label] {:id label :kind :steering :content label}) labels))
                  (assoc-in [:ui :overlay] {:kind kind :token (str (random-uuid)) :index 0 :query ""
-                                          :title "Popup scrolling regression" :items items
-                                          :entries entries :paths labels}))))))
+                                           :title "Popup scrolling regression" :items items
+                                           :entries entries :paths labels}))))))
 
 (defn- menu! [application terminal kind]
   (show! application kind)
@@ -173,8 +173,8 @@
            (swap! (:state application)
                   #(-> %
                        (assoc :host-requests [{:id "editor-request"
-                                              :request {:kind :editor :session-id "view-session"
-                                                        :title "Edit value" :initial "editable"}}])
+                                               :request {:kind :editor :session-id "view-session"
+                                                         :title "Edit value" :initial "editable"}}])
                        (assoc-in [:ui :overlay] nil)))))
         (.then
          (fn [_]
@@ -195,12 +195,26 @@
            (swap! (:state application) assoc
                   :host-requests [{:id "cancelled-input"
                                    :request {:kind :input :session-id "view-session"
-                                             :title "Cancelled input"}}])))
+                                             :title "Cancelled input" :secret? true}}])))
         (.then
          (fn [_]
            (until! terminal
                    #(= "cancelled-input" (get-in @(:state application) [:ui :overlay :host-id]))
                    "Host input did not open")))
+        (.then (fn [_] (.typeText (.-mockInput terminal) "never-render-" 15)))
+        (.then
+         (fn [_]
+           (swap! (:state application) assoc :notice {:kind :info :message "Refresh while typing"})
+           (.pasteBracketedText (.-mockInput terminal) "this-secret")))
+        (.then
+         (fn [_]
+           (until! terminal
+                   #(let [frame (.captureCharFrame terminal)]
+                      (and (str/includes? frame "••••")
+                           (not (str/includes? frame "never-render-this-secret"))
+                           (= "never-render-this-secret" (.-plainText (node terminal "dialog-input")))
+                           (= "" (get-in @(:state application) [:ui :overlay :query]))))
+                   "Secret input was visible or retained in overlay state")))
         (.then
          (fn [_]
            (swap! (:state application) assoc
@@ -210,10 +224,13 @@
         (.then
          (fn [_]
            (until! terminal
-                   #(and (= "next-confirm" (get-in @(:state application) [:ui :overlay :host-id]))
-                         (nil? (get-in @(:state application)
-                                       [:ui :overlay :return-overlay :host-id])))
-                   "Cancelled input survived as the next request's return overlay")))
+                   #(let [frame (.captureCharFrame terminal)]
+                      (and (= "next-confirm" (get-in @(:state application) [:ui :overlay :host-id]))
+                           (nil? (get-in @(:state application)
+                                         [:ui :overlay :return-overlay :host-id]))
+                           (not (str/includes? frame "never-render-this-secret"))
+                           (= "" (.-plainText (node terminal "dialog-input")))))
+                   "Cancelled secret survived in renderer output, input storage, or the next overlay")))
         (.then
          (fn [_]
            (swap! (:state application) assoc :host-requests [])))
@@ -225,7 +242,8 @@
                    "Cancelled reverse-request overlay remained active"))))))
 
 (defn- exercise! [terminal]
-  (let [application (app/create! {:runtime-root (.cwd js/process) :cwd (.cwd js/process)})
+  (let [application (app/create! {:runtime-root (.cwd js/process) :cwd (.cwd js/process)
+                                  :setup? false})
         mounted (view/mount! application (.-renderer terminal) {})]
     (.pressKey (.-mockInput terminal) "F3")
     (-> (visible! application terminal)

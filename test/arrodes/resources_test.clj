@@ -8,17 +8,19 @@
             [arrodes.platform :as u]
             [clojure.java.io :as io]
             [clojure.set :as set]
-            [clojure.test :refer [deftest is]]))
+            [clojure.test :refer [deftest is]])
+  (:import (java.nio.file Files)))
 
 (deftest project-trust-gates-settings-without-discarding-initialization-overrides
   (let [directory (fixtures/temp-directory)
         home (str directory "/home")
         cwd (str directory "/project")]
     (try
-      (u/ensure-dir! home)
-      (u/ensure-dir! (str cwd "/.arrodes"))
-      (u/write-edn! (str home "/settings.edn") {:example/options {:global 1 :shared :global}})
-      (u/write-edn! (str cwd "/.arrodes/settings.edn") {:example/options {:project 2 :shared :project}})
+      (u/ensure-dir! cwd)
+      (u/write-edn! (str home "/config/settings.edn")
+                    {:example/options {:global 1 :shared :global}})
+      (u/write-edn! (str (u/project-dir home cwd) "/settings.edn")
+                    {:example/options {:project 2 :shared :project}})
       (let [untrusted (resources/create! {:cwd cwd :home home :trust false
                                           :settings {:example/options {:initial 3}}})
             trusted (resources/create! {:cwd cwd :home home :trust true
@@ -28,13 +30,17 @@
           (is (= {:global 1 :project 2 :shared :project :initial 3} (:example/options (resources/settings trusted))))
           (resources/reload! trusted)
           (is (= 3 (get-in (resources/settings trusted) [:example/options :initial])))
+          (resources/update-settings! trusted {:written-under-home true} {:scope :project})
+          (is (true? (:written-under-home
+                      (u/read-edn (str (u/project-dir home cwd) "/settings.edn")))))
+          (is (not (.exists (io/file cwd ".arrodes"))))
           (finally (resources/close! untrusted) (resources/close! trusted))))
       (finally (fixtures/remove-directory! directory)))))
 
 (deftest failed-extension-activation-withdraws-its-capabilities
   (let [directory (fixtures/temp-directory)
         home (str directory "/home")
-        extension-dir (str directory "/.arrodes/extensions")
+        extension-dir (str (u/project-dir home directory) "/extensions")
         database (store/open! {:memory? true})
         provider-manager (provider/create! {:home home :settings {}})
         session (store/create-session! database {:cwd directory :name "Extension rollback" :config fixtures/config})
@@ -80,7 +86,7 @@
 (deftest disabled-extensions-exclude-lower-precedence-discovery
   (let [directory (fixtures/temp-directory)
         home (str directory "/home")
-        project-extension-root (str directory "/.arrodes/extensions")
+        project-extension-root (str (u/project-dir home directory) "/extensions")
         markers ["global-disabled.marker" "project-disabled.marker"
                  "package-disabled.marker" "explicit-disabled.marker"]
         database (store/open! {:memory? true})
@@ -99,13 +105,13 @@
                                "project-disabled.marker")
       (write-marker-extension! (str project-extension-root "/explicit-disabled.clj")
                                "explicit-disabled.marker")
-      (u/write-edn! (str home "/settings.edn")
+      (u/write-edn! (str home "/config/settings.edn")
                     {:extensions [{:path "extensions/global-disabled.clj" :enabled? false}
                                   {:path "extensions/missing.clj" :enabled? false}]})
-      (u/write-edn! (str directory "/.arrodes/settings.edn")
-                    {:extensions [{:path ".arrodes/extensions/project-disabled.clj"
+      (u/write-edn! (str (u/project-dir home directory) "/settings.edn")
+                    {:extensions [{:path "extensions/project-disabled.clj"
                                    :enabled? false}
-                                  {:path ".arrodes/extensions/missing.clj"
+                                  {:path "extensions/missing.clj"
                                    :enabled? false}]})
       (packages/install!
        home directory
@@ -121,9 +127,11 @@
       (let [manager
             (resources/create!
              {:cwd directory :home home :trust true
-              :settings {:extensions [{:path ".arrodes/extensions/explicit-disabled.clj"
+              :settings {:extensions [{:path (str project-extension-root
+                                                   "/explicit-disabled.clj")
                                        :enabled? false}
-                                      {:path ".arrodes/extensions/missing-explicit.clj"
+                                      {:path (str project-extension-root
+                                                  "/missing-explicit.clj")
                                        :enabled? false}]}})]
         (try
           (resources/activate!
@@ -154,7 +162,7 @@
     (try
       (io/make-parents prompt)
       (spit prompt "Prompt body")
-      (u/write-edn! (str home "/settings.edn")
+      (u/write-edn! (str home "/config/settings.edn")
                     {:prompts [{:path "prompts/probe.md" :enabled? false}
                                {:path "prompts/missing.md" :enabled? false}]})
       (let [manager (resources/create! {:cwd directory :home home :trust true})]
@@ -185,7 +193,7 @@
 (deftest concurrent-global-settings-patches-preserve-both-writes
   (let [directory (fixtures/temp-directory)
         home (str directory "/home")
-        target (u/resolve-path home "settings.edn")]
+        target (u/resolve-path (u/resolve-path home "config") "settings.edn")]
     (try
       (u/ensure-dir! home)
       (let [first-manager (resources/create! {:cwd directory :home home :trust true})
@@ -231,7 +239,7 @@
 (deftest failed-settings-reload-cannot-roll-back-a-concurrent-success
   (let [directory (fixtures/temp-directory)
         home (str directory "/home")
-        target (u/resolve-path home "settings.edn")]
+        target (u/resolve-path (u/resolve-path home "config") "settings.edn")]
     (try
       (u/ensure-dir! home)
       (u/write-edn! target {:base true})
@@ -278,4 +286,94 @@
           (finally
             (resources/close! failed-manager)
             (resources/close! successful-manager))))
+      (finally (fixtures/remove-directory! directory)))))
+
+(deftest project-discovery-is-canonical-pure-and-worktree-aware
+  (let [directory (fixtures/temp-directory)
+        home (str directory "/home")
+        repository (str directory "/checkout")
+        subdir (str repository "/src/deep")
+        link (str directory "/linked-subdir")]
+    (try
+      (u/ensure-dir! (str repository "/.git"))
+      (u/ensure-dir! subdir)
+      (let [root-info (u/project-info home repository)
+            subdir-info (u/project-info home subdir)]
+        (is (= root-info subdir-info))
+        (is (= (u/real-path repository) (:root root-info)))
+        (is (not (.exists (io/file home))))
+        (try
+          (Files/createSymbolicLink (u/path link) (u/path subdir)
+                                    (make-array java.nio.file.attribute.FileAttribute 0))
+          (is (= root-info (u/project-info home link)))
+          (catch UnsupportedOperationException _)
+          (catch java.nio.file.FileSystemException _)))
+      (let [first (str directory "/one/repo")
+            second (str directory "/two/repo")]
+        (doseq [worktree [first second]]
+          (u/ensure-dir! worktree)
+          (spit (str worktree "/.git") "gitdir: elsewhere\n"))
+        (is (not= (:id (u/project-info home first))
+                  (:id (u/project-info home second)))))
+      (finally (fixtures/remove-directory! directory)))))
+
+(deftest project-trust-is-exact-root-and-repository-context-stays-read-only
+  (let [directory (fixtures/temp-directory)
+        home (str directory "/home")
+        outer (str directory "/outer")
+        inner (str outer "/nested")
+        subdir (str outer "/src")]
+    (try
+      (u/ensure-dir! (str outer "/.git"))
+      (u/ensure-dir! (str inner "/.git"))
+      (u/ensure-dir! subdir)
+      (spit (str outer "/AGENTS.md") "Outer instructions")
+      (let [outer-manager (resources/create! {:cwd subdir :home home})]
+        (try
+          (resources/trust! outer-manager subdir true)
+          (is (= {:trusted? true :configured? true :required? true}
+                 (select-keys (resources/project-trust outer-manager)
+                              [:trusted? :configured? :required?])))
+          (finally (resources/close! outer-manager))))
+      (let [inner-manager (resources/create! {:cwd inner :home home})]
+        (try
+          (is (= {:trusted? false :configured? false}
+                 (select-keys (resources/project-trust inner-manager)
+                              [:trusted? :configured?])))
+          (finally (resources/close! inner-manager))))
+      (is (not (.exists (io/file outer ".arrodes"))))
+      (finally (fixtures/remove-directory! directory)))))
+
+(deftest legacy-home-migration-is-explicit-and-conflict-safe
+  (let [directory (fixtures/temp-directory)
+        home (str directory "/home")
+        cwd (str directory "/project")
+        legacy-settings (str home "/settings.edn")
+        current-settings (str home "/config/settings.edn")]
+    (try
+      (u/ensure-dir! cwd)
+      (u/write-edn! legacy-settings {:legacy true})
+      (u/write-edn! (str home "/trust.edn") {:version 1 :projects {}})
+      (u/write-edn! (str home "/keybindings.edn") {:submit ["enter"]})
+      (spit (doto (io/file home "data" "artifacts" "kept.txt") io/make-parents)
+            "preserved")
+      (u/write-edn! current-settings {:current true})
+      (let [blocked (u/migrate-legacy-home! home cwd)]
+        (is (= :blocked (:status blocked)))
+        (is (= {:legacy true} (u/read-edn legacy-settings)))
+        (is (= {:current true} (u/read-edn current-settings)))
+        (is (= "preserved" (slurp (str home "/data/artifacts/kept.txt")))))
+      (Files/deleteIfExists (u/path current-settings))
+      (let [migrated (u/migrate-legacy-home! home cwd)
+            project-data (str (u/project-dir home cwd) "/data")]
+        (is (= :migrated (:status migrated)))
+        (is (= {:legacy true} (u/read-edn current-settings)))
+        (is (not (.exists (io/file legacy-settings))))
+        (is (= "preserved" (slurp (str home "/data/artifacts/kept.txt"))))
+        (is (not (.exists (io/file project-data))))
+        (let [data-migration (u/migrate-legacy-home! home cwd {:kinds #{:data}})]
+          (is (= :blocked (:status data-migration)))
+          (is (= :explicit-data-dir-required
+                 (:status (first (:conflicts data-migration)))))
+          (is (= "preserved" (slurp (str home "/data/artifacts/kept.txt"))))))
       (finally (fixtures/remove-directory! directory)))))

@@ -1,105 +1,165 @@
-# Stdio protocol
+# JSON Lines RPC protocol
 
-Arrodes uses protocol version 1 over UTF-8 JSON Lines. One connection owns initialization and shutdown. Standard output contains protocol records; diagnostics belong on standard error.
-
-Start the headless process:
+`arrodes --rpc` runs the headless Arrodes host on standard input and output. Protocol version 1 uses UTF-8 JSON Lines: one complete JSON object per line. Standard output contains protocol records only; diagnostics are written to standard error.
 
 ```sh
-clojure -Srepro -M:host
+arrodes --rpc
 ```
 
-It first emits a `hello` containing the protocol version and connection identity. Send `initialize` before domain commands:
+One connection owns initialization, reverse host requests, attached capabilities, and shutdown.
+
+## Handshake and initialization
+
+The process first emits a `hello` record containing the protocol version and connection identity. Send `initialize` before domain requests:
 
 ```json
-{"type":"request","id":"init","method":"initialize","params":{"cwd":"/path/to/project","home":"/path/to/private/arrodes-home","data-dir":"/path/to/private/arrodes-data"}}
+{"type":"request","id":"init","method":"initialize","params":{"cwd":"/path/to/project","home":"/path/to/private/arrodes-home","data-dir":"/path/to/private/session-data"}}
 ```
 
-Use `memory?` for an explicitly ephemeral runtime. Relative application paths should be supplied deliberately; credentials are not protocol configuration data.
+`cwd` selects project identity and the default session working directory. `home` and `data-dir` are optional. Set `memory?` to `true` only for an explicitly ephemeral runtime. Credentials are not initialization parameters.
 
-## Requests and results
+A normal response repeats the request ID and contains either `result` or `error`:
 
 ```json
-{"type":"request","id":"create","method":"session.create","params":{"name":"Project work","config":{"provider":"codex-backend","model":"gpt-5.6-luna","thinking":"high"}}}
+{"type":"response","id":"init","result":{"version":"0.1.0","protocol":1,"connection-id":"..."}}
 ```
 
-A response has the same request ID and either `result` or `error`:
+Errors contain a stable `code`, human-readable `message`, and structured `data`. A serialization failure reports `serialization-error` with `data.unknown-outcome? = true`; inspect state before retrying a mutation.
+
+## Request shape
 
 ```json
-{"type":"response","id":"create","result":{"id":"SESSION_ID"}}
+{"type":"request","id":"create","method":"session.create","params":{"name":"Project work","config":{"provider":"codex-backend","model":"MODEL_ID","thinking":"high"}}}
 ```
 
-The example omits other snapshot fields. Use the returned session ID in later requests. Errors contain a stable code, message, and structured data.
+Request IDs must be unique while a request remains active. `runtime.inspect` returns the protocol version and authoritative list of methods supported by the running executable.
 
-`runtime.inspect` advertises the command list. The dispatcher is the authority for available methods and parameter checks; do not duplicate agent behavior in a controller.
+### Public methods
+
+| Group | Methods |
+| --- | --- |
+| Runtime and project | `runtime.inspect`, `project.info`, `project.trust` |
+| Setup and auth | `setup.status`, `setup.run`, `auth.status`, `auth.login`, `auth.logout`, `model.list`, `model.refresh` |
+| Settings and resources | `settings.get`, `settings.update`, `resource.list`, `skill.read`, `prompt.render`, `prompt.run` |
+| Sessions | `session.list`, `session.create`, `session.inspect`, `session.state`, `session.view`, `session.entries`, `session.tree`, `session.configure`, `session.name`, `session.label`, `session.rewind`, `session.fork`, `session.clone`, `session.delete` |
+| Work and queues | `session.run`, `session.continue`, `session.compact`, `session.steer`, `session.follow-up`, `session.cancel`, `session.queue`, `session.queue.update`, `session.queue.drop`, `session.reload`, `session.evaluate`, `session.invoke`, `session.command` |
+| Operations | `operation.list`, `operation.inspect`, `operation.wait`, `operation.cancel`, `operation.steer`, `operation.follow-up` |
+| Results and artifacts | `result.list`, `result.inspect`, `artifact.list`, `artifact.inspect`, `artifact.read`, `artifact.write` |
+| Host capabilities | `capability.list`, `capability.set`, `capability.attach`, `capability.detach` |
+| Transfer | `session.export`, `session.import`, `session.share` |
+| Packages and events | `package.list`, `package.install`, `package.remove`, `package.update`, `event.replay` |
+
+The dispatcher returned by `runtime.inspect` is authoritative for method availability and parameter validation.
+
+## Setup, configuration, and project identity
+
+`project.info` returns the project `id`, canonical real `root`, external state `directory`, and trust state. It does not create a repository dotfolder.
+
+`setup.status` reports `ready?`, `configuration-ready?`, `trust-ready?`, effective `config`, provider availability, project/trust details, and home migration information. It never prompts, authenticates, or changes configuration. Reading public SDK model metadata may populate the model metadata cache.
+
+`setup.run` completes missing setup through reverse `select`, `input`, and `render` host requests. Optional `provider`, `model`, `thinking`, or `config` values preserve explicit choices; `force?` reopens configuration. It authenticates or explicitly reuses credentials, performs actual model discovery for the selected provider, and saves global defaults. With `session-id`, it also applies the selected provider, model, and thinking level to that session.
+
+A `host-cancel` reply cancels setup. Authentication or settings writes completed before cancellation remain complete; call `setup.status` before continuing.
+
+Secret authentication inputs set `secret?` on the reverse request. Hosts must mask API keys and pasted OAuth codes or redirect URLs, exclude them from drafts/history, and clear editor storage when the dialog closes.
+
+`settings.get` returns the effective redacted settings map. `settings.update` accepts `changes` and `scope` (`global` or `project`, default `project`); a JSON `null` removes a key. Project changes require trust. `project.trust` accepts boolean `trusted?` and applies on the next session resource load.
 
 ## Asynchronous work
 
-`session.run`, `session.continue`, and `session.compact` return durable operation receipts. Use `operation.inspect`, `operation.wait`, and the operation/session cancellation or queue commands to control work.
+`session.run`, `session.continue`, and `session.compact` return durable operation receipts:
 
 ```json
 {"type":"request","id":"run","method":"session.run","params":{"session-id":"SESSION_ID","prompt":"Explain the project."}}
 ```
 
-Runtime events arrive independently as `event` records. Durable events have a global sequence; `event.replay` reads them after a cursor. Transient provider/progress output is not a second durable history.
+Use `operation.inspect` or `operation.wait` to observe completion. `operation.wait` accepts `timeout-ms` from 1 through 300000. Steering, follow-up, and cancellation are available by operation ID or session ID.
 
-## Atomic view and replay
+Runtime events arrive independently:
 
-`session.view` accepts `session-id` and returns `{"state": SESSION_STATE, "entries": ACTIVE_PATH, "cursor": SEQUENCE}`. These are one consistent observation under the session lock. `entry/committed` contains the full assigned entry and is committed atomically with that entry; legacy assistant-message events are not another insertion.
+```json
+{"type":"event","event":{"type":"entry/committed","seq":42,"session-id":"..."}}
+```
 
-`state.operation` is an authoritative operation descriptor or `null`; `operation-id` and `phase` are not substitutes for its status. Terminal publication happens after foreground admission is released. A controller must not resurrect running/cancelling work from stale phase hints or recreate delivered queue items from late acceptance responses.
+Durable events have a global sequence. `event.replay` accepts `after`, optional `session-id`, and `limit` from 1 through 500; it returns events and the resulting cursor. Transient streaming/progress output is not a second durable history.
 
-A reconnecting controller buffers live events while loading the view. Replay historical events through the snapshot cursor to reconstruct call activity, without replacing the snapshot's entries or queue with older mutations. Apply buffered events newer than the snapshot after this reconstruction. Correlate by sequence/call ID and retain only activity belonging to the active path or current operation. Do not replay external effects.
+## Atomic view and reconnect
 
-`session.queue.update` accepts `session-id`, `queue-id`, and `content`; it returns `{"item": UPDATED_ITEM}`. It preserves queue identity, order, timestamp, and delivery options. `session.queue.drop` accepts those IDs and returns `{"removed": REMOVED_ITEM}`. Both reject an item that has already been delivered or removed.
+`session.view` accepts `session-id` and returns:
 
-`session.fork` accepts an optional `entry-id` and `position` (`at` or `before`). It creates another conversation branch; it does not revert filesystem effects.
+```json
+{"state":{},"entries":[],"cursor":42}
+```
 
-Request-level cancellation is different from cancelling an agent operation:
+The session state, active history path, and cursor are one consistent observation under the session lock. `state.operation` is the authoritative current operation descriptor or `null`.
+
+A reconnecting controller should:
+
+1. buffer live events while loading `session.view`;
+2. replay recorded activity through the snapshot cursor, without replacing the snapshot's entries or queue;
+3. keep the snapshot's entries and queue authoritative; and
+4. apply buffered events newer than the snapshot.
+
+Never replay external effects or infer accepted queue items from late responses. `entry/committed` carries the assigned entry and is committed atomically with it.
+
+`session.queue.update` requires `session-id`, `queue-id`, and `content`; `session.queue.drop` requires the two IDs. Both reject an item already delivered or removed.
+
+`session.fork` accepts optional `entry-id` and `position` (`at` or `before`). It creates another conversation path; it does not revert filesystem effects.
+
+## Request cancellation
+
+Cancel one in-flight request with:
 
 ```json
 {"type":"cancel","id":"request-to-cancel"}
 ```
 
-It does not undo already accepted effects. A running request ID remains reserved until its worker actually finishes. Use unique IDs; do not reuse an ID merely because a cancellation acknowledgement arrived.
+This is distinct from cancelling an agent operation. It does not undo accepted effects, and the request ID remains reserved until its worker finishes. A cancellation acknowledgement is not permission to reuse the ID or resend a mutation.
 
-## Evaluator and capabilities
+## Evaluation, capabilities, and results
 
-`session.evaluate` evaluates source as a first-class session operation. `session.invoke` invokes an instrumented Clojure function. Native values are not blindly serialized into JSON: inspect bounded output and the result descriptor, or evaluate `(result 42)` with the returned integer result ID.
+`session.evaluate` accepts Clojure `source` as a first-class session operation. `session.invoke` accepts a registered function `name` and argument object. Both return bounded presentation plus a retained result descriptor rather than blindly serializing every native value.
 
-`result.inspect` returns the retained descriptor. Inline results also include `value-edn` (a redacted, bounded native representation) and `value-truncated?`. Prefer this representation when displaying Clojure types: JSON `value` is a projection and can collapse distinctions such as keyword and string keys. Artifact-backed results use the descriptor's artifact ID and `artifact.read` paging; live-only values must not be presented as persisted checkpoints.
+`result.inspect` returns that descriptor. Inline results also include `value-edn` and `value-truncated?`; JSON `value` is a projection and may not preserve distinctions such as keyword versus string keys. Artifact-backed results expose an artifact ID for paged `artifact.read`. Live-only values must be shown as unavailable after evaluator reset, not as durable checkpoints.
 
-Nonfinite floating-point values use a JSON-safe projection such as `{"type":"number","encoding":"edn","value":"##NaN"}` (also `##Inf` and `##-Inf`). Their native value remains available through evaluation and `value-edn`. If response encoding itself fails, the request receives `serialization-error` with `data.unknown-outcome? = true`; reconcile state rather than resending accepted effects.
+Nonfinite numbers use a JSON-safe projection such as:
 
-Durable evaluation events are `evaluation/started` and `evaluation/completed`; nested functions emit `capability/started` and `capability/completed`. Their data includes `call-id` and `parent-call-id`. The event envelope includes `session-id`, `operation-id`, and sequence. Starts carry source or arguments. Completions carry content, details, `error?`, and a retained `result`. Stdout/stderr and shell progress arrive through transient `tool-progress` events with the same call correlation; use final completion output for replay.
+```json
+{"type":"number","encoding":"edn","value":"##NaN"}
+```
 
-The same observation data serves direct user evaluations and agent evaluations. Controllers must not parse source or ANSI output to discover calls, infer parentage, or decide whether an operation completed. These records are UI-independent data, not an MCP protocol.
+Durable evaluation events are `evaluation/started` and `evaluation/completed`; nested registered functions emit `capability/started` and `capability/completed`. Their call IDs, parent call IDs, session ID, and operation ID provide correlation. Starts carry source or arguments; completions carry content, details, error status, and result descriptor. Transient `tool-progress` records carry the same call correlation.
 
-A controller can attach host capabilities. Invocation produces a reverse request:
+### Attached host capabilities
+
+`capability.attach` registers a connection-owned function. Invocation produces a reverse request:
 
 ```json
 {"type":"host-request","id":"HOST_REQUEST_ID","request":{"kind":"capability","name":"host_echo","arguments":{"value":"hello"},"session-id":"SESSION_ID"}}
 ```
 
-Reply with the same host request ID:
+Reply with the same ID:
 
 ```json
 {"type":"host-response","id":"HOST_REQUEST_ID","result":"hello"}
 ```
 
-UI requests use the same reverse-request mechanism. Host waits and queues are bounded and cancellable. Capability attachment is connection-owned; a connection cannot detach another owner's capability.
+Errors use `error` instead of `result`. A connection may detach only capabilities it owns. Reverse waits and queues are bounded and cancellable.
 
-Portable presentation requests also support `widget`, `set-widget`, `render`, and `editor`. Widget IDs are scoped by `request.session-id`; `remove?` withdraws the widget. Native renderer functions remain inside the JVM RPC host and never cross JSON. Events and replay results may include an advisory `presentation` object containing `content` or `error`; canonical event status remains authoritative.
+UI reverse requests also use this channel. Portable kinds include `select`, `input`, `notify`, `widget`, `set-widget`, `render`, and `editor`. Widget IDs are scoped by `session-id`; `remove?` withdraws a widget. Events may include advisory `presentation` content from a core renderer, but canonical event status remains authoritative.
+
+## Transfer and sharing
+
+`session.export` supports `jsonl`, `edn`, and `html`; pass `path` to write a private local file or omit it to receive `content`. `session.import` accepts either `path` or `content`, not both, and creates new identities for imported data.
+
+`session.share` explicitly invokes GitHub CLI to upload an HTML export as an **unlisted GitHub gist**. It is not private storage. Obtain user consent before calling it; anyone with the URL can read the result.
 
 ## Shutdown
+
+Request an orderly shutdown:
 
 ```json
 {"type":"request","id":"shutdown","method":"shutdown","params":{}}
 ```
 
-Shutdown and EOF cancel host waits, settle connection work, detach owned capabilities, and close the runtime. Inspect cleanup results: an incomplete report is not successful termination of all work.
-
-## Transfer
-
-`session.export` supports EDN, JSONL, and HTML. `session.import` accepts the versioned Arrodes representation. Export metadata retains base configuration and declared result/artifact data; imports create new identities and validate references. These are not Pi-compatible wire or storage formats.
-
-`session.share` explicitly uploads an unlisted GitHub gist. It is not access-controlled private storage. Controllers must obtain appropriate user consent before invoking it.
+Shutdown and end-of-file cancel reverse waits, settle connection work, detach connection-owned capabilities, and close the runtime. Inspect the returned cleanup report. An incomplete report means some owned work did not terminate and must not be presented as a clean shutdown.

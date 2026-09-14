@@ -7,24 +7,24 @@
 
 (def usage
   (str "Arrodes - conversation-first terminal agent\n\n"
-       "Usage: bin/arrodes [options] [prompt]\n\n"
+       "Usage: arrodes [options] [prompt]\n\n"
        "  --cwd PATH        Project directory\n"
-       "  --home PATH       Private Arrodes configuration/credential home\n"
-       "  --data-dir PATH   Session storage directory\n"
+       "  --home PATH       Application home (default: ~/.arrodes)\n"
+       "  --data-dir PATH   Session storage directory override\n"
        "  --session ID      Resume a stored session\n"
-       "  --runtime PATH    Core source checkout (defaults to this repository)\n"
-       "  --provider NAME   Provider for a new session (codex-backend)\n"
-       "  --model ID        Model for a new session (gpt-5.6-luna)\n"
-       "  --thinking LEVEL  Reasoning level (high)\n"
+       "  --provider NAME   Provider for a new session\n"
+       "  --model ID        Model for a new session\n"
+       "  --thinking LEVEL  Reasoning level for a new session\n"
        "  --trust           Load trusted project resources\n"
        "  --no-trust        Do not load executable project resources\n"
        "  --memory          Ephemeral in-memory sessions\n"
        "  --no-mouse        Disable mouse capture\n"
+       "  --rpc             Run the headless JSONL RPC host\n"
        "  --help            Show help without opening a runtime\n"
        "  --version         Show version\n\n"
        "Enter sends/steers; Ctrl+Q queues follow-up; Esc dismisses/stops.\n"
        "F2 sessions; F3 commands; F6 focus; @ context; / commands.\n"
-       "The existing command-line host is available as bin/arrodes-cli.\n"))
+       "Headless invocation: arrodes --rpc.\n"))
 
 (defn- options [arguments]
   (let [path (js/require "node:path")
@@ -35,8 +35,7 @@
     (when (and rpc-command (not (and (vector? rpc-command) (seq rpc-command) (every? string? rpc-command))))
       (throw (js/Error. "ARRODES_TUI_RPC_COMMAND must be a non-empty JSON string array")))
     (loop [remaining (seq arguments)
-           opts (cond-> {:runtime-root root :cwd launch :provider :codex-backend
-                          :model "gpt-5.6-luna" :thinking :high :mouse? true}
+           opts (cond-> {:runtime-root root :cwd launch :mouse? true}
                   rpc-command (assoc :rpc-command rpc-command))
            prompt []]
       (if-let [arg (first remaining)]
@@ -61,8 +60,15 @@
           (str/starts-with? arg "--") (throw (js/Error. (str "Unknown option: " arg)))
           :else (recur (next remaining) opts (conj prompt arg)))
         (assoc opts :prompt (str/join " " prompt))))))
+(defn- opentui-data-path [opts]
+  (let [path (js/require "node:path")
+        os (js/require "node:os")
+        configured (or (:home opts) (not-empty (aget (.-env js/process) "ARRODES_HOME")))
+        home (if configured (.resolve path configured) (.join path (.homedir os) ".arrodes"))]
+    (.join path home "cache" "opentui")))
 
 (defn- launch! [opts]
+  (.setDataPath (.getTreeSitterClient widgets/core) (opentui-data-path opts))
   (let [application (app/create! opts)
         renderer (atom nil)
         mounted (atom nil)
@@ -87,10 +93,12 @@
                  (reset! mounted (view/mount! application r {:on-quit shutdown}))
                  (.once js/process "SIGTERM" shutdown)
                  (.once js/process "SIGINT" shutdown)
+                 (when (seq (:prompt opts))
+                   (swap! (:state application) assoc-in [:ui :draft] (:prompt opts)))
                  (-> (app/start! application)
                      (.then (fn [_]
-                              (when (seq (:prompt opts))
-                                (swap! (:state application) assoc-in [:ui :draft] (:prompt opts))
+                              (when (and (seq (:prompt opts))
+                                         (get-in @(:state application) [:view :session :id]))
                                 (app/command! application :submit {:text (:prompt opts) :mode :prompt}))))
                      (.catch (fn [_] nil)))))
         (.catch (fn [error]
@@ -105,7 +113,7 @@
         (:help? opts) (println usage)
         (:version? opts) (println "Arrodes 0.1.0")
         (not (and (.-isTTY (.-stdin js/process)) (.-isTTY (.-stdout js/process))))
-        (throw (js/Error. "The TUI needs an interactive terminal. Use clojure -M:host for headless RPC."))
+        (throw (js/Error. "The TUI needs an interactive terminal. Use arrodes --rpc for headless RPC."))
         :else (launch! opts)))
     (catch :default error
       (.write (.-stderr js/process) (str (.-message error) "\n"))

@@ -1,145 +1,214 @@
 # Arrodes
 
-A conversation-first terminal coding agent, powered by a persistent JVM/Clojure evaluation environment.
+Arrodes is a conversation-first coding agent for the terminal. It keeps sessions, results, and project-specific configuration outside your repository while giving the agent local read, edit, shell, skill, extension, and MCP-client capabilities.
 
-The ClojureScript/OpenTUI interface keeps the conversation and composer primary. Observed function activity stays compact inline; output, native values, and exact evaluation source are available in a contextual inspector. The JVM remains usable independently through the SDK or JSONL RPC. See [verification status](docs/STATUS.md).
+The repository and its preview releases are private.
 
-The repository is intentionally private.
+## Install the private preview
 
-## What Arrodes owns
+Download the executable for your system and its matching `.sha256` file from this repository's private Releases page. Access requires permission to the repository.
 
-- Append-only, branchable conversation history, session configuration, queues, operations, results, and retained artifacts.
-- REPL-driven agent continuation, cancellation, steering, follow-ups, retries, and context compaction.
-- Ordinary Clojure functions for coding work, skills, prompts, extensions, and an MCP **client**.
-- One persistent namespace and native retained values per live session.
-- Provider/authentication adapters; providers see one evaluation action, not every available function.
-- A ClojureScript/OpenTUI interface, embedding API, optional stdio RPC, and an isolated legacy CLI.
+| System | Executable |
+| --- | --- |
+| macOS Apple silicon | `arrodes-darwin-arm64` |
+| macOS Intel | `arrodes-darwin-x64` |
+| Linux arm64, glibc | `arrodes-linux-arm64` |
+| Linux x64, glibc | `arrodes-linux-x64` |
+| Windows x64 | `arrodes-windows-x64.exe` |
 
-Arrodes is not an MCP server or a generalized workspace model. It does not include a built-in subagent system, plan mode, to-do manager, or operating-system sandbox.
+The executable is self-contained. End users do not need to install a language runtime or package manager.
 
-Pi/OMP is a reference for interaction behaviour, not a requirement to reproduce its functionality or implementation. The historical Pi baseline is [`71dca871bc80`](https://github.com/earendil-works/pi/commit/71dca871bc80b6bc97be37f0ca3189399d651fff).
+### macOS
 
-## Requirements
-
-- Java 21 or newer.
-- Clojure CLI for development/source execution.
-- Bun 1.3.14 or newer for the OpenTUI interface.
-- Provider credentials for live model requests.
-
-The provider layer uses the published [clojure-llm-sdk 0.6.0](https://github.com/DeadMeme5441/clojure-llm-sdk/releases/tag/v0.6.0) release. Session storage uses SQLite and immutable artifact files, not Datahike. JNA supplies the native process-group/Job Object boundary shared by shell commands and stdio MCP clients; it does not add an OS sandbox.
-
-## Start the terminal interface
+Verify before renaming or moving the file:
 
 ```sh
-bun install --frozen-lockfile
-bun run build
-bin/arrodes --cwd /path/to/project
+shasum -a 256 -c arrodes-darwin-arm64.sha256
+chmod +x arrodes-darwin-arm64
+mkdir -p ~/.local/bin
+mv arrodes-darwin-arm64 ~/.local/bin/arrodes
 ```
 
-The launcher rebuilds changed ClojureScript sources, then starts OpenTUI and its owned JVM RPC process. It does not require a prebuilt core JAR. New sessions default to Codex OAuth, `gpt-5.6-luna`, and `high` reasoning, without silent model fallback. Use `--provider`, `--model`, and `--thinking` to choose another route; existing sessions retain their configuration.
+Use the `x64` filename on an Intel Mac. Ensure `~/.local/bin` is on `PATH`.
 
-| Interaction | Control |
+This private preview is not Developer ID signed or notarized. After verifying the checksum, the first launch may require **System Settings → Privacy & Security → Open Anyway**. Only bypass the warning for an artifact obtained from the private release you trust.
+
+### Linux
+
+```sh
+sha256sum -c arrodes-linux-x64.sha256
+chmod +x arrodes-linux-x64
+mkdir -p ~/.local/bin
+mv arrodes-linux-x64 ~/.local/bin/arrodes
+```
+
+Use the `arm64` filename on arm64. The preview targets glibc-based Linux systems.
+
+### Windows
+
+In PowerShell, compare the hash with the first value in the downloaded `.sha256` file:
+
+```powershell
+(Get-FileHash .\arrodes-windows-x64.exe -Algorithm SHA256).Hash.ToLower()
+Get-Content .\arrodes-windows-x64.exe.sha256
+```
+
+Rename the executable to `arrodes.exe` and place it in a directory on `PATH`. This private preview is unsigned, so Windows may show SmartScreen. Continue only after verifying the checksum and source.
+
+Confirm the install:
+
+```sh
+arrodes --version
+```
+
+## First run
+
+Open a repository and start Arrodes:
+
+```sh
+cd /path/to/project
+arrodes
+```
+
+On first run, setup asks you to:
+
+1. choose a provider;
+2. sign in, enter an API key, or explicitly reuse available credentials;
+3. choose a model returned by that provider;
+4. choose a supported reasoning level; and
+5. decide whether to trust project-scoped instructions and executable resources when a decision is needed.
+
+OAuth can open a browser or show a URL for manual completion. API keys and pasted authorization codes are masked and excluded from conversation drafts and history. Press `Esc` to cancel a setup screen without exiting; run `/setup` or `/login` later to continue.
+
+Existing valid defaults skip setup. Launch selections take precedence for a new session:
+
+```sh
+arrodes --provider codex-backend --model MODEL_ID --thinking high
+```
+
+Use `/models`, `/refresh-models`, and `/thinking` to change the current session from the interface.
+
+## Daily use
+
+Launch in the repository you want Arrodes to work on, then describe the change or question in the composer. A one-line starting prompt can also be supplied at launch:
+
+```sh
+arrodes "Explain the failing command, fix the cause, and verify the result."
+```
+
+Arrodes keeps one live evaluator per session. Function calls appear compactly in the conversation; select a row to inspect its summary, output, native value, or evaluation source. Pending follow-ups can be edited or removed before delivery.
+
+### Keys
+
+| Action | Key |
 | --- | --- |
-| Send / steer the running operation | Enter |
-| Queue a follow-up / insert a newline | Ctrl+Q / Shift+Enter |
-| Dismiss selection or a panel, otherwise stop work | Esc |
-| Sessions / command palette / next pane | F2 / F3 or Ctrl+P / F6 |
-| Attach context / discover commands | `@` / `/` |
-| Scroll without following new output | PgUp / PgDn |
-| Inspect / expand the selected conversation row | Enter / Space with conversation focus |
-| Copy selected text / exit | Ctrl+C / Ctrl+D |
+| Send while idle; steer while running | `Enter` |
+| Insert a newline | `Shift+Enter` or `Ctrl+J` |
+| Queue a follow-up | `Ctrl+Q` |
+| Close a panel; otherwise request cancellation | `Esc` |
+| Sessions | `F2` |
+| Commands | `F3` or `Ctrl+P` |
+| Move to the next pane | `F6` |
+| Attach a project file | `@` |
+| Discover commands | `/` |
+| Scroll without following output | `PgUp` / `PgDn` |
+| Inspect / expand a selected conversation row | `Enter` / `Space` |
+| Follow the latest output | `End` |
+| Inspector tabs | `1` Summary, `2` Output, `3` Value, `4` Code |
+| Copy selected text; otherwise stop work | `Ctrl+C` |
+| Exit | `Ctrl+D` |
 
-Pending prompts can be edited or dropped before delivery. `/history` inspects the recorded path and can branch from an entry; branching never restores files. `/eval` opens explicit Clojure input without replacing the normal conversation workflow. `/refresh` reconciles state after an uncertain request outcome; it does not resend a mutation.
+### Commands
 
-The inspector provides Summary, Output, Value, and Code tabs, with on-demand artifact pages and honest live/saved/unavailable result lifetimes. It appears beside the conversation on wide terminals and takes a dedicated view on narrow terminals. Drafts, expanded rows, and reading position survive session navigation within the running interface.
+| Command | Purpose |
+| --- | --- |
+| `/new` | Create a session |
+| `/sessions` | Switch sessions |
+| `/history` | Inspect history and create a branch |
+| `/refresh` | Reconcile recorded session state without repeating a mutation |
+| `/pending` | Edit or drop queued input |
+| `/attach`, `/attachments` | Add or remove project-file context |
+| `/setup`, `/login` | Run provider setup or sign-in |
+| `/models`, `/refresh-models`, `/thinking` | Select or refresh model settings |
+| `/rename` | Rename the current session |
+| `/continue` | Continue from the current conversation |
+| `/compact` | Compact model context without deleting history |
+| `/eval` | Evaluate trusted Clojure input in the live session |
+| `/reload` | Reset the evaluator and reload resources; live definitions are lost |
+| `/reconnect` | Restart the owned core without repeating an interrupted mutation |
+| `/copy` | Copy the visible conversation |
+| `/export` | Write a local HTML export |
+| `/reasoning` | Show or hide reasoning |
+| `/expand`, `/collapse` | Expand or collapse recorded activity |
+| `/delete` | Permanently delete the current session after confirmation |
+| `/help` | Show keyboard help |
+| `/quit` | Exit Arrodes |
 
-`bin/arrodes.ps1` is the PowerShell entry point. The old line-oriented/JLine interface remains available explicitly as `bin/arrodes-cli` or `bin/arrodes-cli.ps1`. Windows terminal behaviour has not been exercised in the current verification.
+Prefix a message with `//` to send a literal leading slash.
 
-## SDK example
+## Sessions and results
 
-From the repository's Clojure classpath:
+Sessions are durable and can be reopened through `/sessions` or directly:
 
-```clojure
-(require '[arrodes.runtime :as runtime]
-         '[arrodes.provider :as provider])
-
-(let [rt (runtime/open! {:cwd "/path/to/project"})]
-  (try
-    ;; Uses available Codex/ChatGPT OAuth; credentials are not session data.
-    (provider/refresh! (:provider rt) :codex-backend)
-    (let [session (runtime/create-session!
-                   rt {:name "Project work"
-                       :config {:provider :codex-backend
-                                :model "gpt-5.6-luna"
-                                :thinking :high
-                                :tools :all
-                                :settings {:fallback-model? false}}})
-          sid (:id session)]
-      (runtime/run! rt sid "Inspect the project and explain it.")
-      (runtime/evaluate! rt sid "(defn twice [x] (* 2 x))")
-      (runtime/evaluate! rt sid "(twice 21)"))
-    (finally (runtime/close! rt))))
+```sh
+arrodes --session SESSION_ID
 ```
 
-`run!` is blocking; `start!` returns an operation receipt that can be inspected, waited for, or cancelled. `evaluate!` is a core operation, not an invocation of a special registered tool. See [architecture](docs/ARCHITECTURE.md) and [the protocol](docs/PROTOCOL.md).
+Conversation history, session configuration, stored artifacts, and supported retained values survive restart. Arbitrary live definitions, JVM objects, and live-only results do not. Branching changes conversation history; it does **not** undo edits, commands, or other filesystem effects. See [Sessions and results](docs/SESSIONS.md).
 
-Inside the session REPL:
+For automation and integrations, the only headless terminal mode is:
 
-```clojure
-(registered-tools)                           ; callable symbols, schemas, descriptions
-(def source (read {:path "src/example.clj"})) ; native value, retained in this namespace
-(skill {:action "catalog"})
-(:content (skill {:action "read" :name "review"}))
-(mcp {:action "catalog"})                    ; configured external servers
-(result 42)                                 ; native value for a returned result ID
+```sh
+arrodes --rpc
 ```
 
-Ordinary functions need no registration. `register-tool!` adds discovery and invocation tracing when needed; it does not expose another provider tool. The provider adapter encodes evaluation as `repl`.
+It serves the versioned JSON Lines API documented in the [RPC protocol reference](docs/PROTOCOL.md).
 
-## Source and host boundaries
+## State, privacy, and trust
+
+Application home resolves in this order: `--home`, `ARRODES_HOME`, then `~/.arrodes`.
 
 ```text
-src/clj/arrodes/    JVM core and effects
-src/cljc/arrodes/   Portable session, run, value, and TUI projection logic
-src/cljs/arrodes/   OpenTUI view, controller, and JSONL client
-hosts/rpc/arrodes/  Optional JSONL command host
-hosts/cli/arrodes/  Existing CLI/JLine host
+~/.arrodes/
+  config/
+    settings.edn
+    keybindings.edn
+    trust.edn
+  auth/
+  skills/
+  extensions/
+  prompts/
+  themes/
+  packages/
+  projects/
+    <readable-name>-<sha256-of-real-worktree-root>/
+      project.edn
+      settings.edn
+      data/
+      skills/ extensions/ prompts/ themes/ packages/
+  cache/
+    models/ jna/ bun/ opentui/
+  runtime/
+    <version>-<platform>-<arch>-<payload-digest>/
 ```
 
-The default classpath has no CLI, RPC host, or JLine dependency. Start only the host you need:
+The project identity is the real Git worktree root, or the launch directory outside Git. Subdirectories and symlink aliases share a project bucket; separate worktrees do not. Arrodes does not create `.arrodes`, instructions, or ignore-file changes in the repository. Use `project.info` over RPC to discover the exact external directory.
 
-```sh
-clojure -Srepro -M:host       # standalone headless RPC, no JLine
-clojure -Srepro -M:run --help # existing optional CLI
-```
+Each project data store has one live owner. Different projects can run concurrently; a second process opening the same store is rejected. Use `--data-dir` only when deliberately selecting another store.
 
-The OpenTUI host shares pure `.cljc` data logic. The JVM owns OAuth, MCP clients, evaluation, and persistence; JavaScript does not duplicate the agent loop.
+Trust allows project instructions and executable resources to load; it is not an operating-system sandbox. The evaluator, shell, MCP clients, and trusted extensions run with the Arrodes process's permissions. Credentials stay under `auth/` or in referenced environment variables, not settings files.
 
-## State and privacy
+Nothing is shared automatically. The RPC `session.share` method explicitly creates an **unlisted GitHub gist**; anyone with its URL can read it.
 
-The default application home is `~/.arrodes`, overridden by `ARRODES_HOME` or `--home`. Project resources live in `.arrodes` within the selected project. Credentials belong in the private authentication store or environment, not session configuration.
+See [Configuration and project state](docs/CONFIGURATION.md) and [Troubleshooting](docs/TROUBLESHOOTING.md) for migration, ownership, and recovery details.
 
-A file-backed data directory has **one live runtime owner**. A second runtime opening the same directory is rejected before recovery or expiry can modify it. Multiple sessions can run inside one runtime. Use separate data directories for separate live runtimes.
+## Documentation
 
-Conversation history and supported durable results survive restart. Arbitrary REPL definitions, JVM objects, and live-only results do not. Branch movement/reload resets the evaluator; model changes and compaction do not.
-
-The evaluator, shell, and trusted extensions execute local code with the process's permissions. Project trust is not a sandbox. Session sharing creates an **unlisted GitHub gist**: anyone with its URL can read it. Nothing is shared automatically.
-
-## Development
-
-```sh
-clojure -Srepro -M:test
-bun run build
-bun scripts/tui.ts --help
-python3 scripts/check-private.py --check-git
-clojure -Srepro -T:build uber
-clojure -Srepro -T:build rpc
-java -jar target/arrodes-rpc.jar --help
-```
-
-`target/arrodes.jar` is the headless core library. `:build rpc` produces the standalone RPC executable. `:build cli` produces `target/arrodes-cli.jar`, used by `bin/arrodes-cli`; the core JAR is not a CLI executable. The TUI build produces `target/tui/main.cjs` and runs through the Bun bootstrap, not directly through Node.
-
-The test suite is offline; live checks are separate and use explicitly selected credentials/model settings. See [development and verification](docs/DEVELOPMENT.md), [extensions](docs/EXTENSIONS.md), and [current status](docs/STATUS.md).
+- [Configuration and project state](docs/CONFIGURATION.md)
+- [Sessions and results](docs/SESSIONS.md)
+- [Extensions, resources, MCP, and packages](docs/EXTENSIONS.md)
+- [RPC protocol reference](docs/PROTOCOL.md)
+- [Troubleshooting and preview limits](docs/TROUBLESHOOTING.md)
 
 ## License
 

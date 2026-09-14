@@ -289,14 +289,11 @@
            sessions)))))
 
 (defn- default-session-params [app]
-  (let [options (:options app)]
-    (non-nil-map
-     {:cwd (workspace app)
-      :name (:session-name options)
-      :config {:provider (or (:provider options) :codex-backend)
-               :model (or (:model options) "gpt-5.6-luna")
-               :thinking (or (:thinking options) :high)
-               :settings {:fallback-model? false}}})))
+  (let [options (:options app)
+        config (non-nil-map (select-keys options [:provider :model :thinking]))]
+    (cond-> {:cwd (workspace app)}
+      (:session-name options) (assoc :name (:session-name options))
+      (seq config) (assoc :config config))))
 
 (defn- create-session! [app data]
   (let [base (default-session-params app)
@@ -321,7 +318,7 @@
 
 (defn- select-start-session! [app sessions preferred]
   (let [requested (or preferred (get-in app [:options :session-id]))
-        cwd (.resolve path-module (or (get-in app [:options :cwd]) (.cwd js/process)))
+        cwd (.realpathSync fs (or (get-in app [:options :cwd]) (.cwd js/process)))
         selected (if requested
                    (some #(when (= requested (value-field % :id)) %) sessions)
                    (first (filter #(= cwd (.resolve path-module (value-field % :cwd))) sessions)))]
@@ -332,10 +329,57 @@
       :else (-> (create-session! app {})
                 (.then #(hydrate-session! app (value-field % :id) true))))))
 
-(defn- boot! [app preferred-session-id]
+(defn- setup-params [app]
+  (let [options (:options app)
+        config (non-nil-map (select-keys options [:provider :model :thinking]))
+        sid (session-id-from @(:state app))]
+    (cond-> config
+      sid (assoc :session-id sid))))
+
+(declare boot-sessions! update-session-state!)
+
+(defn- run-setup! [app startup? preferred-session-id]
+  (swap! (:state app) assoc :setup {:status :running})
+  (-> (call! app "setup.run" (cond-> (setup-params app) (not startup?) (assoc :force? true))
+             {:mutation? true :timeout-ms (* 15 60 1000)})
+      (.then
+       (fn [wire-result]
+         (let [result (decode wire-result)
+               session (value-field result :session)]
+           (swap! (:state app) assoc :setup (assoc result :status :ready))
+           (if session
+             (do
+               (update-session-state! app session)
+               (load-models! app false))
+             (boot-sessions! app preferred-session-id)))))
+      (.catch
+       (fn [setup-error]
+         (let [cancelled? (= "cancelled" (:code (ex-data setup-error)))]
+           (swap! (:state app) assoc
+                  :setup {:status (if cancelled? :cancelled :error)
+                          :error (when-not cancelled? (ex-message setup-error))}
+                  :notice {:kind (if cancelled? :info :error)
+                           :message (if cancelled?
+                                      "Setup cancelled. Run /setup or /login when you are ready."
+                                      (str "Setup needs attention: " (ex-message setup-error)))})
+           nil)))))
+
+(defn- boot-sessions! [app preferred-session-id]
   (-> (load-sessions! app)
       (.then #(select-start-session! app % preferred-session-id))
       (.then (fn [_] (load-models! app false)))))
+
+(defn- boot! [app preferred-session-id]
+  (if (false? (get-in app [:options :setup?]))
+    (boot-sessions! app preferred-session-id)
+    (-> (call! app "setup.status" (setup-params app))
+        (.then
+         (fn [wire-result]
+           (let [result (decode wire-result)]
+             (swap! (:state app) assoc :setup result)
+             (if (value-field result :ready?)
+               (boot-sessions! app preferred-session-id)
+               (run-setup! app true preferred-session-id))))))))
 
 (defn- make-client! [app]
   (let [options (:options app)
@@ -425,7 +469,6 @@
                             #(-> %
                                  (update :connection (fn [connection]
                                                        (-> connection (assoc :status :ready) (dissoc :error))))
-                                 (assoc :notice nil)
                                  operation-notice))
                      result)))
                (fn [connect-error]
@@ -466,6 +509,7 @@
           :view (model/empty-state)
           :sessions []
           :models []
+          :setup {:status :checking}
           :history nil
           :history-by-session {}
           :widgets-by-session {}
@@ -782,15 +826,15 @@
     (let [content (edited-queue-content (value-field item :content) (:text data))]
       (-> (mutation! app "session.queue.update"
                      {:session-id sid :queue-id queue-id :content content})
-        (.then
-         (fn [wire-result]
-           (let [item (or (value-field (decode wire-result) :item)
-                          (decode wire-result))
-                 id (value-field item :id)]
-             (swap! (:state app) update-in [:view :queue]
-                    #(mapv (fn [existing]
-                             (if (= id (value-field existing :id)) item existing)) %))
-             item)))))))
+          (.then
+           (fn [wire-result]
+             (let [item (or (value-field (decode wire-result) :item)
+                            (decode wire-result))
+                   id (value-field item :id)]
+               (swap! (:state app) update-in [:view :queue]
+                      #(mapv (fn [existing]
+                               (if (= id (value-field existing :id)) item existing)) %))
+               item)))))))
 
 (defn- queue-drop! [app data]
   (let [sid (session-id-from @(:state app))]
@@ -871,6 +915,8 @@
                    (.then (fn [_] session)))))))
 
       :models (load-models! app (boolean (:refresh? data)))
+
+      :setup (run-setup! app false nil)
 
       :set-model
       (-> (mutation! app "session.configure"

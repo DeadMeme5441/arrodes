@@ -3,7 +3,7 @@ set -eu
 launch_cwd=$PWD
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 if ! command -v bun >/dev/null 2>&1; then
-  printf '%s\n' 'Arrodes TUI requires Bun 1.3.14+. The legacy CLI is bin/arrodes-cli.' >&2
+  printf '%s\n' 'Arrodes requires Bun 1.3.14+.' >&2
   exit 127
 fi
 exec bun "$root/scripts/tui.ts" --cwd "$launch_cwd" "$@"

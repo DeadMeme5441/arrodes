@@ -48,16 +48,20 @@
         (is (empty? (packages/list-packages home directory))))
       (finally (fixtures/remove-directory! directory)))))
 
-(deftest project-package-cannot-copy-its-own-staging-root
+(deftest project-package-installs-under-home-without-writing-the-repository
   (let [directory (fixtures/temp-directory)
         home (str directory "/separate-home")
-        project (make-package! (str directory "/project") "(fn [_] {:version 1})")]
+        project (make-package! (str directory "/project") "(fn [_] {:version 1})")
+        subdir (str project "/src/deep")]
     (try
-      (let [error (try (packages/install! home project project {:scope :project :name "self"}) nil
-                       (catch clojure.lang.ExceptionInfo error error))]
-        (is (str/ends-with? (or (:error/code (ex-data error)) "") "source-overlap")))
-      (is (= "(fn [_] {:version 1})" (slurp (str project "/extension.clj"))))
-      (is (empty? (packages/list-packages home project)))
+      (u/ensure-dir! (str project "/.git"))
+      (u/ensure-dir! subdir)
+      (let [installed (packages/install! home subdir project {:scope :project :name "self"})
+            project-state (u/project-dir home project)]
+        (is (.startsWith (u/path (:path installed)) (u/path project-state)))
+        (is (= "(fn [_] {:version 1})" (slurp (str project "/extension.clj"))))
+        (is (not (.exists (io/file project ".arrodes"))))
+        (is (= ["self"] (mapv :name (packages/list-packages home project)))))
       (finally (fixtures/remove-directory! directory)))))
 
 (deftest global-local-package-update-keeps-installing-cwd-source

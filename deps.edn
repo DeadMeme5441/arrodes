@@ -11,9 +11,6 @@
  :aliases
  {:host {:extra-paths ["hosts/rpc"]
          :main-opts ["-m" "arrodes.rpc-main"]}
-  :run {:extra-paths ["hosts/rpc" "hosts/cli"]
-        :extra-deps {org.jline/jline {:mvn/version "3.30.17"}}
-        :main-opts ["-m" "arrodes.cli"]}
   :test {:extra-paths ["test" "hosts/rpc"]
          :main-opts ["-m" "arrodes.test-runner"]}
   :cljs {:extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
