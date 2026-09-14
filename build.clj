@@ -58,6 +58,6 @@
              :artifact "target/arrodes-rpc.jar"
              :class-dir "target/classes-rpc"
              :source-dirs host-source-dirs
-             :ns-compile '[arrodes.rpc-main]
+             :ns-compile '[arrodes.runtime arrodes.commands arrodes.rpc-main]
              :main 'arrodes.rpc-main}))
 

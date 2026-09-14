@@ -187,8 +187,8 @@
           (let [rt-b (runtime/open! {:cwd repository-b :home home
                                      :complete-fn (fn [_ _] (answer "B"))})]
             (try
-              (is (= (str (u/project-dir home cwd-a) "/data") (:data-dir rt-a)))
-              (is (= (str (u/project-dir home repository-b) "/data") (:data-dir rt-b)))
+              (is (= (u/resolve-path (u/project-dir home cwd-a) "data") (:data-dir rt-a)))
+              (is (= (u/resolve-path (u/project-dir home repository-b) "data") (:data-dir rt-b)))
               (is (not= (:data-dir rt-a) (:data-dir rt-b)))
               (is (= (u/real-path cwd-a)
                      (:cwd (runtime/create-session! rt-a {:config fixtures/config}))))
@@ -225,7 +225,7 @@
                     nil
                     (catch clojure.lang.ExceptionInfo error error))]
         (is (= "legacy-data" (:error/code (ex-data error))))
-        (is (= legacy-data (:path (ex-data error)))))
+        (is (= (u/canonical-path legacy-data) (:path (ex-data error)))))
       (let [reopened (runtime/open! options)]
         (try
           (is (= 1 (count (runtime/list-sessions reopened {}))))

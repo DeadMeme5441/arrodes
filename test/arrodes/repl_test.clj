@@ -1,6 +1,7 @@
 (ns arrodes.repl-test
   (:require [arrodes.runtime :as runtime]
             [arrodes.runtime-test :as fixtures]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is]]))
 
 (deftest failed-form-preserves-prior-effects-and-repl-history-is-session-local
@@ -77,7 +78,7 @@
                    (runtime/evaluate! rt sid "(println \"program\") 42"
                                       {:on-event (fn [_] (println "host"))}))]
       (is (= 42 (:value result)))
-      (is (= "program\n" (get-in result [:details :stdout])))
+      (is (= ["program"] (str/split-lines (get-in result [:details :stdout]))))
       (is (.contains (str host-output) "host")))))
 
 (deftest deeply-nested-durable-values-use-an-envelope-safe-result

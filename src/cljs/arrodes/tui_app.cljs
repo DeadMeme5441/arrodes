@@ -390,6 +390,7 @@
           :process-cwd (:runtime-root options)
           :initialize initialize
           :request-timeout-ms (:request-timeout-ms options)
+          :handshake-timeout-ms (:handshake-timeout-ms options)
           :initialize-timeout-ms (or (:initialize-timeout-ms options) 60000)
           :shutdown-timeout-ms (or (:shutdown-timeout-ms options) 5000)
           :on-event #(event! app %)

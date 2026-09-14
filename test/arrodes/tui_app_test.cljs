@@ -260,6 +260,8 @@
         root (or (aget (.-env js/process) "ARRODES_TUI_ROOT") (.cwd js/process))
         options {:runtime-root root :cwd temporary :home (.join path temporary "home")
                  :trust false :setup? false
+                 ;; The instrumented fixture cold-loads source before emitting hello.
+                 :handshake-timeout-ms 60000
                  :rpc-command ["clojure" "-Srepro" "-Sdeps"
                                "{:paths [\"src/clj\" \"src/cljc\" \"hosts/rpc\" \"resources\"]}"
                                "-M" script]}
