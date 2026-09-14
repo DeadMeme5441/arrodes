@@ -36,17 +36,21 @@
 
 (def ^:private openai-client-id "app_EMoamEEZ73f0CkXaXp7hrann")
 (def ^:private openai-token-url "https://auth.openai.com/oauth/token")
-(def ^:private anthropic-client-id "9d1c250a-e61b-44d9-88ed-5944d1962f5e")
-(def ^:private anthropic-token-url "https://platform.claude.com/v1/oauth/token")
-(def ^:private github-client-id "Iv1.b507a08c87ecfe98")
-(def ^:private copilot-headers
-  {"User-Agent" "GitHubCopilotChat/0.35.0"
-   "Editor-Version" "vscode/1.107.0"
-   "Editor-Plugin-Version" "copilot-chat/0.35.0"
-   "Copilot-Integration-Id" "vscode-chat"})
+(def ^:private anthropic-oauth-prefix "sk-ant-oat01-")
+
+(defn anthropic-oauth-token?
+  "Return true for the known Claude subscription OAuth access-token format."
+  [value]
+  (and (string? value)
+       (str/starts-with? (str/trim value) anthropic-oauth-prefix)))
 
 (defn- fail! [code message data]
   (throw (ex-info message (assoc data :error/code (name code) :error/type code))))
+
+(defn- reject-anthropic-oauth! [provider-id]
+  (fail! :auth/unsupported-oauth
+         "Anthropic subscription OAuth is not supported; use a Claude Console API key, Amazon Bedrock, or Google Vertex AI"
+         {:provider provider-id}))
 
 (defn- check-open! [store]
   (when @(:closed? store)
@@ -137,11 +141,11 @@
 
 (defn- credential-snapshot [store provider-id]
   (with-store-lock
-   store
-   (fn []
-     (let [state (read-state* store)]
-       {:credential (get-in state [:providers provider-id])
-        :revision (long (or (get-in state [:revisions provider-id]) 0))}))))
+    store
+    (fn []
+      (let [state (read-state* store)]
+        {:credential (get-in state [:providers provider-id])
+         :revision (long (or (get-in state [:revisions provider-id]) 0))}))))
 
 (defn- next-revision [state provider-id]
   (update-in state [:revisions provider-id] (fnil inc 0)))
@@ -151,23 +155,23 @@
 
 (defn put-credential! [store provider-id value]
   (with-store-lock
-   store
-   (fn []
-     (let [state (read-state* store)]
-       (write-state* store (-> state
-                               (next-revision provider-id)
-                               (assoc-in [:providers provider-id] value)))
-       value))))
+    store
+    (fn []
+      (let [state (read-state* store)]
+        (write-state* store (-> state
+                                (next-revision provider-id)
+                                (assoc-in [:providers provider-id] value)))
+        value))))
 
 (defn delete-credential! [store provider-id]
   (with-store-lock
-   store
-   (fn []
-     (let [state (read-state* store)]
-       (write-state* store (-> state
-                               (next-revision provider-id)
-                               (update :providers dissoc provider-id)))
-       nil))))
+    store
+    (fn []
+      (let [state (read-state* store)]
+        (write-state* store (-> state
+                                (next-revision provider-id)
+                                (update :providers dissoc provider-id)))
+        nil))))
 
 (defn- refresh-lock [store provider-id]
   (or (get @(:refresh-locks store) provider-id)
@@ -180,27 +184,27 @@
 (defn- replace-credential-if-current!
   [store provider-id expected-revision expected value]
   (with-store-lock
-   store
-   (fn []
-     (let [state (read-state* store)]
-       (when (and (= expected-revision
-                     (long (or (get-in state [:revisions provider-id]) 0)))
-                  (= expected (get-in state [:providers provider-id])))
-         (write-state* store (-> state
-                                 (next-revision provider-id)
-                                 (assoc-in [:providers provider-id] value)))
-         true)))))
+    store
+    (fn []
+      (let [state (read-state* store)]
+        (when (and (= expected-revision
+                      (long (or (get-in state [:revisions provider-id]) 0)))
+                   (= expected (get-in state [:providers provider-id])))
+          (write-state* store (-> state
+                                  (next-revision provider-id)
+                                  (assoc-in [:providers provider-id] value)))
+          true)))))
 
 (defn credential-info [store]
   (with-store-lock
-   store
-   (fn []
-     (into {}
-           (map (fn [[provider c]]
-                  [provider (cond-> {:type (:type c)}
-                              (:expires-at c) (assoc :expires-at (:expires-at c))
-                              (:source c) (assoc :source (:source c)))])
-                (:providers (read-state* store)))))))
+    store
+    (fn []
+      (into {}
+            (map (fn [[provider c]]
+                   [provider (cond-> {:type (:type c)}
+                               (:expires-at c) (assoc :expires-at (:expires-at c))
+                               (:source c) (assoc :source (:source c)))])
+                 (:providers (read-state* store)))))))
 
 (defn close! [store]
   (when (compare-and-set! (:closed? store) false true)
@@ -457,106 +461,22 @@
              0)]
       (assoc c :account-id (jwt-account-id (:access-token c))))))
 
-(defn- login-anthropic [options]
-  (let [{:keys [verifier challenge]} (pkce)
-        redirect "http://localhost:53692/callback"
-        callback (callback-server (or (:callback-host options) "127.0.0.1") 53692 "/callback" verifier)
-        scopes "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
-        url (str "https://claude.ai/oauth/authorize?"
-                 (form-body {:code "true" :client_id anthropic-client-id
-                             :response_type "code" :redirect_uri redirect :scope scopes
-                             :code_challenge challenge :code_challenge_method "S256"
-                             :state verifier}))]
-    (try
-      (notify! options {:type :auth-url :url url
-                        :instructions "Complete Anthropic login in a browser; the local callback or pasted code will finish login."})
-      (let [code (await-browser-code options callback verifier)]
-        (when-not (seq code) (fail! :auth/missing-code "No OAuth authorization code was received" {}))
-        (token-credential
-         :anthropic
-         (request! {:method :post :url anthropic-token-url
-                    :body {:grant_type "authorization_code" :client_id anthropic-client-id
-                           :code code :state verifier :redirect_uri redirect
-                           :code_verifier verifier}})
-         300000))
-      (finally (when callback (.stop ^HttpServer (:server callback) 0))))))
-
-(defn- normalize-domain [value]
-  (let [s (str/trim (str value))]
-    (if (str/blank? s)
-      "github.com"
-      (try
-        (.getHost (URI/create (if (str/includes? s "://") s (str "https://" s))))
-        (catch Exception _ (fail! :auth/domain "Invalid GitHub Enterprise domain" {}))))))
-
-(defn copilot-base-url [token enterprise-domain]
-  (or (when-let [[_ host] (and token (re-find #"(?:^|;)proxy-ep=([^;]+)" token))]
-        (str "https://" (str/replace host #"^proxy\." "api.")))
-      (when (and enterprise-domain (not= enterprise-domain "github.com"))
-        (str "https://copilot-api." enterprise-domain))
-      "https://api.individual.githubcopilot.com"))
-
-(defn copilot-token! [github-token enterprise-domain]
-  (let [domain (or enterprise-domain "github.com")
-        response (request! {:url (str "https://api." domain "/copilot_internal/v2/token")
-                            :headers (merge copilot-headers
-                                            {"Authorization" (str "Bearer " github-token)})})
-        token (:token response)
-        expires (:expires_at response)]
-    (when-not (and (string? token) (number? expires))
-      (fail! :auth/token-response "Invalid GitHub Copilot token response" {}))
-    {:type :oauth :access-token token :refresh-token github-token
-     :expires-at (- (* 1000 (long expires)) 300000)
-     :enterprise-domain enterprise-domain :source :stored-oauth}))
-
-(defn- login-copilot [options]
-  (let [domain (normalize-domain
-                (or (:enterprise-domain options)
-                    (when (:input options)
-                      (prompt! options {:type :text
-                                        :message "GitHub Enterprise domain (blank for github.com)"
-                                        :placeholder "github.com"}))))
-        device (request! {:method :post :url (str "https://" domain "/login/device/code")
-                          :headers {"User-Agent" "GitHubCopilotChat/0.35.0"}
-                          :form {:client_id github-client-id :scope "read:user"}})
-        device-code (:device_code device) user-code (:user_code device)
-        verification (:verification_uri device) interval (long (or (:interval device) 5))
-        expires (long (or (:expires_in device) 900))]
-    (when-not (and (seq device-code) (seq user-code) (seq verification))
-      (fail! :auth/device-response "Invalid GitHub device-code response" {}))
-    (let [uri (URI/create verification)]
-      (when-not (contains? #{"http" "https"} (.getScheme uri))
-        (fail! :auth/device-response "GitHub returned an unsafe verification URL" {})))
-    (notify! options {:type :device-code :user-code user-code
-                      :verification-uri verification :interval-seconds interval
-                      :expires-in-seconds expires})
-    (let [github-token
-          (poll! options interval expires
-                 (fn []
-                   (let [r (request! {:method :post
-                                      :url (str "https://" domain "/login/oauth/access_token")
-                                      :headers {"User-Agent" "GitHubCopilotChat/0.35.0"}
-                                      :form {:client_id github-client-id :device_code device-code
-                                             :grant_type "urn:ietf:params:oauth:grant-type:device_code"}})]
-                     (cond
-                       (:access_token r) {:status :complete :value (:access_token r)}
-                       (= "authorization_pending" (:error r)) {:status :pending}
-                       (= "slow_down" (:error r)) {:status :slow-down}
-                       :else {:status :failed :message (or (:error_description r) (:error r))}))))]
-      (copilot-token! github-token (when-not (= domain "github.com") domain)))))
-
 (defn login!
   "Run explicit API-key or OAuth login and persist the resulting credential."
   [store provider-id options]
   (let [provider-id (keyword provider-id)
+        anthropic? (or (= :anthropic provider-id)
+                       (true? (:anthropic-profile? options)))
         api-key (:api-key options)
         mode (keyword (or (:type options)
                           (when (:oauth options) :oauth)
                           (when api-key :api-key)
-                          (when (or (contains? #{:codex-backend :openai-codex :github-copilot} provider-id)
-                                    (and (= :anthropic provider-id) (:code options)))
+                          (when (and anthropic? (:code options)) :oauth)
+                          (when (contains? #{:codex-backend :openai-codex} provider-id)
                             :oauth)
                           :api-key))
+        _ (when (and anthropic? (= :oauth mode))
+            (reject-anthropic-oauth! provider-id))
         credential
         (case mode
           :api-key
@@ -565,20 +485,19 @@
                                              :message (str "Enter API key for " (name provider-id))}))]
             (when (str/blank? secret)
               (fail! :auth/missing-key "API key cannot be blank" {:provider provider-id}))
+            (when (and anthropic? (anthropic-oauth-token? secret))
+              (reject-anthropic-oauth! provider-id))
             (cond-> {:type :api-key :secret secret :source :stored-api-key}
               (:base-url options) (assoc :base-url (:base-url options))
               (:project options) (assoc :project (:project options))
               (:location options) (assoc :location (:location options))))
           :oauth
-          (cond
-            (contains? #{:codex-backend :openai-codex} provider-id)
+          (if (contains? #{:codex-backend :openai-codex} provider-id)
             (if (= :device-code (keyword (or (:flow options) :browser)))
               (login-openai-device options)
               (login-openai-browser options))
-            (= :anthropic provider-id) (login-anthropic options)
-            (= :github-copilot provider-id) (login-copilot options)
-            :else (fail! :auth/unsupported-oauth "Provider does not support OAuth login"
-                         {:provider provider-id}))
+            (fail! :auth/unsupported-oauth "Provider does not support OAuth login"
+                   {:provider provider-id}))
           (fail! :auth/type "Unknown authentication type" {:type mode}))]
     (put-credential! store provider-id credential)
     {:provider provider-id :status :logged-in :type (:type credential)
@@ -610,17 +529,6 @@
              account-id (jwt-account-id (:access-token x))]
          (cond-> x account-id (assoc :account-id account-id)))
 
-       (= :anthropic provider-id)
-       (token-credential
-        provider-id
-        (request! {:method :post :url anthropic-token-url
-                   :body {:grant_type "refresh_token" :client_id anthropic-client-id
-                          :refresh_token refresh-token}})
-        300000)
-
-       (= :github-copilot provider-id)
-       (copilot-token! refresh-token (:enterprise-domain c))
-
        :else
        (fail! :auth/unsupported-refresh "Provider does not support OAuth refresh"
               {:provider provider-id})))))
@@ -628,32 +536,40 @@
 (defn refresh!
   "Refresh one stored OAuth credential. API-key credentials are unchanged."
   [store provider-id options]
-  (let [provider-id (keyword provider-id)
-        attempted (credential-snapshot store provider-id)
-        c (:credential attempted)]
-    (when-not c
-      (fail! :auth/not-configured "Provider has no stored credential"
-             {:provider provider-id}))
-    (locking (refresh-lock store provider-id)
-      (let [current (credential-snapshot store provider-id)]
-        (if (not= (:revision attempted) (:revision current))
-          {:provider provider-id :status :superseded
-           :type (some-> current :credential :type)}
-          (if-not (= :oauth (:type c))
-            {:provider provider-id :status :configured :type :api-key}
-            (let [updated (refresh-credential! provider-id c)]
-              (ensure-active! options)
-              (if (replace-credential-if-current!
-                   store provider-id (:revision attempted) c updated)
-                {:provider provider-id :status :refreshed :type :oauth
-                 :expires-at (:expires-at updated)}
-                {:provider provider-id :status :superseded
-                 :type (some-> (credential store provider-id) :type)}))))))))
+  (let [provider-id (keyword provider-id)]
+    (let [attempted (credential-snapshot store provider-id)
+          c (:credential attempted)]
+      (when-not c
+        (fail! :auth/not-configured "Provider has no stored credential"
+               {:provider provider-id}))
+      (when (and (= :anthropic provider-id)
+                 (= :oauth (:type c)))
+        (reject-anthropic-oauth! provider-id))
+      (locking (refresh-lock store provider-id)
+        (let [current (credential-snapshot store provider-id)]
+          (if (not= (:revision attempted) (:revision current))
+            {:provider provider-id :status :superseded
+             :type (some-> current :credential :type)}
+            (if-not (= :oauth (:type c))
+              {:provider provider-id :status :configured :type :api-key}
+              (let [updated (refresh-credential! provider-id c)]
+                (ensure-active! options)
+                (if (replace-credential-if-current!
+                     store provider-id (:revision attempted) c updated)
+                  {:provider provider-id :status :refreshed :type :oauth
+                   :expires-at (:expires-at updated)}
+                  {:provider provider-id :status :superseded
+                   :type (some-> (credential store provider-id) :type)})))))))))
 
 (defn ensure-fresh!
   "Refresh an OAuth credential only when its guarded expiry has passed."
   [store provider-id options]
   (when-let [c (credential store provider-id)]
+    (when (and (= :anthropic (keyword provider-id))
+               (or (= :oauth (:type c))
+                   (anthropic-oauth-token?
+                    (or (:secret c) (:access-token c)))))
+      (reject-anthropic-oauth! (keyword provider-id)))
     (if (and (= :oauth (:type c))
              (number? (:expires-at c))
              (<= (:expires-at c) (System/currentTimeMillis)))

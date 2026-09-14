@@ -11,7 +11,7 @@
            (java.util.concurrent.atomic AtomicBoolean)))
 
 (def protocol-version 1)
-(def version "0.1.0")
+(def version "0.1.1")
 (def ^:private default-workers 8)
 (def ^:private default-queue-size 128)
 (def ^:private default-line-limit (* 16 1024 1024))
@@ -36,8 +36,8 @@
 (defn- option-int [options key default minimum maximum]
   (let [value (get options key default)]
     (value/check! (and (integer? value) (<= minimum value maximum)) :invalid-options
-              (str (name key) " is outside its supported range")
-              {:option key :minimum minimum :maximum maximum})
+                  (str (name key) " is outside its supported range")
+                  {:option key :minimum minimum :maximum maximum})
     (int value)))
 
 (defn- qualified-name [value]
@@ -66,7 +66,6 @@
                  (value/error-map error)
                  {:code "internal-error" :message (str error) :data {}})]
     (update mapped :data #(or % {}))))
-
 
 (defn json-str
   "Encode a command/public value without losing namespaced keys or scalar types."
@@ -147,8 +146,8 @@
 (defn- reserve-host! [context id promise]
   (locking (:pending-host context)
     (value/check! (< (count @(:pending-host context)) (:host-limit context))
-              :host-busy "Too many host requests are awaiting responses"
-              {:maximum (:host-limit context)})
+                  :host-busy "Too many host requests are awaiting responses"
+                  {:maximum (:host-limit context)})
     (swap! (:pending-host context) assoc id promise)))
 
 (defn- await-host! [context id promise timeout-ms]
@@ -157,11 +156,11 @@
       (loop []
         (when (or @(:closing? context) (.isInterrupted (Thread/currentThread)))
           (value/fail! :cancelled "Host request was cancelled"
-                   {:host-request-id id :local-host-cancel? true}))
+                       {:host-request-id id :local-host-cancel? true}))
         (let [remaining (- deadline (System/currentTimeMillis))]
           (when-not (pos? remaining)
             (value/fail! :host-timeout "Host did not answer in time"
-                     {:host-request-id id :timeout-ms timeout-ms :local-host-cancel? true}))
+                         {:host-request-id id :timeout-ms timeout-ms :local-host-cancel? true}))
           (let [answer (deref promise (long (min remaining 1000)) ::waiting)]
             (if (= ::waiting answer)
               (recur)
@@ -170,8 +169,8 @@
                 :cancelled (value/fail! :cancelled "Host request was cancelled" {:host-request-id id})
                 :error (let [remote (:error answer)]
                          (value/fail! (keyword (or (:code remote) "host-error"))
-                                  (or (:message remote) "Host request failed")
-                                  (assoc (or (:data remote) {}) :host-request-id id)))
+                                      (or (:message remote) "Host request failed")
+                                      (assoc (or (:data remote) {}) :host-request-id id)))
                 (value/fail! :invalid-host-response "Host returned an invalid response" {:host-request-id id}))))))
       (finally
         (swap! (:pending-host context) dissoc id)))))
@@ -220,8 +219,8 @@
   (value/check! (map? params) :invalid-params "Initialize params must be an object" {})
   (locking (:initialize-lock context)
     (value/check! (= :new @(:initialize-state context)) :already-initialized
-              "This connection may initialize a runtime only once"
-              {:state @(:initialize-state context)})
+                  "This connection may initialize a runtime only once"
+                  {:state @(:initialize-state context)})
     (reset! (:initialize-state context) :opening)
     (try
       (let [runtime-api (resolve-runtime-api)
@@ -277,8 +276,8 @@
     (when (= :opening @(:initialize-state context))
       (deref (:initialize-done context) (long (:host-timeout-ms context)) :timeout))
     (value/check! (= :open @(:initialize-state context)) :not-initialized
-              "Send initialize and await its response before invoking commands"
-              {:state @(:initialize-state context)})
+                  "Send initialize and await its response before invoking commands"
+                  {:state @(:initialize-state context)})
     (value/check! (map? params) :invalid-params "Request params must be an object" {})
     (let [params (if (contains? #{"capability.attach" "capability.detach"} method)
                    (assoc params :connection-id (:connection-id context))
@@ -337,16 +336,16 @@
   (let [id (:id request)
         method (:method request)]
     (value/check! (and (string? id) (not (str/blank? id))) :invalid-request
-              "Request id must be a non-empty string" {})
+                  "Request id must be a non-empty string" {})
     (value/check! (and (string? method) (not (str/blank? method))) :invalid-request
-              "Request method must be a non-empty string" {:id id})
+                  "Request method must be a non-empty string" {:id id})
     (let [responded (AtomicBoolean. false)
           phase (atom :queued)
           token (Object.)
           task (FutureTask. ^Callable (request-task context request responded phase token))]
       (locking (:inflight context)
         (value/check! (not (contains? @(:inflight context) id)) :duplicate-id
-                  "A request with this id has not finished" {:id id})
+                      "A request with this id has not finished" {:id id})
         (swap! (:inflight context) assoc id
                {:future task :responded responded :phase phase :token token}))
       (try
@@ -410,7 +409,7 @@
               descriptor (some #(when (= capability-name (:name %)) %) (:capabilities listed))]
           (when (= (:connection-id context) (:owner descriptor))
             ((:dispatch context) runtime "capability.detach"
-             {:session-id session-id :name capability-name :connection-id (:connection-id context)})))
+                                 {:session-id session-id :name capability-name :connection-id (:connection-id context)})))
         (catch Throwable diagnostic
           (binding [*out* *err*]
             (println "RPC capability cleanup failed:" (ex-message diagnostic)))))))
@@ -479,8 +478,8 @@
     "host-response" (do (accept-host-response! context message) :continue)
     "host-cancel" (do (accept-host-response! context message) :continue)
     (value/fail! :invalid-request "Unknown transport message type"
-             {:type (:type message)
-              :supported ["request" "cancel" "host-response" "host-cancel"]})))
+                 {:type (:type message)
+                  :supported ["request" "cancel" "host-response" "host-cancel"]})))
 
 (defn serve!
   "Serve protocol-1 JSONL on stdin/stdout until shutdown or EOF.

@@ -1,4 +1,4 @@
-"""Stage a private macOS/Linux release from verified artifacts."""
+"""Stage verified executables and source materials for the official Arrodes repository."""
 import hashlib
 import json
 import os
@@ -15,18 +15,19 @@ def main():
     root = Path(__file__).resolve().parent.parent
     repository = os.environ.get("GITHUB_REPOSITORY", "DeadMeme5441/arrodes")
     if repository != "DeadMeme5441/arrodes":
-        raise RuntimeError("Release publishing is restricted to the private Arrodes repository")
+        raise RuntimeError("Release publishing is restricted to the official Arrodes repository")
     metadata = json.loads(gh("api", f"repos/{repository}"))
-    if metadata.get("private") is not True:
-        raise RuntimeError("Refusing to publish: the repository is not private")
+    if metadata.get("full_name") != repository:
+        raise RuntimeError("Repository identity does not match the release destination")
     version = json.loads((root / "package.json").read_text())["version"]
     tag = os.environ.get("GITHUB_REF_NAME", "")
     if tag != f"v{version}":
         raise RuntimeError(f"Release tag must match application version v{version}")
     directory = Path(os.environ.get("ARRODES_RELEASE_DIRECTORY", str(root / "target" / "release")))
     assets = []
-    for target in ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]:
-        binary = directory / f"arrodes-{target}"
+    names = [f"arrodes-{target}" for target in ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]]
+    for name in [*names, "arrodes-third-party-sources.tar.gz"]:
+        binary = directory / name
         checksum = binary.with_name(binary.name + ".sha256")
         expected = checksum.read_text().split()[0]
         with binary.open("rb") as stream:
@@ -34,8 +35,12 @@ def main():
         if actual != expected:
             raise RuntimeError(f"Checksum mismatch: {binary.name}")
         assets.extend([str(binary), str(checksum)])
+    notices = directory / "THIRD_PARTY_NOTICES.txt"
+    if notices.read_bytes() != (root / "THIRD_PARTY_NOTICES.txt").read_bytes():
+        raise RuntimeError("Release notices do not match the source revision")
+    assets.append(str(notices))
     if "--check" in sys.argv[1:]:
-        print(f"Private release {tag}: all four supported artifacts verified; nothing published")
+        print(f"Release {tag}: four executables, notices, and corresponding sources verified; nothing published")
         return
     existing = subprocess.run(["gh", "release", "view", tag, "--repo", repository, "--json", "assets"],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -52,7 +57,9 @@ def main():
          "Self-contained executables with SHA-256 checksums; no language runtimes to install. "
          "First-launch sign-in, persistent sessions, and all Arrodes state under ~/.arrodes. "
          "No project dotfolder. Windows remains experimental and is not included. "
-         "This release and its repository are private. macOS binaries are not Developer ID signed or notarized.",
+         "Includes third-party notices and corresponding sources. "
+         "Anthropic access uses API keys/cloud credentials; Claude.ai subscription OAuth and Copilot login are not supported. "
+         "macOS binaries are not Developer ID signed or notarized.",
          *assets], check=True)
 
 

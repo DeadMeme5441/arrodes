@@ -2,7 +2,7 @@
   (:require [clojure.tools.build.api :as b]))
 
 (def lib 'io.github.DeadMeme5441/arrodes)
-(def version "0.1.0")
+(def version "0.1.1")
 (def core-source-dirs ["src/clj" "src/cljc"])
 (def host-source-dirs (conj core-source-dirs "hosts/rpc"))
 

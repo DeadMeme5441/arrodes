@@ -4,7 +4,7 @@
 
 ### Checksum mismatch
 
-Do not run the file. Download both the executable and matching `.sha256` asset again from the private release. Confirm that the platform and architecture names match and that the checksum is verified before renaming the executable.
+Do not run the file. Download both the executable and matching `.sha256` asset again from [Releases](https://github.com/DeadMeme5441/arrodes/releases/latest). Confirm that the platform and architecture names match and that the checksum is verified before renaming the executable.
 
 ### Permission denied on macOS or Linux
 
@@ -18,7 +18,7 @@ Then place it on `PATH` as `arrodes`.
 
 ### macOS says the developer cannot be verified
 
-The private preview is not Developer ID signed or notarized. Verify the release checksum first, then use **System Settings → Privacy & Security → Open Anyway** if you trust the artifact. Do not bypass Gatekeeper for an unverified download.
+The macOS binaries are not Developer ID signed or notarized. Verify the release checksum first, then use **System Settings → Privacy & Security → Open Anyway** if you trust the artifact. Do not bypass Gatekeeper for an unverified download.
 
 ### Unsupported platform
 
@@ -37,6 +37,12 @@ Choose manual continuation and open the displayed URL yourself. Paste the reques
 ### Provider credentials are unavailable
 
 Run `/login` and select the provider again. Providers using ambient credentials must receive them through their documented environment; setup cannot create those credentials. API keys belong in the authentication flow, not `settings.edn`.
+
+### Claude.ai subscriptions or Copilot login from the private preview
+
+Claude.ai subscription OAuth and the previous Copilot login are not supported in the public release. Use an Anthropic Console API key, a supported cloud provider, or another supported provider through `/setup`. Existing sessions preserve their selected provider; use `/setup` in the affected session to choose a supported route.
+
+Old stored credentials are not deleted automatically. To remove one explicitly, initialize an RPC connection and call `auth.logout` with `provider` set to `anthropic` or `github-copilot`. Do not paste tokens into an issue or edit a live credential store.
 
 ### No models were returned
 

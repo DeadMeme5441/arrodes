@@ -58,7 +58,7 @@
       (let [base (str "http://127.0.0.1:" (-> server .getAddress .getPort))]
         (with-manager
           (fn [manager]
-            (provider/register! manager :no-auth
+            (provider/register! manager :github-copilot
                                 {:type :openai-compatible
                                  :base-url (str base "/none")
                                  :auth-strategy :none
@@ -72,11 +72,11 @@
             (provider/login! manager :header-auth
                              {:type :api-key :api-key "dummy-custom-key"})
             (is (= "none" (-> (provider/complete! manager request
-                                                   {:provider :no-auth})
-                               :response/parts first :text)))
+                                                  {:provider :github-copilot})
+                              :response/parts first :text)))
             (is (= "header" (-> (provider/complete! manager request
-                                                     {:provider :header-auth})
-                                 :response/parts first :text)))
+                                                    {:provider :header-auth})
+                                :response/parts first :text)))
             (is (= [{:path "/none/chat/completions"
                      :authorization nil :api-key nil}
                     {:path "/header/chat/completions"
@@ -90,13 +90,14 @@
     (fn [manager]
       (let [captured (atom nil)]
         (provider/login! manager :anthropic
-                         {:type :api-key :api-key "dummy-anthropic-key"})
+                         {:type :api-key :api-key "console-key-without-a-speculative-prefix"})
         (with-redefs [auth/request! (fn [request]
                                       (reset! captured request)
                                       {:data []})]
           (provider/refresh! manager :anthropic))
         (is (= "https://api.anthropic.com/v1/models" (:url @captured)))
-        (is (= "dummy-anthropic-key" (get-in @captured [:headers "x-api-key"])))
+        (is (= "console-key-without-a-speculative-prefix"
+               (get-in @captured [:headers "x-api-key"])))
         (is (= "2023-06-01" (get-in @captured [:headers "anthropic-version"])))
         (is (nil? (get-in @captured [:headers "Authorization"])))))))
 
@@ -123,37 +124,59 @@
              (:id (provider/model manager :replaceable "configured-new"))))
       (is (not (contains? @(:last-refresh manager) :replaceable))))))
 
-(deftest profile-alias-refreshes-the-credential-owner
+(deftest anthropic-alias-does-not-use-or-refresh-legacy-subscription-oauth
   (with-manager
     (fn [manager]
-      (let [captured (atom nil)
-            refreshes (atom 0)]
-        (auth/put-credential! (:auth manager) :anthropic
-                              {:type :oauth
-                               :access-token "expired-token"
-                               :refresh-token "owner-refresh-token"
-                               :expires-at 0
-                               :source :stored-oauth})
+      (let [legacy {:type :oauth
+                    :access-token "sk-ant-oat01-legacy"
+                    :refresh-token "owner-refresh-token"
+                    :expires-at Long/MAX_VALUE
+                    :source :stored-oauth}
+            calls (atom 0)]
+        (auth/put-credential! (:auth manager) :anthropic legacy)
         (provider/register! manager :claude-alias
                             {:type :profile-alias :provider :anthropic})
-        (with-redefs [auth/request! (fn [_]
-                                      (swap! refreshes inc)
-                                      {:access_token "fresh-token"
-                                       :expires_in 3600})
-                      sdk/complete (fn [provider-id canonical & options]
-                                     (reset! captured
-                                             {:provider provider-id
-                                              :request canonical
-                                              :options (apply hash-map options)})
-                                     {:response/provider provider-id
-                                      :response/model (:request/model canonical)
-                                      :response/parts [{:part/type :text
-                                                        :text "done"}]
-                                      :response/finish-reason :stop})]
-          (provider/complete! manager request {:provider :claude-alias}))
-        (is (= 1 @refreshes))
-        (is (= :anthropic (:provider @captured)))
-        (is (= "fresh-token" (get-in @captured [:options :config :auth-token])))))))
+        (with-redefs [auth/request! (fn [& _] (swap! calls inc))
+                      sdk/complete (fn [& _] (swap! calls inc))]
+          (let [completion-error
+                (try
+                  (provider/complete! manager request {:provider :claude-alias})
+                  nil
+                  (catch clojure.lang.ExceptionInfo e e))
+                refresh-error
+                (try
+                  (provider/refresh-auth! manager :claude-alias)
+                  nil
+                  (catch clojure.lang.ExceptionInfo e e))
+                login-errors
+                (mapv (fn [options]
+                        (try
+                          (provider/login! manager :claude-alias options)
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e)))
+                      [{:type :oauth}
+                       {:type :api-key :api-key "sk-ant-oat01-pasted"}])]
+            (is (= "auth"
+                   (:error/code (ex-data completion-error))))
+            (is (= "unsupported-oauth"
+                   (:error/code (ex-data refresh-error))))
+            (is (= ["unsupported-oauth" "unsupported-oauth"]
+                   (mapv #(-> % ex-data :error/code) login-errors)))))
+        (is (zero? @calls))
+        (is (= legacy (auth/credential (:auth manager) :anthropic)))))))
+
+(deftest explicit-logout-removes-a-legacy-copilot-credential
+  (with-manager
+    (fn [manager]
+      (auth/put-credential! (:auth manager) :github-copilot
+                            {:type :oauth
+                             :access-token "legacy"
+                             :refresh-token "legacy-refresh"
+                             :source :stored-oauth})
+      (is (nil? (get @(:profiles manager) :github-copilot)))
+      (is (= {:provider :github-copilot :status :logged-out}
+             (provider/logout! manager :github-copilot)))
+      (is (nil? (auth/credential (:auth manager) :github-copilot))))))
 
 (deftest provider-stream-errors-fail-and-close-the-sdk-stream
   (with-manager
@@ -165,7 +188,7 @@
                          "\"response\":{\"model\":\"test-model\","
                          "\"error\":{\"message\":\"provider exploded\"}}}\n\n")
             body (proxy [ByteArrayInputStream]
-                       [(.getBytes payload StandardCharsets/UTF_8)]
+                        [(.getBytes payload StandardCharsets/UTF_8)]
                    (close []
                      (reset! closed? true)
                      (proxy-super close)))
@@ -178,8 +201,8 @@
                                :expires-at Long/MAX_VALUE
                                :source :stored-oauth})
         (with-redefs [sdk-http/sse-response (fn [request]
-                                             (reset! captured request)
-                                             {:status 200 :headers {} :body body})]
+                                              (reset! captured request)
+                                              {:status 200 :headers {} :body body})]
           (try
             (provider/complete! manager request {:provider :codex-backend})
             (catch clojure.lang.ExceptionInfo e

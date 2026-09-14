@@ -1,0 +1,54 @@
+ARRODES THIRD-PARTY NOTICES
+
+Arrodes includes third-party software. Copyright notices and license terms shipped by each component are preserved under licenses/ and java/legal/ inside every native release payload. The complete corresponding source and build inputs described below are distributed as the release asset arrodes-third-party-sources.tar.gz; its SOURCES.json and SHA256SUMS files identify every included archive.
+
+BUN 1.3.14
+
+The native launcher embeds Bun 1.3.14 at commit 0d9b296af33f2b851fcbf4df3e9ec89751734ba4. Bun's verbatim upstream notice is at licenses/Bun/LICENSE.md. Bun statically links JavaScriptCore/WebKit, including LGPL-covered code, and tinycc under LGPL-2.1. The source companion includes Arrodes source, Bun source and build files, Bun's patches, WebKit/JavaScriptCore commit 5488984d20e0dbfe4be2c3ba8fb18eb81a5e0e8b, and oven-sh/tinycc commit 12882eee073cfe5c7621bcfadf679e1372d4537b. These inputs and the companion rebuild instructions permit modification and relinking. Full LGPL-2.1 terms are at licenses/common/LGPL-2.1.txt and are also preserved from JNA's META-INF/LGPL2.1 file in the Maven notice tree; JNA itself is used under its independent Apache-2.0 option described below.
+
+ECLIPSE TEMURIN / OPENJDK 21.0.12.1+1
+
+The bundled jlink runtime is derived from Eclipse Temurin 21.0.12.1+1. Complete GPLv2, Classpath Exception, OpenJDK Assembly Exception, additional-license information, and native third-party notices are preserved verbatim in java/legal/ within the payload. The source companion includes Adoptium's official OpenJDK21U-jdk-sources_21.0.12.1_1.tar.gz release asset for vendor source commit 1c417fbfc2f70ab03a565b0af0a5a3c6f5e15ad6, Temurin build scripts at e6ba7dec3d07654074559310376a3ae89da5f4ac, and the published build-provenance metadata for each supported platform.
+
+MAVEN RUNTIME COMPONENTS
+
+The payload's licenses/maven/ tree preserves the legal and POM metadata present in each JAR. The full common license texts omitted by some JARs are at licenses/common/. JNA's upstream dual-license notice is at licenses/JNA/LICENSE; Arrodes expressly distributes and uses JNA 5.16.0 and jna-platform 5.16.0 under the Apache License, Version 2.0 option. The Apache-2.0 terms are at licenses/common/Apache-2.0.txt.
+
+Component                                                       License
+clj-commons:clj-yaml:1.0.29                                    EPL-1.0
+io.github.plumce:plumcp.core-json-datajson:0.2.2                EPL-1.0
+net.clojars.deadmeme5441:clojure-llm-sdk:0.6.0                 MIT
+net.java.dev.jna:jna:5.16.0                                    Apache-2.0 (selected from Apache-2.0 OR LGPL-2.1)
+net.java.dev.jna:jna-platform:5.16.0                           Apache-2.0 (selected from Apache-2.0 OR LGPL-2.1)
+org.clojure:clojure:1.12.5                                     EPL-1.0
+org.clojure:data.json:2.5.1                                    EPL-1.0
+org.slf4j:slf4j-nop:2.0.17                                     MIT
+org.xerial:sqlite-jdbc:3.53.4.0                                Apache-2.0; BSD-style Zentus notice; bundled SQLite public domain
+org.flatland:ordered:1.15.12                                   EPL-1.0
+org.yaml:snakeyaml:2.3                                         Apache-2.0
+io.github.plumce:plumcp.core:0.2.2                             EPL-1.0
+cheshire:cheshire:5.13.0                                       MIT
+hato:hato:1.0.0                                                MIT
+metosin:malli:0.17.0                                           EPL-2.0
+org.clojure:core.specs.alpha:0.4.74                            EPL-1.0
+org.clojure:spec.alpha:0.5.238                                 EPL-1.0
+org.slf4j:slf4j-api:2.0.17                                     MIT
+com.fasterxml.jackson.core:jackson-core:2.17.0                 Apache-2.0; bundled FastDoubleParser notices
+com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:2.17.0 Apache-2.0
+com.fasterxml.jackson.dataformat:jackson-dataformat-smile:2.17.0 Apache-2.0
+tigris:tigris:0.1.2                                            EPL-1.0
+borkdude:dynaload:0.3.5                                        EPL-1.0
+borkdude:edamame:1.4.27                                        EPL-1.0
+fipp:fipp:0.6.27                                                EPL-1.0
+mvxcvi:arrangement:2.1.0                                       Unlicense / public domain dedication
+org.clojure:test.check:1.1.1                                   EPL-1.0
+org.clojure:tools.reader:1.3.4                                 EPL-1.0
+org.clojure:core.rrb-vector:0.1.2                              EPL-1.0
+
+Source code, including build files, for every EPL-1.0 and EPL-2.0 component above is included as a pinned archive in the source companion. Full EPL-1.0 and EPL-2.0 terms are at licenses/common/EPL-1.0.txt and licenses/common/EPL-2.0.txt. The missing clojure-llm-sdk MIT notice is supplied at licenses/clojure-llm-sdk/LICENSE. The full Unlicense text is at licenses/common/Unlicense.txt.
+
+NPM AND OPENTUI COMPONENTS
+
+The payload preserves the package-supplied notices for @opentui/core 0.5.11, its platform-native package, bun-ffi-structs 0.3.1, diff 9.0.0, marked 17.0.1, string-width 7.2.0, strip-ansi 7.1.2, ansi-regex 6.3.0, emoji-regex 10.6.0, get-east-asian-width 1.6.0, and web-tree-sitter 0.25.10 under licenses/npm/. The OpenTUI native package's notices for Ghostty, LCMS2, libwebp, stb, Wuffs, patents, and authors are preserved there unchanged.
+
+This notice is informational and does not replace or modify any component's license terms.

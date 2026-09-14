@@ -22,13 +22,53 @@
    :expires-at 0
    :source :stored-oauth})
 
+(deftest anthropic-subscription-oauth-is-refused-without-network-or-storage
+  (with-auth-store
+    (fn [store]
+      (let [legacy (expired-credential "sk-ant-oat01-legacy" "legacy-refresh")
+            requests (atom 0)]
+        (auth/put-credential! store :anthropic legacy)
+        (let [before (slurp (str (:file store)))]
+          (with-redefs [auth/request! (fn [_] (swap! requests inc))]
+            (doseq [options [{:type :oauth}
+                             {:oauth true}
+                             {:code "legacy-browser-code"}
+                             {:type :api-key :api-key "sk-ant-oat01-pasted"}]]
+              (let [error (try
+                            (auth/login! store :anthropic options)
+                            nil
+                            (catch clojure.lang.ExceptionInfo e e))]
+                (is (= "unsupported-oauth" (:error/code (ex-data error))))))
+            (doseq [attempt [(fn [] (auth/refresh! store :anthropic {}))
+                             (fn [] (auth/ensure-fresh! store :anthropic {}))]]
+              (let [error (try
+                            (attempt)
+                            nil
+                            (catch clojure.lang.ExceptionInfo e e))]
+                (is (= "unsupported-oauth" (:error/code (ex-data error)))))))
+          (is (zero? @requests))
+          (is (= before (slurp (str (:file store)))))
+          (is (= legacy (auth/credential store :anthropic))))))))
+
+(deftest anthropic-console-api-key-is-stored-without-format-guessing
+  (with-auth-store
+    (fn [store]
+      (let [secret "console-key-without-a-speculative-prefix"]
+        (is (= :api-key
+               (:type (auth/login! store :anthropic
+                                   {:type :api-key :api-key secret}))))
+        (is (= {:type :api-key :secret secret :source :stored-api-key}
+               (auth/credential store :anthropic)))
+        (is (= :configured
+               (:status (auth/refresh! store :anthropic {}))))))))
+
 (deftest stale-refresh-cannot-resurrect-logout-or-overwrite-login
   (testing "logout wins over an in-flight refresh"
     (with-auth-store
       (fn [store]
         (let [started (promise)
               release (promise)]
-          (auth/put-credential! store :anthropic
+          (auth/put-credential! store :codex-backend
                                 (expired-credential "old-access" "old-refresh"))
           (with-redefs [auth/request! (fn [_]
                                         (deliver started true)
@@ -36,20 +76,20 @@
                                         {:access_token "stale-access"
                                          :refresh_token "stale-refresh"
                                          :expires_in 3600})]
-            (let [refresh (future (auth/refresh! store :anthropic {}))]
+            (let [refresh (future (auth/refresh! store :codex-backend {}))]
               (is (= true (deref started 1000 ::timeout)))
-              (auth/delete-credential! store :anthropic)
+              (auth/delete-credential! store :codex-backend)
               (deliver release true)
               (is (= :superseded
                      (:status (deref refresh 1000 {:status ::timeout}))))
-              (is (nil? (auth/credential store :anthropic)))))))))
+              (is (nil? (auth/credential store :codex-backend)))))))))
   (testing "a newer login wins over an in-flight refresh"
     (with-auth-store
       (fn [store]
         (let [started (promise)
               release (promise)
               replacement (expired-credential "new-login" "new-login-refresh")]
-          (auth/put-credential! store :anthropic
+          (auth/put-credential! store :codex-backend
                                 (expired-credential "old-access" "old-refresh"))
           (with-redefs [auth/request! (fn [_]
                                         (deliver started true)
@@ -57,13 +97,13 @@
                                         {:access_token "stale-access"
                                          :refresh_token "stale-refresh"
                                          :expires_in 3600})]
-            (let [refresh (future (auth/refresh! store :anthropic {}))]
+            (let [refresh (future (auth/refresh! store :codex-backend {}))]
               (is (= true (deref started 1000 ::timeout)))
-              (auth/put-credential! store :anthropic replacement)
+              (auth/put-credential! store :codex-backend replacement)
               (deliver release true)
               (is (= :superseded
                      (:status (deref refresh 1000 {:status ::timeout}))))
-              (is (= replacement (auth/credential store :anthropic))))))))))
+              (is (= replacement (auth/credential store :codex-backend))))))))))
 
 (deftest concurrent-refreshes-exchange-one-credential-version-once
   (with-auth-store
@@ -71,11 +111,11 @@
       (let [snapshot-var (ns-resolve 'arrodes.auth 'credential-snapshot)
             refresh-lock-var (ns-resolve 'arrodes.auth 'refresh-lock)
             snapshot @snapshot-var
-            lock ((deref refresh-lock-var) store :anthropic)
+            lock ((deref refresh-lock-var) store :codex-backend)
             initial-snapshots (CountDownLatch. 2)
             snapshot-count (atom 0)
             requests (atom 0)]
-        (auth/put-credential! store :anthropic
+        (auth/put-credential! store :codex-backend
                               (expired-credential "old-access" "one-refresh"))
         (with-redefs-fn
           {snapshot-var
@@ -93,9 +133,9 @@
           #(let [[first-refresh second-refresh]
                  (locking lock
                    (let [first-refresh (future
-                                         (auth/refresh! store :anthropic {}))
+                                         (auth/refresh! store :codex-backend {}))
                          second-refresh (future
-                                          (auth/refresh! store :anthropic {}))]
+                                          (auth/refresh! store :codex-backend {}))]
                      (is (.await initial-snapshots 1 TimeUnit/SECONDS))
                      [first-refresh second-refresh]))
                  results [(deref first-refresh 1000 {:status ::timeout})
@@ -105,7 +145,7 @@
              (is (= 1 @requests))))))))
 
 (deftest refresh-retains-an-unrotated-refresh-token
-  (doseq [provider [:anthropic :codex-backend]]
+  (doseq [provider [:codex-backend]]
     (testing (name provider)
       (with-auth-store
         (fn [store]
@@ -135,8 +175,7 @@
   (let [callback-var (ns-resolve 'arrodes.auth 'callback-server)
         original @callback-var]
     (doseq [[provider options]
-            [[:codex-backend {:type :oauth :flow :browser}]
-             [:anthropic {:type :oauth}]]]
+            [[:codex-backend {:type :oauth :flow :browser}]]]
       (testing (name provider)
         (with-auth-store
           (fn [store]

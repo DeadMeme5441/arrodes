@@ -1,12 +1,12 @@
 # Arrodes
 
-Arrodes is a conversation-first coding agent for the terminal. It keeps sessions, results, and project-specific configuration outside your repository while giving the agent local read, edit, shell, skill, extension, and MCP-client capabilities.
+Arrodes is a terminal coding agent built around a persistent Clojure REPL. The agent composes ordinary functions and retains native values between steps, while your conversation, results, and project configuration stay outside the repository.
 
-The repository and its preview releases are private.
+Arrodes is open source under the [MIT license](LICENSE). It runs trusted local code with your permissions; it is not a sandbox. See the [security policy](SECURITY.md).
 
-## Install the private preview
+## Install
 
-Download the executable for your system and its matching `.sha256` file from this repository's private Releases page. Access requires permission to the repository.
+Download the executable for your system and its matching `.sha256` file from [Releases](https://github.com/DeadMeme5441/arrodes/releases/latest).
 
 | System | Executable |
 | --- | --- |
@@ -32,7 +32,7 @@ mv arrodes-darwin-arm64 ~/.local/bin/arrodes
 
 Use the `x64` filename on an Intel Mac. Ensure `~/.local/bin` is on `PATH`.
 
-This private preview is not Developer ID signed or notarized. After verifying the checksum, the first launch may require **System Settings → Privacy & Security → Open Anyway**. Only bypass the warning for an artifact obtained from the private release you trust.
+The macOS binaries are not Developer ID signed or notarized. After verifying the checksum, the first launch may require **System Settings → Privacy & Security → Open Anyway**. Only approve an artifact obtained from the release you trust.
 
 ### Linux
 
@@ -69,6 +69,8 @@ On first run, setup asks you to:
 5. decide whether to trust project-scoped instructions and executable resources when a decision is needed.
 
 OAuth can open a browser or show a URL for manual completion. API keys and pasted authorization codes are masked and excluded from conversation drafts and history. Press `Esc` to cancel a setup screen without exiting; run `/setup` or `/login` later to continue.
+
+Codex supports ChatGPT sign-in. Anthropic access uses a Console API key or a supported cloud provider; Claude.ai subscription OAuth is not supported. GitHub Copilot login is not included. Each provider's account terms and data practices apply.
 
 Existing valid defaults skip setup. Launch selections take precedence for a new session:
 
@@ -199,7 +201,10 @@ See [Configuration and project state](docs/CONFIGURATION.md) and [Troubleshootin
 - [Extensions, resources, MCP, and packages](docs/EXTENSIONS.md)
 - [RPC protocol reference](docs/PROTOCOL.md)
 - [Troubleshooting and preview limits](docs/TROUBLESHOOTING.md)
+- [Security policy and private vulnerability reporting](SECURITY.md)
 
 ## License
 
 [MIT](LICENSE). Copyright 2026 DeadMeme5441.
+
+Bundled third-party components retain their own licenses. Each release includes [third-party notices](THIRD_PARTY_NOTICES.txt) and a corresponding-source companion with the applicable source code and rebuild instructions.

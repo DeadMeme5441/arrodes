@@ -3,10 +3,17 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      scope:
+        description: Verification or corresponding-source preparation
+        type: choice
+        options: [verify, sources]
+        default: verify
 permissions:
   contents: read
 jobs:
   verify:
+    if: inputs.scope != 'sources'
     strategy:
       fail-fast: false
       matrix:
@@ -23,11 +30,7 @@ jobs:
           - os: macos-15
             platform: darwin
             arch: arm64
-          - os: windows-2022
-            platform: windows
-            arch: x64
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.platform == 'windows' }}
     timeout-minutes: 45
     env:
       ARRODES_TEST_OFFLINE: '1'
@@ -74,10 +77,33 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+  sources:
+    name: Package corresponding sources
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.scope == 'sources'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Package corresponding third-party sources
+        run: python scripts/package-source-release.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arrodes-source-materials
+          path: |
+            target/release/arrodes-third-party-sources.tar.gz
+            target/release/arrodes-third-party-sources.tar.gz.sha256
+            target/release/THIRD_PARTY_NOTICES.txt
+          if-no-files-found: error
+          compression-level: 0
   release:
-    name: Stage private draft release
-    needs: verify
-    if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.private == true
+    name: Stage verified release
+    needs: [verify, sources]
+    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'DeadMeme5441/arrodes'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -85,12 +111,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
           pattern: arrodes-*
           path: target/release
           merge-multiple: true
-      - name: Stage verified artifacts without changing repository visibility
+      - name: Stage verified executables, notices, and sources
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/publish-release.py

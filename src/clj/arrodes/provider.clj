@@ -12,7 +12,6 @@
             [llm.sdk.stream :as sdk-stream]
             [llm.sdk.transport :as sdk-transport]
             [llm.sdk.provider.auth :as sdk-auth]
-            [llm.sdk.providers.anthropic.chat :as anthropic]
             [llm.sdk.providers.codex.auth :as codex-auth]
             [llm.sdk.providers.codex.responses :as codex]
             [llm.sdk.providers.openai.chat :as openai]))
@@ -42,16 +41,7 @@
    :codex "OpenAI Responses"
    :codex-backend "OpenAI ChatGPT / Codex"
    :openai-codex "OpenAI ChatGPT / Codex"
-   :github-copilot "GitHub Copilot"
    :ollama-native "Ollama"})
-
-(def ^:private copilot-default-headers
-  {"User-Agent" "GitHubCopilotChat/0.35.0"
-   "Editor-Version" "vscode/1.107.0"
-   "Editor-Plugin-Version" "copilot-chat/0.35.0"
-   "Copilot-Integration-Id" "vscode-chat"
-   "X-GitHub-Api-Version" "2026-06-01"})
-
 (def ^:private secret-keys
   #{:api-key :auth-token :secret :token :access-token :refresh-token
     :password :aws-access-key-id :aws-secret-access-key})
@@ -80,11 +70,14 @@
 (defn- profile-auth-mode [profile]
   (let [id (:id profile)]
     (cond
-      (contains? #{:codex-backend :openai-codex :github-copilot} id) :oauth
+      (contains? #{:codex-backend :openai-codex} id) :oauth
       (contains? #{:bedrock :amazon-bedrock :vertex-gemini :google-vertex
                    :vertex-anthropic} id) :ambient
       (= :ollama-native (:sdk-id profile)) :none
       :else :api-key)))
+
+(defn- anthropic-profile? [profile]
+  (= :anthropic (:sdk-id profile)))
 
 (defn- sdk-profile->local [id]
   (let [p (sdk/provider-profile id)]
@@ -109,7 +102,7 @@
                       (let [profile (sdk/provider-profile id)]
                         (when (and profile
                                    (contains? (set (:profile/capabilities profile)) :chat)
-                                   (not= id :fake))
+                                   (not (contains? #{:fake :github-copilot :copilot} id)))
                           [id (sdk-profile->local id)]))))
               (sdk/list-providers))
         aliased (into {}
@@ -118,12 +111,7 @@
                                 [id (assoc base :id id :sdk-id sdk-id
                                            :name (get display-names id (:name base)))])))
                       aliases)
-        copilot {:id :github-copilot :sdk-id nil :kind :copilot
-                 :name "GitHub Copilot" :capabilities #{:chat :streaming :tools :reasoning}
-                 :env-var-names ["COPILOT_GITHUB_TOKEN"]
-                 :base-url "https://api.individual.githubcopilot.com"
-                 :refreshable? true :built-in? true}
-        profiles (assoc (merge sdk-profiles aliased) :github-copilot copilot)]
+        profiles (merge sdk-profiles aliased)]
     (-> profiles
         (assoc-in [:codex-backend :refreshable?] true)
         (assoc-in [:openai-codex :refreshable?] true)
@@ -203,7 +191,6 @@
             :else [])]
     (register! manager (keyword id) descriptor))
   manager)
-
 
 (defn create!
   "Create a manager with a private credential store and manager-local profiles."
@@ -320,20 +307,23 @@
 
 (defn- auth-resolution [manager provider-id p refresh? options]
   (let [entry (stored-credential-entry manager provider-id p)
-        c (current-credential manager entry refresh? options)
-        env-token (env-value (:env-var-names p))
+        stored (:credential entry)
+        anthropic? (anthropic-profile? p)
+        blocked-stored? (and anthropic?
+                             (or (= :oauth (:type stored))
+                                 (auth/anthropic-oauth-token?
+                                  (or (:secret stored) (:access-token stored)))))
+        c (when-not blocked-stored?
+            (current-credential manager entry refresh? options))
+        env-token (let [token (env-value (:env-var-names p))]
+                    (when-not (and anthropic?
+                                   (auth/anthropic-oauth-token? token))
+                      token))
         sdk-id (:sdk-id p)]
     (cond
       (or (contains? #{:codex-backend :openai-codex} provider-id)
           (= :codex-backend sdk-id))
       (codex-auth c)
-
-      (= provider-id :github-copilot)
-      (let [token (or (:access-token c) (:secret c) env-token)]
-        (when token
-          {:source (if c (:source c) :environment) :type (or (:type c) :api-key)
-           :token token :credential c
-           :base-url (auth/copilot-base-url token (:enterprise-domain c))}))
 
       (contains? #{:bedrock :amazon-bedrock} provider-id)
       (when (or (and (System/getenv "AWS_ACCESS_KEY_ID")
@@ -440,24 +430,6 @@
        :thinking-levels (reasoning-levels provider-id id (:capabilities p) nil)
        :input (input-types (:capabilities p)) :cost :unknown :source :live})))
 
-(defn- copilot-models [provider-id p base-url items]
-  (let [eligible (filterv
-                  (fn [item]
-                    (not= false (get-in item [:capabilities :supports :tool_calls])))
-                  items)
-        picker (filterv
-                (fn [item]
-                  (and (true? (:model_picker_enabled item))
-                       (not= "disabled" (get-in item [:policy :state]))))
-                eligible)
-        visible (if (and (empty? picker)
-                         (= base-url "https://api.individual.githubcopilot.com"))
-                  (filterv #(= "enabled" (get-in % [:policy :state])) eligible)
-                  picker)]
-    (->> visible
-         (keep #(model-from-openai provider-id p %))
-         vec)))
-
 (defn- codex-model [provider-id p item]
   (let [id (or (:slug item) (:id item))
         reported (->> (:supported_reasoning_levels item)
@@ -514,12 +486,6 @@
                                      :headers (:headers request-auth)})]
             (->> (or (:models body) (:data body))
                  (keep #(codex-model provider-id p %)) vec))
-
-          (= provider-id :github-copilot)
-          (let [body (auth/request! {:url (str (:base-url resolution) "/models")
-                                     :headers (merge copilot-default-headers
-                                                     {"Authorization" (str "Bearer " (:token resolution))})})]
-            (copilot-models provider-id p (:base-url resolution) (:data body)))
 
           (= (:sdk-id p) :gemini-native)
           (let [body (auth/request! {:url "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"
@@ -588,14 +554,14 @@
                            :models (count (profile-models manager id p))
                            :refreshable? (:refreshable? p)}
                     (get @(:last-refresh manager) id)
-                    (assoc :last-refresh (get @(:last-refresh manager) id)))))))} )
+                    (assoc :last-refresh (get @(:last-refresh manager) id)))))))})
 
 (defn login!
   "Authenticate a provider explicitly. Credentials remain under manager :home."
   [manager provider-id options]
   (open-manager! manager)
   (let [provider-id (keyword provider-id)
-        _ (profile manager provider-id)]
+        p (profile manager provider-id)]
     (when (contains? #{:bedrock :amazon-bedrock} provider-id)
       (fail! :auth/ambient
              "Amazon Bedrock uses the SDK's native AWS credential chain; configure AWS credentials in the process environment or shared AWS files"
@@ -605,7 +571,8 @@
       (fail! :auth/ambient
              "Vertex uses Application Default Credentials; pass an explicit OAuth access token as :api-key or configure ADC"
              {:provider provider-id}))
-    (auth/login! (:auth manager) provider-id options)))
+    (auth/login! (:auth manager) provider-id
+                 (assoc options :anthropic-profile? (anthropic-profile? p)))))
 
 (defn refresh-auth!
   "Explicitly refresh one stored OAuth credential."
@@ -615,9 +582,13 @@
    (open-manager! manager)
    (let [provider-id (keyword provider-id)
          p (profile manager provider-id)
-         credential-provider (or (:provider-id
-                                  (stored-credential-entry manager provider-id p))
-                                 provider-id)]
+         entry (stored-credential-entry manager provider-id p)
+         credential-provider (or (:provider-id entry) provider-id)]
+     (when (and (anthropic-profile? p)
+                (= :oauth (get-in entry [:credential :type])))
+       (fail! :auth/unsupported-oauth
+              "Anthropic subscription OAuth credentials are not supported; use a Claude Console API key, Amazon Bedrock, or Google Vertex AI"
+              {:provider provider-id}))
      (assoc (auth/refresh! (:auth manager) credential-provider options)
             :provider provider-id))))
 
@@ -626,7 +597,9 @@
   [manager provider-id]
   (open-manager! manager)
   (let [provider-id (keyword provider-id)]
-    (profile manager provider-id)
+    (when-not (or (contains? @(:profiles manager) provider-id)
+                  (auth/credential (:auth manager) provider-id))
+      (profile manager provider-id))
     (auth/delete-credential! (:auth manager) provider-id)
     {:provider provider-id :status :logged-out}))
 
@@ -706,23 +679,6 @@
              (direct-http-options manager provider-id))]
     (direct-sse-complete! provider-id (:request/model request)
                           profile transport req options)))
-
-(defn- copilot-complete! [manager provider-id p request options]
-  (let [resolution (require-auth! manager provider-id p true options)
-        model-id (:request/model request)
-        claude? (str/starts-with? (str/lower-case model-id) "claude")
-        base-url (:base-url resolution)
-        profile {:profile/id provider-id :profile/base-url base-url
-                 :profile/auth-strategy :bearer :profile/auth-token (:token resolution)
-                 :profile/default-headers copilot-default-headers
-                 :profile/capabilities (:capabilities p)}
-        transport (if claude? (anthropic/make-transport) (codex/make-transport))
-        req (merge
-             (if claude?
-               (anthropic/build-request-anthropic profile (assoc request :request/stream? true))
-               (codex/build-request-codex profile (assoc request :request/stream? true)))
-             (direct-http-options manager provider-id))]
-    (direct-sse-complete! provider-id model-id profile transport req options)))
 
 (defn- azure-complete! [manager provider-id p request options]
   (let [resolution (require-auth! manager provider-id p true options)
@@ -814,7 +770,6 @@
         (if-let [complete-fn (:complete-fn manager)]
           (complete-fn canonical-request options)
           (case (:kind p)
-            :copilot (copilot-complete! manager provider-id p canonical-request options)
             :azure-openai (azure-complete! manager provider-id p canonical-request options)
             :profile-alias (sdk-complete! manager provider-id p canonical-request options)
             :openai-compatible (custom-openai-complete!

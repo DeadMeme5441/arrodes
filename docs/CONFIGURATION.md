@@ -156,6 +156,8 @@ Project context may include `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLA
 
 `setup.run` is the mutating setup method. It may authenticate or reuse credentials, perform actual model discovery for the selected provider, save global defaults, and record a trust decision. Cancelling stops the active setup request, but completed authentication or writes are not rolled back. Inspect `setup.status`, then continue with `/setup` rather than guessing whether an effect occurred.
 
+Anthropic uses Console API-key or supported cloud-provider credentials, not Claude.ai subscription OAuth. Copilot's previous first-party login is not offered. Codex ChatGPT sign-in remains supported. Provider compatibility does not imply affiliation or endorsement, and the provider's account terms apply.
+
 ## Existing home migration
 
 On startup, Arrodes safely moves root-level `settings.edn`, `keybindings.edn`, and `trust.edn` into `HOME/config/` only when the destination is free. A conflict fails without overwriting either copy.

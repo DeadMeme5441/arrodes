@@ -34,7 +34,7 @@
       (is (:ready? (setup/status rt {:provider "fixture" :model "fixture-model"}))))))
 
 (deftest setup-authenticates-discovers-and-persists-without-retaining-secret
-  (let [settings (atom {})
+  (let [settings (atom {:provider :github-copilot :model "retired-provider-model"})
         authenticated? (atom false)
         requests (atom [])
         rt {:home "/fixture/home" :cwd "/fixture/project"
@@ -69,11 +69,12 @@
                                 (case (:kind request)
                                   :input "local-release-check"
                                   :select (case (:title request)
+                                            "Choose a provider" :fixture
                                             "Choose a model" "fixture-model"
                                             "Choose a thinking level" :none
                                             (throw (AssertionError. (str "Unexpected choice " (:title request)))))
                                   nil))]
-      (let [result (setup/run! rt {:provider "fixture"})]
+      (let [result (setup/run! rt {})]
         (is (:ready? result))
         (is (= {:provider :fixture :model "fixture-model" :thinking :none} @settings))
         (is (every? :secret? (filter #(= :input (:kind %)) @requests)))

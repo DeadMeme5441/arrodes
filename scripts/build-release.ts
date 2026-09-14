@@ -21,62 +21,6 @@ const NPM_PACKAGES = [
   "get-east-asian-width",
   "web-tree-sitter",
 ] as const;
-const BUN_LICENSE = `Bun itself is MIT-licensed.
-
-## JavaScriptCore
-
-Bun statically links JavaScriptCore (and WebKit) which is LGPL-2 licensed. WebCore files from WebKit are also licensed under LGPL2. Per LGPL2:
-
-> (1) If you statically link against an LGPL’d library, you must also provide your application in an object (not necessarily source) format, so that a user has the opportunity to modify the library and relink the application.
-
-You can find the patched version of WebKit used by Bun here: <https://github.com/oven-sh/webkit>. If you would like to relink Bun with changes:
-
-- \`git submodule update --init --recursive\`
-- \`make jsc\`
-- \`zig build\`
-
-This compiles JavaScriptCore, compiles Bun’s \`.cpp\` bindings for JavaScriptCore (which are the object files using JavaScriptCore) and outputs a new \`bun\` binary with your changes.
-
-## Linked libraries
-
-| Library | License |
-|---------|---------|
-| boringssl | several licenses |
-| brotli | MIT |
-| libarchive | several licenses |
-| lol-html | BSD 3-Clause |
-| ls-hpack | MIT |
-| ls-qpack | MIT |
-| lsquic | MIT / BSD 3-Clause |
-| mimalloc | MIT |
-| picohttp | Perl License or MIT |
-| zstd | BSD or GPLv2 |
-| simdutf | Apache 2.0 |
-| tinycc | LGPL v2.1 |
-| uSockets | Apache 2.0 |
-| zlib-ng | zlib |
-| c-ares | MIT |
-| libicu | ICU |
-| libbase64 | BSD 2-Clause |
-| libuv (Windows) | MIT |
-| libdeflate | MIT |
-| libjpeg-turbo | BSD 3-Clause / IJG / zlib |
-| libspng | BSD 2-Clause |
-| libwebp | BSD 3-Clause |
-| highway | Apache 2.0 |
-| uucode | MIT |
-| uWebSockets fork | Apache 2.0 |
-| TigerBeetle IO code | Apache 2.0 |
-| LLVM libc++abi fallback | Apache 2.0 with LLVM exception |
-
-## Polyfills
-
-The assert, browserify-zlib, buffer, constants-browserify, crypto-browserify, domain-browser, events, https-browserify, os-browserify, path-browserify, process, punycode, querystring-es3, stream-browserify, stream-http, string_decoder, timers-browserify, tty-browserify, url, util, and vm-browserify compatibility polyfills are MIT licensed.
-
-## Additional credits
-
-Bun's JS transpiler, CSS lexer, and Node.js module resolver source code is a Zig port of esbuild. This notice is reproduced from <https://github.com/oven-sh/bun/blob/bun-v1.3.14/LICENSE.md>.
-`;
 
 type CommandOptions = { cwd?: string; env?: Record<string, string | undefined>; quiet?: boolean };
 
@@ -155,7 +99,7 @@ function copyMavenLicenses(root: string, javaHome: string, licenses: string, bui
     const entries = run([join(javaHome, "bin", process.platform === "win32" ? "jar.exe" : "jar"), "--list", "--file", jar], { quiet: true })
       .split(/\r?\n/)
       .filter(entry => entry.startsWith("META-INF/") && !entry.includes("\\") && !entry.split("/").includes("..") && !entry.endsWith("/") && (
-        /(^|\/)META-INF\/.*(LICENSE|NOTICE|COPYING|COPYRIGHT|DEPENDENCIES|EPL|APACHE|BSD|MIT)([._/-].*)?$/i.test(entry)
+        /(^|\/)META-INF\/.*(LICENSE|NOTICE|COPYING|COPYRIGHT|DEPENDENCIES|EPL|APACHE|BSD|MIT|AL2\.0|LGPL2\.1)([._/-].*)?$/i.test(entry)
         || /(^|\/)META-INF\/maven\/.*\/pom\.(xml|properties)$/i.test(entry)
       ));
     if (entries.length === 0) continue;
@@ -255,9 +199,10 @@ async function main(): Promise<void> {
   copy(join(root, "node_modules", ...nativePackage.split("/"), nativeLibrary), join(payloadRoot, "opentui", nativePackage, nativeLibrary));
 
   const licenses = join(payloadRoot, "licenses");
+  copy(join(root, "resources", "licenses"), licenses);
   copy(join(root, "LICENSE"), join(licenses, "Arrodes", "LICENSE"));
-  mkdirSync(join(licenses, "Bun"), { recursive: true });
-  writeFileSync(join(licenses, "Bun", "LICENSE.md"), BUN_LICENSE);
+  copy(join(root, "THIRD_PARTY_NOTICES.txt"), join(payloadRoot, "THIRD_PARTY_NOTICES.txt"));
+  copy(join(root, "THIRD_PARTY_NOTICES.txt"), join(releaseRoot, "THIRD_PARTY_NOTICES.txt"));
   copyNpmLicenses(root, licenses, nativePackage);
   copyMavenLicenses(root, javaHome, licenses, buildRoot);
 

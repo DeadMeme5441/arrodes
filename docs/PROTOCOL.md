@@ -21,7 +21,7 @@ The process first emits a `hello` record containing the protocol version and con
 A normal response repeats the request ID and contains either `result` or `error`:
 
 ```json
-{"type":"response","id":"init","result":{"version":"0.1.0","protocol":1,"connection-id":"..."}}
+{"type":"response","id":"init","result":{"version":"0.1.1","protocol":1,"connection-id":"..."}}
 ```
 
 Errors contain a stable `code`, human-readable `message`, and structured `data`. A serialization failure reports `serialization-error` with `data.unknown-outcome? = true`; inspect state before retrying a mutation.

@@ -182,10 +182,10 @@
         configs (configured-servers workspace settings)]
     (->ClientPool workspace configs
                   (atom (into {} (map (fn [[name config]]
-                                       [name {:name name
-                                              :status (if (:enabled? config)
-                                                        :disconnected :disabled)}]))
-                                     configs))
+                                        [name {:name name
+                                               :status (if (:enabled? config)
+                                                         :disconnected :disabled)}]))
+                              configs))
                   (atom {}) (atom false))))
 
 (defn- ensure-open! [pool]
@@ -344,7 +344,7 @@
     (try
       (let [mcp-client
             (client/make-client
-             {:info (entity-support/make-info "Arrodes" "0.1.0" "Arrodes headless runtime")
+             {:info (entity-support/make-info "Arrodes" "0.1.1" "Arrodes headless runtime")
               :client-transport transport
               :traffic-logger traffic/nop-traffic-logger
               :print-banner? false
@@ -468,7 +468,7 @@
 (defn- disconnect-locked! [pool name status]
   (when-let [state (get @(:states pool) name)]
     (swap! (:states pool) update name #(-> % (assoc :status :disconnecting)
-                                                  (dissoc :attempt)))
+                                           (dissoc :attempt)))
     (let [client-error (when-let [mcp-client (:client state)]
                          (try (client/disconnect! mcp-client) nil
                               (catch Throwable error error)))
@@ -723,7 +723,7 @@
     "describe" (descriptor! pool server name)
     "call" (call-tool! pool server name (or arguments {}))
     "resources" (with-ready pool server
-                   #(select-keys % [:resources :resource-templates]))
+                  #(select-keys % [:resources :resource-templates]))
     "read-resource" (read-resource! pool server uri)
     "prompts" (with-ready pool server :prompts)
     "get-prompt" (get-prompt! pool server name (or arguments {}))

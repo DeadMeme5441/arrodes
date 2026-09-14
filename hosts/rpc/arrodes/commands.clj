@@ -16,7 +16,7 @@
             [clojure.string :as str])
   (:import (java.util.concurrent TimeUnit)))
 
-(def version "0.1.0")
+(def version "0.1.1")
 (def protocol-version 1)
 (def methods
   ["runtime.inspect" "session.list" "session.create" "session.inspect" "session.state"
