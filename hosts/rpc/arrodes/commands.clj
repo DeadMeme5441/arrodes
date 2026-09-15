@@ -31,7 +31,7 @@
    "capability.list" "capability.set" "capability.attach" "capability.detach"
    "result.list" "result.inspect" "artifact.list" "artifact.read" "artifact.inspect" "artifact.write"
    "resource.list" "skill.read" "prompt.render" "prompt.run" "model.list" "model.refresh"
-   "auth.status" "auth.login" "auth.logout" "settings.get" "settings.update"
+   "model.select" "auth.status" "auth.login" "auth.logout" "settings.get" "settings.update"
    "setup.status" "setup.run" "project.info" "project.trust"
    "package.list" "package.install" "package.remove" "package.update" "event.replay"])
 
@@ -309,6 +309,7 @@
                                  (run-options params))
     "model.list" {:models (provider/catalog (provider-manager rt params))}
     "model.refresh" {:models (if (:provider params) (provider/refresh! (provider-manager rt params) (keyword-value (:provider params))) (provider/refresh! (provider-manager rt params)))}
+    "model.select" (setup/apply-model! rt params)
     "auth.status" (value/redact (provider/status (provider-manager rt params)))
     "auth.login" (value/redact
                   (provider/login! (provider-manager rt params) (required-provider params)

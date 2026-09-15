@@ -74,13 +74,22 @@ cd /path/to/project
 arrodes
 ```
 
-On first run, setup asks you to:
+On first run, the **Providers** browser opens. Connect an account, browse its models,
+choose a supported reasoning level, and select **Make default for new conversations**.
+Arrodes then asks about project trust when needed and opens your first conversation.
+You can connect several accounts; signing in never changes an existing conversation's model.
 
-1. choose a provider;
-2. sign in, enter an API key, or explicitly reuse available credentials;
-3. choose a model returned by that provider;
-4. choose a supported reasoning level; and
-5. decide whether to trust project-scoped instructions and executable resources when a decision is needed.
+Return with `/providers` (also `/setup` or `/login`). Connected providers appear first,
+with their authentication method and connection status. Enter manages the selected
+provider; F5 checks its status. Esc cancels an active sign-in or returns to chat.
+
+`/models` opens the model browser: providers on the left, models on the right,
+and details below. Tab switches between provider and model navigation, arrows select,
+and typing filters models. **Change provider** also works in narrow terminals.
+F5 discovers models from the selected provider. Enter chooses reasoning and then:
+
+- **Use in this conversation** — preserves history and live REPL definitions.
+- **Make default for new conversations** — leaves existing conversations unchanged.
 
 OAuth can open a browser or show a URL for manual completion. API keys and pasted authorization codes are masked and excluded from conversation drafts and history. Press `Esc` to cancel a setup screen without exiting; run `/setup` or `/login` later to continue.
 
@@ -134,7 +143,7 @@ Arrodes keeps one live evaluator per session. Function calls appear compactly in
 | `/refresh` | Reconcile recorded session state without repeating a mutation |
 | `/pending` | Edit or drop queued input |
 | `/attach`, `/attachments` | Add or remove project-file context |
-| `/setup`, `/login` | Run provider setup or sign-in |
+| `/providers`, `/setup`, `/login` | Manage provider connections and sign-in |
 | `/models`, `/refresh-models`, `/thinking` | Select or refresh model settings |
 | `/rename` | Rename the current session |
 | `/continue` | Continue from the current conversation |

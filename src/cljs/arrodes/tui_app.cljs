@@ -129,8 +129,20 @@
                             :data error})
       state)))
 
+(defn- refresh-project! [app]
+  (let [cwd (workspace app)
+        child-process (js/require "node:child_process")]
+    (.execFile child-process "git" #js ["-C" cwd "rev-parse" "--abbrev-ref" "HEAD"]
+               #js {:timeout 1500 :maxBuffer 4096}
+               (fn [error stdout _]
+                 (when (and (not @(:closed? app)) (= cwd (workspace app)))
+                   (swap! (:state app) assoc :branch
+                          (when-not error (str/trim stdout))))))))
+
 (defn- event! [app wire-event]
   (let [event (decode wire-event)]
+    (when (contains? #{:operation/completed :operation/failed :operation/cancelled} (:type event))
+      (refresh-project! app))
     (swap! (:state app)
            (fn [state]
              (let [{:keys [session-id] :as hydrating} (:hydrating state)
@@ -290,7 +302,8 @@
 
 (defn- default-session-params [app]
   (let [options (:options app)
-        config (non-nil-map (select-keys options [:provider :model :thinking]))]
+        config (if (:browser-selection? @(:state app)) {}
+                   (non-nil-map (select-keys options [:provider :model :thinking])))]
     (cond-> {:cwd (workspace app)}
       (:session-name options) (assoc :name (:session-name options))
       (seq config) (assoc :config config))))
@@ -316,6 +329,26 @@
              (swap! (:state app) assoc :models models)
              models))))))
 
+(defn- load-providers! [app]
+  (-> (call! app "auth.status" {})
+      (.then (fn [wire]
+               (let [providers (vec (:providers (decode wire)))]
+                 (swap! (:state app) assoc :providers providers)
+                 providers)))))
+
+(defn- catalog-work! [app label work]
+  (if (:catalog-operation @(:state app))
+    (rejected (error "catalog-busy" "Wait for the current provider action to finish" {}))
+    (do
+      (swap! (:state app) assoc :catalog-operation label :notice nil)
+      (-> (resolved nil)
+          (.then work)
+          (.catch (fn [failure]
+                    (if (= "cancelled" (:code (ex-data failure)))
+                      (do (swap! (:state app) assoc :notice {:kind :info :message "Sign-in cancelled. You can try again."}) nil)
+                      (throw failure))))
+          (.finally (fn [] (swap! (:state app) assoc :catalog-operation nil)))))))
+
 (defn- select-start-session! [app sessions preferred]
   (let [requested (or preferred (get-in app [:options :session-id]))
         cwd (.realpathSync fs (or (get-in app [:options :cwd]) (.cwd js/process)))
@@ -331,7 +364,8 @@
 
 (defn- setup-params [app]
   (let [options (:options app)
-        config (non-nil-map (select-keys options [:provider :model :thinking]))
+        config (if (:browser-selection? @(:state app)) {}
+                   (non-nil-map (select-keys options [:provider :model :thinking])))
         sid (session-id-from @(:state app))]
     (cond-> config
       sid (assoc :session-id sid))))
@@ -367,7 +401,7 @@
 (defn- boot-sessions! [app preferred-session-id]
   (-> (load-sessions! app)
       (.then #(select-start-session! app % preferred-session-id))
-      (.then (fn [_] (load-models! app false)))))
+      (.then (fn [_] (refresh-project! app) (load-models! app false)))))
 
 (defn- boot! [app preferred-session-id]
   (if (false? (get-in app [:options :setup?]))
@@ -379,7 +413,15 @@
              (swap! (:state app) assoc :setup result)
              (if (value-field result :ready?)
                (boot-sessions! app preferred-session-id)
-               (run-setup! app true preferred-session-id))))))))
+               (if (:configuration-ready? result)
+                 (run-setup! app true preferred-session-id)
+                 (do
+                   (swap! (:state app) assoc :providers (:providers result))
+                   (swap! (:state app) assoc-in [:ui :overlay]
+                          {:kind :providers :title "Providers" :token (str (random-uuid))
+                           :query "" :index 0 :startup? true
+                           :hint "Welcome to Arrodes. Connect a provider, then choose your default model."})
+                   nil)))))))))
 
 (defn- make-client! [app]
   (let [options (:options app)
@@ -510,6 +552,8 @@
           :view (model/empty-state)
           :sessions []
           :models []
+          :providers []
+          :catalog-operation nil
           :setup {:status :checking}
           :history nil
           :history-by-session {}
@@ -856,7 +900,8 @@
         oid (operation-id-from state)
         navigation (:navigation-generation state)]
     (case action
-      :submit (submit! app data)
+      :submit (if sid (submit! app data)
+                  (rejected (error "setup-required" "Open /providers and choose a default model to start a conversation." {})))
 
       :cancel
       (if oid
@@ -916,6 +961,57 @@
                    (.then (fn [_] session)))))))
 
       :models (load-models! app (boolean (:refresh? data)))
+
+      :providers (load-providers! app)
+
+      :provider-cancel (rpc/cancel-method! (current-client app) "auth.login")
+
+      :provider-login
+      (catalog-work!
+       app "Connecting provider… Esc cancels"
+       (fn [_]
+         (-> (call! app "auth.login" (select-keys data [:provider :type])
+                    {:mutation? true :timeout-ms (* 15 60 1000)})
+             (.then (fn [_] (load-providers! app)))
+             (.then (fn [_]
+                      (swap! (:state app) assoc :notice
+                             {:kind :info :message "Provider connected. Browse its models when you are ready."}))))))
+
+      :provider-logout
+      (catalog-work! app "Disconnecting provider…"
+                     (fn [_] (-> (mutation! app "auth.logout" {:provider (:provider data)})
+                                 (.then (fn [_] (load-providers! app))))))
+
+      :provider-models
+      (catalog-work!
+       app "Discovering models…"
+       (fn [_]
+         (-> (call! app "model.refresh" {:provider (:provider data)})
+             (.then (fn [_] (load-models! app false)))
+             (.then (fn [models]
+                      (-> (load-providers! app) (.then (fn [_] models))))))))
+
+      :select-model
+      (catalog-work!
+       app "Saving model selection…"
+       (fn [_]
+         (-> (mutation! app "model.select"
+                        (cond-> (select-keys data [:provider :model :thinking :scope])
+                          sid (assoc :session-id sid)))
+             (.then (fn [wire]
+                      (let [result (decode wire)]
+                        (when (= :default (keyword (:scope data)))
+                          (swap! (:state app) assoc :browser-selection? true))
+                        (when-let [session (:session result)] (update-session-state! app session))
+                        (swap! (:state app) assoc :notice
+                               {:kind :info :message (if (= :default (keyword (:scope data)))
+                                                      "Default saved for new conversations."
+                                                      (if oid "Model saved for the next turn; the current run continues."
+                                                          "Model changed for this conversation."))})
+                        (if sid
+                          result
+                          (-> (run-setup! app true nil)
+                              (.then (fn [_] result))))))))))
 
       :setup (run-setup! app false nil)
 

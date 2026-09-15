@@ -312,6 +312,13 @@
                                             :unknown-outcome? unknown?})))))))
          (:promise d))))))
 
+(defn cancel-method!
+  "Cancel outstanding requests of one explicitly selected action; never resend them."
+  [client method]
+  (js/Promise.all
+   (clj->js (for [[id request] (:pending @(:state client)) :when (= method (:method request))]
+              (write-message! client {:type "cancel" :id id})))))
+
 (defn host-response!
   ([client id result]
    (write-message! client {:type "host-response" :id id :result result}))

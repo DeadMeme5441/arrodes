@@ -79,7 +79,7 @@ A concise global configuration can look like this:
  :fallback-model? false}
 ```
 
-Use `/setup` for normal provider/model defaults because it authenticates when needed, discovers the selected provider's actual models, validates the reasoning level, and writes the resulting global defaults. Use `/models` and `/thinking` to change the current session. Editing defaults does not retroactively replace an existing session's configuration.
+Use `/providers` to manage connections and discover models. In `/models`, choose a reasoning level and then **Make default for new conversations** to save global defaults, or **Use in this conversation** to change only the current session. Editing defaults does not retroactively replace an existing session's configuration.
 
 Supported session-default fields are:
 

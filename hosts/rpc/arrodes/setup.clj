@@ -220,6 +220,39 @@
                                   :value :trust}])))]
       (resources/trust! (:resources rt) (:root project) trusted?))))
 
+(defn apply-model!
+  "Validate a browser selection and change exactly one scope. Connecting an
+  account is separate; saving defaults never changes an existing session."
+  [rt params]
+  (let [scope (keyword-value (or (:scope params) :session))
+        sid (:session-id params)
+        _ (value/check! (contains? #{:session :default} scope) :invalid-scope
+                        "Choose session or default scope" {})
+        _ (when (= :session scope)
+            (value/check! (and (string? sid) (not (str/blank? sid))) :invalid-session-id
+                          "Select a conversation first" {}))
+        manager (if (= :session scope) (runtime/provider-manager rt sid) (:provider rt))
+        config (normalized-config params)
+        entry (provider-entry (:providers (provider/status manager)) (:provider config))
+        _ (value/check! (:available? entry) :provider-not-connected
+                        "Connect this provider before selecting a model" {})
+        model (provider/model manager (:provider config) (:model config))
+        _ (value/check! model :model-unavailable "Refresh this provider to find an available model" {})
+        levels (mapv keyword-value (or (seq (:thinking-levels model)) [:none]))
+        _ (value/check! (some #{(:thinking config)} levels) :thinking-unavailable
+                        "Select a reasoning level supported by this model" {:available levels})]
+    (if (= :session scope)
+      {:scope scope :config config :session (runtime/configure! rt sid {:config config})}
+      (do
+        (resources/update-settings!
+         (:resources rt)
+         (reduce (fn [changes key]
+                   (if (map? (get (resources/settings (:resources rt)) key))
+                     (assoc changes key (zipmap config-keys (repeat nil))) changes))
+                 config [:session-defaults :session :session-config])
+         {:scope :global})
+        {:scope scope :config config}))))
+
 (defn run!
   "Complete missing setup interactively and return the resulting public status."
   [rt params]

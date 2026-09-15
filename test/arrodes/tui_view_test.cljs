@@ -2,6 +2,7 @@
   "TUI regression entry point: real RPC lifecycle followed by native popup rendering."
   (:require [arrodes.tui-app :as app]
             [arrodes.tui-app-test :as app-test]
+            [arrodes.catalog-flow-test :as catalog-flow]
             [arrodes.tui-model :as model]
             [arrodes.tui-view :as view]
             [clojure.string :as str]))
@@ -241,6 +242,93 @@
                          (nil? (get-in @(:state application) [:ui :overlay :host-id])))
                    "Cancelled reverse-request overlay remained active"))))))
 
+(defn- capture! [terminal name]
+  (when-let [directory (aget (.-env js/process) "ARRODES_CAPTURE_UI")]
+    (let [fs (js/require "node:fs") path (js/require "node:path")
+          frame (.captureSpans terminal)
+          lines (mapv (fn [line]
+                        (mapv (fn [span] {:text (.-text span) :width (.-width span)
+                                         :fg (js->clj (.toInts (.-fg span)))
+                                         :bg (js->clj (.toInts (.-bg span)))})
+                              (array-seq (.-spans line)))) (array-seq (.-lines frame)))]
+      (.mkdirSync fs directory #js {:recursive true})
+      (.writeFileSync fs (.join path directory (str name ".json"))
+                      (js/JSON.stringify (clj->js {:cols (.-cols frame) :rows (.-rows frame) :lines lines})))
+      (.writeFileSync fs (.join path directory (str name ".txt")) (.captureCharFrame terminal)))))
+
+(defn- browser-and-chat! [application terminal]
+  (let [providers [{:provider :codex-backend :name "Codex" :available? true :auth {:type :oauth}}
+                   {:provider :openai :name "OpenAI" :available? true :auth {:type :api-key}}
+                   {:provider :anthropic :name "Anthropic" :available? false :auth {:type :api-key}}]
+        models [{:provider :codex-backend :id "gpt-example" :context-window 128000 :thinking-levels [:none :medium :high] :input [:text :image]}
+                {:provider :openai :id "other-model" :context-window 64000 :thinking-levels [:none]}]
+        open! (fn [kind]
+                (swap! (:state application)
+                       #(-> % (assoc :providers providers :models models :host-requests [] :notice nil)
+                            (assoc-in [:ui :overlay] {:kind kind :title (if (= kind :models) "Models" "Providers")
+                                                     :token (str (random-uuid)) :index 0 :query ""
+                                                     :provider :codex-backend :pane :models
+                                                     :hint "Connect your accounts. Choose a model for this conversation or save a default."}))))]
+    (.resize terminal 120 36)
+    (open! :providers)
+    (-> (until! terminal #(str/includes? (.captureCharFrame terminal) "Browser sign-in") "Provider status and authentication method are missing")
+        (.then (fn [_] (capture! terminal "providers") (open! :models)))
+        (.then (fn [_] (until! terminal #(and (.-visible (node terminal "provider-sidebar"))
+                                             (str/includes? (.captureCharFrame terminal) "128000 context")) "Model browser lost sidebar or details")))
+        (.then (fn [_]
+                 (capture! terminal "models")
+                 (.pressKey (.-mockInput terminal) "TAB")
+                 (.pressArrow (.-mockInput terminal) "down")
+                 (until! terminal #(str/includes? (.captureCharFrame terminal) "other-model") "Provider keyboard navigation did not filter models")))
+        (.then (fn [_]
+                 (.pressKey (.-mockInput terminal) "TAB")
+                 (.pressEnter (.-mockInput terminal))
+                 (until! terminal #(= "Reasoning" (get-in @(:state application) [:ui :overlay :title])) "Enter did not open model reasoning")))
+        (.then (fn [_]
+                 (.pressEnter (.-mockInput terminal))
+                 (until! terminal #(str/includes? (.captureCharFrame terminal) "Make default for new conversations") "Model selection did not expose explicit default scope")))
+        (.then (fn [_]
+                 (.pressEscape (.-mockInput terminal))
+                 (until! terminal #(= :models (get-in @(:state application) [:ui :overlay :kind])) "Model choice lost browser return location")))
+        (.then (fn [_]
+                 (.resize terminal 60 20)
+                 (until! terminal #(and (not (.-visible (node terminal "provider-sidebar")))
+                                        (str/includes? (.captureCharFrame terminal) "other-model")
+                                        (popup-fits? terminal)) "Narrow model browser is not usable")))
+        (.then (fn [_]
+                 (capture! terminal "models-narrow")
+                 (.resize terminal 120 36)
+                 (let [entries [{:id "question" :kind :message :data {:message/role :user :message/content "Make the provider flow seamless, then verify it."}}
+                                {:id "call" :parent-id "question" :kind :message
+                                 :data {:message/role :assistant :message/content "I’ll check the configuration and exercise the selection flow."
+                                        :message/tool-calls [{:tool-call/id "eval" :tool-call/name "repl"
+                                                             :tool-call/arguments {:source "(def settings (read {:path \"config.edn\"}))\n(:provider settings)"}}]}}
+                                {:id "result" :parent-id "call" :kind :message :data {:message/role :tool :message/tool-call-id "eval" :message/name "repl"
+                                                                                 :message/content "=> :example"}}
+                                {:id "answer" :parent-id "result" :kind :message
+                                 :data {:message/role :assistant :message/content "The provider flow is ready.\n\n- Connected accounts stay visible.\n- Model changes preserve the conversation and live values.\n- Defaults apply to new conversations.\n\nUse **/providers** to try it."}}]
+                       snapshot {:state {:session {:id "preview" :name "Provider experience" :cwd "/work/arrodes" :head "answer"
+                                                   :config {:provider :codex-backend :model "gpt-example" :thinking :high}}}
+                                 :entries entries :cursor 2}
+                       events [{:seq 1 :type :evaluation/started :data {:call-id "eval" :source "(def settings (read {:path \"config.edn\"}))\n(:provider settings)"}}
+                               {:seq 2 :type :evaluation/completed :data {:call-id "eval" :content "=> :example" :error? false
+                                                                         :result {:id 1 :kind :inline :value :example}}}]]
+                   (swap! (:state application) assoc :view (model/hydrate snapshot events) :branch "main"
+                          :connection {:status :ready} :notice nil)
+                   (swap! (:state application) update :ui assoc :overlay nil :draft "" :inspector? false
+                          :expanded {"activity:eval" true} :focus :composer :follow? true))
+                 (until! terminal #(and (str/includes? (.captureCharFrame terminal) "def settings")
+                                        (str/includes? (.captureCharFrame terminal) "Output")
+                                        (str/includes? (.captureCharFrame terminal) "provider flow is ready")
+                                        (false? (.-border (node terminal "row:message:answer")))) "Chat lost expanded source/output, plain prose, or the final answer")))
+        (.then (fn [_]
+                 (capture! terminal "chat")
+                 (.setText (node terminal "composer") "Keep this draft while I inspect")
+                 (.resize terminal 60 20)
+                 (until! terminal #(= "Keep this draft while I inspect" (.-plainText (node terminal "composer"))) "Resize discarded composer draft")))
+        (.then (fn [_] (capture! terminal "chat-narrow")
+                 (println "Browser/chat rendering passed: provider states, two-pane navigation, scope selection, narrow layout, source/output, draft preservation."))))))
+
 (defn- exercise! [terminal]
   (let [application (app/create! {:runtime-root (.cwd js/process) :cwd (.cwd js/process)
                                   :setup? false})
@@ -289,6 +377,7 @@
         (.then (fn [_]
                  (.resize terminal 120 40)
                  (inspector-and-host-lifetimes! application terminal)))
+        (.then (fn [_] (browser-and-chat! application terminal)))
         (.then (fn [] (println "Native TUI passed: popup layout, inspector selection ownership, session widgets, render/editor requests and cancelled overlay cleanup.")))
         (.finally (fn []
                     (view/destroy! mounted)
@@ -297,7 +386,9 @@
 
 (defn -main []
   (aset js/globalThis "ARRODES_TUI_TEST_DONE"
-        (-> (app-test/exercise!)
+        (-> (if (aget (.-env js/process) "ARRODES_TUI_VISUAL_ONLY")
+              (js/Promise.resolve nil)
+              (-> (catalog-flow/exercise!) (.then (fn [] (app-test/exercise!)))))
             (.then (fn []
                      ((aget js/globalThis "ARRODES_CREATE_TEST_RENDERER")
                       #js {:width 120 :height 40 :kittyKeyboard true :consoleMode "disabled"})))

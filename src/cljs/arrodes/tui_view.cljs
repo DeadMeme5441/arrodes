@@ -1,13 +1,15 @@
 (ns arrodes.tui-view
   "The OpenTUI host: keyed conversation, persistent editor and contextual inspection."
   (:require [arrodes.tui-app :as app]
+            [arrodes.catalog :as catalog]
+            [arrodes.run :as run]
             [arrodes.tui-model :as model]
             [arrodes.tui-present :as present]
             [arrodes.tui-widgets :as w]
             [clojure.string :as str]))
 
 (declare refresh! schedule! open-overlay! close-overlay! choose-overlay! commands
-         inspect! submit! follow! focus! close-inspector! request-inspection! quit! file-query! escape!)
+         open-providers! open-model-choice! provider-actions! browser-provider! inspect! submit! follow! focus! close-inspector! request-inspection! quit! file-query! escape!)
 (declare render-overlay! render-widgets! destroy!)
 
 (defn- state [view] @(:state (:app view)))
@@ -98,10 +100,96 @@
                (when (= :history (get-in (state view) [:ui :overlay :kind]))
                  (ui! view assoc-in [:overlay :entries] (:entries result)))))
       (.catch (fn [_] nil))))
+(defn- open-providers! [view]
+  (open-overlay! view {:kind :providers :title "Providers" :query ""
+                       :hint "Connect your accounts. Connecting a provider keeps your conversation's model unchanged."})
+  (fire! view :providers {}))
+
 (defn- open-models! [view]
-  (open-overlay! view {:kind :models :title "Choose a model" :query ""
-                       :hint "Explicit selection only; no automatic model fallback. /refresh-models refreshes OAuth catalogs."})
+  (let [provider (get-in (state view) [:view :session :config :provider])]
+    (open-overlay! view {:kind :models :title "Models" :query "" :provider provider :pane :models
+                         :hint "Choose a model. Enter opens reasoning and conversation/default actions."})
+    (fire! view :providers {})
+    (fire! view :models {})))
+
+(defn- browser-provider! [view entry]
+  (ui! view update :overlay assoc :provider (catalog/provider-id entry) :query "" :index 0 :pane :models)
   (fire! view :models {}))
+
+(defn- provider-actions! [view entry]
+  (let [previous (get-in (state view) [:ui :overlay])
+        id (catalog/provider-id entry)
+        auth-type (keyword (get-in entry [:auth :type] :api-key))
+        return! #(do (ui! view assoc :overlay previous) (render-overlay! view))
+        connect! (fn []
+                   (return!)
+                   (fire! view :provider-login {:provider id :type auth-type}))
+        browse! (fn []
+                  (open-overlay! view {:kind :models :title "Models" :provider id :query "" :pane :models
+                                       :return-overlay previous
+                                       :hint "Enter selects reasoning and where to use this model. F5 refreshes this provider."})
+                  (fire! view :models {})
+                  (when (:available? entry) (fire! view :provider-models {:provider id})))]
+    (open-overlay!
+     view {:kind :choices :title (catalog/provider-name entry) :return-overlay previous
+           :hint (str (catalog/status-label entry) " · " (catalog/auth-label entry))
+           :items (vec (concat
+                        (when (:available? entry)
+                          [{:label "Browse models" :description "Choose for this conversation or save a default" :choose browse!}])
+                        (cond
+                          (= :ambient auth-type)
+                          [{:label "Check environment credentials" :description "Configure credentials in your shell, then restart Arrodes to load them."
+                            :choose #(do (return!) (fire! view :providers {}))}]
+                          (= :none auth-type)
+                          [{:label "Browse available models" :description "This provider does not require sign-in" :choose browse!}]
+                          :else
+                          [{:label (if (:available? entry) "Sign in again" "Connect provider")
+                            :description (catalog/auth-label entry) :choose connect!}])
+                        (when (and (:available? entry) (not (contains? #{:ambient :none} auth-type)))
+                          [{:label "Remove saved credentials" :description "Environment credentials, if present, remain available."
+                            :choose #(open-overlay!
+                                      view {:kind :confirm :title "Remove saved credentials?" :return-overlay previous
+                                            :hint (catalog/provider-name entry)
+                                            :items [{:label "Keep connection" :choose return!}
+                                                    {:label "Remove credentials" :choose (fn [] (return!) (fire! view :provider-logout {:provider id}))}]})}])))})))
+
+(defn- open-model-choice! [view m]
+  (let [previous (get-in (state view) [:ui :overlay])
+        current (get-in (state view) [:view :session :config :thinking])
+        levels (mapv keyword (or (seq (:thinking-levels m)) [:none]))
+        preferred (catalog/thinking m current)
+        choose-scope!
+        (fn [thinking]
+          (open-overlay!
+           view {:kind :choices :title (:id m) :return-overlay previous
+                 :hint (str "Reasoning: " (name thinking) ". Choose where to use this model.")
+                 :items (vec
+                         (for [[scope label description]
+                               (cond-> []
+                                 (get-in (state view) [:view :session :id])
+                                 (conj [:session "Use in this conversation" "Preserves history and live definitions"])
+                                 true (conj [:default "Make default for new conversations" "Existing conversations keep their model"]))]
+                           {:label label :description description
+                            :choose (fn []
+                                      (let [token (get-in (state view) [:ui :overlay :token])]
+                                        (-> (invoke! view :select-model {:provider (:provider m) :model (:id m)
+                                                                       :thinking thinking :scope scope})
+                                            (.then (fn [_]
+                                                     (when (and (get-in (state view) [:view :session :id])
+                                                                (or (= token (get-in (state view) [:ui :overlay :token]))
+                                                                    (nil? (get-in (state view) [:ui :overlay]))))
+                                                       (ui! view assoc :overlay nil :focus :composer)
+                                                       (.focus (:composer view)))))
+                                            (.catch (fn [failure]
+                                                      (when (= token (get-in (state view) [:ui :overlay :token]))
+                                                        (ui! view assoc-in [:overlay :error] (error-text failure))))))))}))}))]
+    (open-overlay! view {:kind :choices :title "Reasoning" :return-overlay previous
+                         :hint (str (:id m) " · choose the effort for this selection")
+                         :items (mapv (fn [level]
+                                        {:label (str (name level) (when (= level preferred) " · current preference"))
+                                         :description "Use this reasoning level"
+                                         :choose #(choose-scope! level)}) levels)})))
+
 (defn- open-files! [view marker]
   (open-overlay! view {:kind :files :title "Attach project context" :query "" :items []
                        :marker marker :hint "Text and image files are explicit attachments. Oversized files are rejected."})
@@ -135,21 +223,20 @@
                                  (.then #(close-overlay! view))
                                  (.catch (fn [_] nil))))})
                 (:sessions s))
+          :providers
+          (mapv (fn [entry]
+                  {:label (str (if (:available? entry) "● " "○ ") (catalog/provider-name entry))
+                   :description (str (catalog/status-label entry) " · " (catalog/auth-label entry))
+                   :connected? (:available? entry)
+                   :choose #(provider-actions! view entry)}) (catalog/providers (:providers s)))
           :models
           (mapv (fn [m]
-                  {:label (:id m) :description (str (name (keyword (:provider m)))
-                                                    "  " (str/join "/" (map name (:thinking-levels m))))
-                   :choose (fn []
-                             (let [current (get-in s [:view :session :config :thinking])
-                                   levels (mapv keyword (:thinking-levels m))
-                                   thinking (cond (some #{(keyword current)} levels) (keyword current)
-                                                  (some #{:high} levels) :high
-                                                  (seq levels) (first levels)
-                                                  :else :none)]
-                               (-> (invoke! view :set-model {:provider (:provider m) :model (:id m) :thinking thinking})
-                                   (.then #(close-overlay! view))
-                                   (.catch (fn [_] nil)))))})
-                (:models s))
+                  {:label (:id m) :model m
+                   :description (str (when (= (:id m) (get-in s [:view :session :config :model])) "Current · ")
+                                     (when (:context-window m) (str (:context-window m) " context · "))
+                                     (str/join "/" (map name (:thinking-levels m))))
+                   :choose #(open-model-choice! view m)})
+                (catalog/models (:models s) (:provider overlay) (:query overlay)))
           :history
           (->> (:entries overlay)
                reverse
@@ -195,7 +282,7 @@
     (->> raw
          (filter #(or (str/blank? query)
                       (str/includes? (str/lower-case (str (:label %) " " (:description %))) query)))
-         (take 100)
+         (take (if (contains? #{:models :providers} (:kind overlay)) 2000 100))
          vec)))
 
 (defn- choose-overlay! [view]
@@ -224,7 +311,8 @@
               (catch :default error
                 (swap! (:local view) dissoc :submitting-modal)
                 (failed error))))))
-      (when-let [item (get (overlay-items view overlay) (or (:index overlay) 0))]
+      (when-let [item (when (or (:host-id overlay) (nil? (:catalog-operation (state view))))
+                        (get (overlay-items view overlay) (or (:index overlay) 0)))]
         (when (and (= :commands (:kind overlay)) (= "/" (get-in (state view) [:ui :draft])))
           (ui! view assoc :draft ""))
         ((:choose item))))))
@@ -284,10 +372,9 @@
                                                (fn [items] (vec (remove (fn [x] (= (:path x) (:path item))) items))))
                                           (close-overlay! view))})
                              (get-in (state view) [:ui :attachments]))}))}
-   {:label "Provider setup" :description "/setup"
-    :choose #(do (close-overlay! view) (fire! view :setup {}))}
-   {:label "Provider login" :description "/login"
-    :choose #(do (close-overlay! view) (fire! view :setup {}))}
+   {:label "Providers" :description "/providers  Connect and manage accounts" :choose #(open-providers! view)}
+   {:label "Provider setup" :description "/setup" :choose #(open-providers! view)}
+   {:label "Provider login" :description "/login" :choose #(open-providers! view)}
    {:label "Choose model" :description "/models" :choose #(open-models! view)}
    {:label "Refresh model catalog" :description "/refresh-models" :choose #(do (close-overlay! view) (fire! view :models {:refresh? true}))}
    {:label "Thinking level" :description "/thinking"
@@ -375,20 +462,22 @@
         row* (atom row)
         message? (= :message (:kind row))
         root (w/box renderer {:id (str "row:" (:id row)) :width "100%" :paddingX 1
-                              :marginTop (if message? 1 0) :marginBottom (if message? 1 0)})
+                              :marginTop (if message? (:section-gap w/layout) 0) :marginBottom (if message? (:section-gap w/layout) 0)})
         header (w/box renderer {:height 1 :flexDirection "row" :width "100%"})
-        toggle (w/button renderer "[+]" #(toggle! view @row*) {:width 4})
+        toggle (w/button renderer "›" #(toggle! view @row*) {:width 2})
         label (w/text renderer "" {:flexGrow 1 :flexShrink 1 :height 1 :wrapMode "none" :truncate true})
         status (w/text renderer "" {:width 12 :height 1 :fg (:muted w/colors) :wrapMode "none"})
         inspect (w/button renderer "inspect" #(inspect! view @row*) {:width 7 :fg (:faint w/colors)})
+        source (w/text renderer "" {:width "100%" :visible false :paddingX 1 :marginTop 1 :maxHeight 20})
+        output-label (w/text renderer "─ Output" {:width "100%" :height 1 :visible false :fg (:faint w/colors)})
         body (if message?
                (w/markdown renderer (:syntax view) "" {:width "100%"})
                (w/text renderer "" {:width "100%" :fg (:muted w/colors)}))]
     (set! (.-visible toggle) (not message?))
     (w/add! header toggle label status inspect)
-    (w/add! root header body)
+    (w/add! root header source output-label body)
     {:root root :row row* :header header :toggle toggle :label label :status status
-     :body body :message? message? :signature (atom nil)}))
+     :inspect inspect :body body :source source :output-label output-label :message? message? :signature (atom nil)}))
 
 (defn- update-row! [view record row]
   (let [s (state view)
@@ -402,15 +491,26 @@
       (let [a (present/activity row)
             text (or (present/inline-content row expanded) "")
             user? (= :user (:role row))
+            execution (when a (present/execution (:view s) a))
+            source (when (and expanded (not (:message? record))) (or (:source execution) (:source a)))
             color (cond (:error? row) (:error w/colors)
                         (present/failed? a) (:error w/colors)
                         (= :running (:status a)) (:accent w/colors)
                         :else (:muted w/colors))]
         (set! (.-backgroundColor (:root record))
-              (cond selected (:raised w/colors) user? (:surface w/colors) :else (:background w/colors)))
-        (w/content! (:label record) (present/row-title row))
-        (set! (.-fg (:label record)) (if (:message? record) (:accent w/colors) (:text w/colors)))
-        (w/content! (:toggle record) (if expanded "[-]" "[+]"))
+              (if selected (:raised w/colors) (:background w/colors)))
+        ;; OpenTUI's color setter initializes borders; apply visibility last.
+        (set! (.-borderColor (:root record)) (:border w/colors))
+        (set! (.-border (:root record)) (boolean (and expanded source)))
+        (set! (.-paddingLeft (:root record)) (if (and a (:parent-id a)) 3 1))
+        (set! (.-visible (:header record)) (or (not (:message? record)) user? selected (:streaming? row)))
+        (set! (.-visible (:inspect record)) selected)
+        (set! (.-visible (:source record)) (boolean source))
+        (set! (.-visible (:output-label record)) (boolean (and source (seq text))))
+        (when source (w/code-content! (:source record) (present/lines-preview source 20)))
+        (w/content! (:label record) (if user? "› You" (present/row-title row)))
+        (set! (.-fg (:label record)) (if user? (:text w/colors) (:accent w/colors)))
+        (w/content! (:toggle record) (if expanded "⌄" "›"))
         (w/content! (:status record)
                     (cond a (present/status-label a) (:streaming? row) "writing" :else ""))
         (set! (.-fg (:status record)) color)
@@ -594,14 +694,16 @@
         (swap! (:local view) assoc :modal-token nil :modal-signature nil
                :modal-selection-signature nil :modal-scroll-choice nil :modal-index nil)
         (.setText (:modal-input view) ""))
-      (let [width (max 24 (min 94 (- (.-terminalWidth renderer) 4)))
-            height (max 10 (min 26 (- (.-terminalHeight renderer) 4)))
+      (let [browser? (contains? #{:providers :models} (:kind overlay))
+            models? (= :models (:kind overlay))
+            width (max 24 (if browser? (- (.-terminalWidth renderer) 2) (min 94 (- (.-terminalWidth renderer) 4))))
+            height (max 10 (if browser? (- (.-terminalHeight renderer) 2) (min 26 (- (.-terminalHeight renderer) 4))))
             input? (= :input (:kind overlay))
             body? (some? (:body overlay))
             query? (not (or (= :confirm (:kind overlay)) body?))
             items (overlay-items view overlay)
             index (min (max 0 (dec (count items))) (or (:index overlay) 0))
-            signature [(:token overlay) (:query overlay) (:body overlay)
+            signature [(:token overlay) (:query overlay) (:body overlay) (:provider overlay) browser?
                        (mapv #(select-keys % [:label :description]) items)]
             rebuild? (not= signature (:modal-signature @(:local view)))
             selection-signature [signature index width height]]
@@ -609,7 +711,17 @@
         (set! (.-height (:modal view)) height)
         (set! (.-left (:modal view)) (max 0 (js/Math.floor (/ (- (.-terminalWidth renderer) width) 2))))
         (set! (.-top (:modal view)) (max 0 (js/Math.floor (/ (- (.-terminalHeight renderer) height) 2))))
-        (w/content! (:modal-title view) (:title overlay))
+        (set! (.-visible (:modal-sidebar view)) (and models? (>= width 76)))
+        (set! (.-visible (:model-detail view)) models?)
+        (set! (.-visible (:browser-status view)) browser?)
+        (w/content! (:browser-status view) (or (:catalog-operation (state view))
+                                               (get-in (state view) [:notice :message]) ""))
+        (w/content! (:modal-title view)
+                    (if models? (str "Models · " (or (some-> (:provider overlay) name) "All providers")
+                                     (when (= :providers (:pane overlay)) " · selecting provider")) (:title overlay)))
+        (set! (.-visible (:provider-switch view)) models?)
+        (set! (.-width (:provider-switch view)) (if (< width 60) 12 21))
+        (w/content! (:provider-switch view) (if (< width 60) "Provider" "Change provider"))
         (w/content! (:modal-hint view)
                     (str (:hint overlay) (when (:error overlay) (str "\nError: " (:error overlay)))))
         (set! (.-visible (:modal-input-frame view)) query?)
@@ -652,10 +764,17 @@
             :else
             (doseq [[i item] (map-indexed vector items)]
               (let [row (w/box renderer {:id (str "choice-" i) :width "100%" :paddingX 1 :paddingY 0
-                                         :marginBottom 1 :backgroundColor (if (= i index) (:raised w/colors) (:surface w/colors))})
+                                         :marginBottom (if browser? 0 1) :backgroundColor (if (= i index) (:raised w/colors) (:surface w/colors))})
                     button (w/button renderer (:label item) (:choose item) {:id (str "choice-" i "-label") :width "100%"
                                                                             :fg (if (= i index) (:accent w/colors) (:text w/colors))})
                     description (w/text renderer (:description item) {:width "100%" :fg (:muted w/colors)})]
+                (when browser?
+                  (set! (.-flexDirection row) "row")
+                  (set! (.-width button) "55%")
+                  (set! (.-width description) "45%")
+                  (set! (.-height description) 1)
+                  (set! (.-wrapMode description) "none"))
+                (when (and browser? (:connected? item)) (set! (.-fg description) (:success w/colors)))
                 (w/add! row button description)
                 (.add (:modal-list view) row)))))
         (when (not= selection-signature (:modal-selection-signature @(:local view)))
@@ -669,8 +788,34 @@
           (swap! (:local view) assoc :modal-selection-signature selection-signature :modal-index index
                  :modal-scroll-choice
                  (when (and (seq items) (not input?) (not body?)) (str "choice-" index))))
+        (when models?
+          (let [providers (catalog/providers (:providers (state view)))
+                selected (:provider overlay)
+                sidebar-signature [providers selected (:pane overlay) width]]
+            (when (not= sidebar-signature (:sidebar-signature @(:local view)))
+              (swap! (:local view) assoc :sidebar-signature sidebar-signature)
+              (w/clear! (:modal-sidebar view))
+              (.add (:modal-sidebar view) (w/button renderer "+ Connect a provider" #(open-providers! view)
+                                                    {:height 2 :width "100%"}))
+              (doseq [entry providers]
+                (.add (:modal-sidebar view)
+                      (w/button renderer (str (if (= (catalog/provider-id entry) (some-> selected keyword)) "› " "  ")
+                                               (if (:available? entry) "● " "○ ") (catalog/provider-name entry))
+                                #(browser-provider! view entry)
+                                {:id (str "provider-" (name (catalog/provider-id entry)))
+                                 :width "100%" :height 1 :wrapMode "none" :truncate true
+                                 :fg (if (= (catalog/provider-id entry) (some-> selected keyword)) (:accent w/colors) (:muted w/colors))}))))
+            (swap! (:local view) assoc :sidebar-choice (when selected (str "provider-" (name selected))))
+            (set! (.-borderColor (:modal-sidebar view)) (if (= :providers (:pane overlay)) (:accent w/colors) (:border w/colors)))
+            (w/content! (:model-detail view)
+                        (or (catalog/model-details (:model (get items index)))
+                            "No models found. F5 refreshes the selected provider; /providers manages connections."))))
         (w/content! (:modal-footer view)
-                    (cond input? "Enter submit   Shift+Enter newline   Esc cancel"
+                    (cond models? (if (< width 80) "Tab pane · ↑↓ select · Enter · F5 refresh · Esc back"
+                                      "Tab provider/models · ↑↓ select · Enter choose · F5 refresh · Esc back")
+                          browser? (if (< width 80) "↑↓ select · Enter manage · F5 refresh · Esc back"
+                                        "Type to search · ↑↓ select · Enter manage · F5 refresh · Esc back")
+                          input? "Enter submit   Shift+Enter newline   Esc cancel"
                           body? "Esc back"
                           (= :pending (:kind overlay)) "Up/Down select   Enter edit   Delete drop   Esc back"
                           :else (str "Up/Down select   Enter choose   Esc back"
@@ -867,13 +1012,30 @@
                     (ui! view assoc :draft ""))))
               true)
             (and ctrl (= name "d")) (do (quit! view) true)
-            (= name "escape") (do (escape! view) true)
+            (= name "escape")
+            (do (if (and (not (:host-id overlay))
+                         (str/starts-with? (or (:catalog-operation s) "") "Connecting provider"))
+                  (fire! view :provider-cancel {})
+                  (escape! view)) true)
             (= name "f1") (do ((:choose (some #(when (= "Keyboard help" (:label %)) %) (commands view)))) true)
             (= name "f2") (do (open-sessions! view) true)
             (or (= name "f3") (and ctrl (= name "p")))
             (do (open-overlay! view {:kind :commands :title "Commands" :query "" :hint "Search actions or slash commands."}) true)
             overlay
             (cond
+              (and (= name "f5") (contains? #{:providers :models} (:kind overlay)))
+              (do (if (= :providers (:kind overlay)) (fire! view :providers {})
+                      (when (:provider overlay) (fire! view :provider-models {:provider (:provider overlay)}))) true)
+              (and (= :models (:kind overlay)) (= name "tab"))
+              (do (ui! view update-in [:overlay :pane] #(if (= % :providers) :models :providers)) true)
+              (and (= :models (:kind overlay)) (= :providers (:pane overlay))
+                   (contains? #{"up" "down"} name))
+              (do (let [entries (catalog/providers (:providers s))
+                        index (or (first (keep-indexed #(when (= (catalog/provider-id %2) (some-> (:provider overlay) keyword)) %1) entries)) 0)
+                        next (get entries (max 0 (min (dec (count entries)) (+ index (if (= name "up") -1 1)))))]
+                    (when next (ui! view update :overlay assoc :provider (catalog/provider-id next) :index 0))) true)
+              (and (= :models (:kind overlay)) (= :providers (:pane overlay)) enter?)
+              (do (ui! view assoc-in [:overlay :pane] :models) true)
               (and enter? (not shift)) (do (choose-overlay! view) true)
               (and (contains? #{"up" "down"} name) (not= :input (:kind overlay)))
               (do (ui! view update-in [:overlay :index]
@@ -937,6 +1099,12 @@
   (let [s (state view) renderer (:renderer view)
         width (.-terminalWidth renderer) height (.-terminalHeight renderer)
         session (get-in s [:view :session]) config (:config session)
+        selected-model (some #(when (and (= (:id %) (:model config))
+                                         (= (catalog/provider-id %) (some-> (:provider config) keyword))) %) (:models s))
+        last-usage (run/latest-usage (vec (get-in s [:view :entries])))
+        window (:context-window selected-model)
+        context-percent (when (and (number? window) (pos? window) last-usage)
+                          (js/Math.round (* 100 (/ (run/context-tokens last-usage) window))))
         connection (get-in s [:connection :status])
         operation (get-in s [:view :operation])
         running (busy? view)
@@ -946,10 +1114,10 @@
         phase (cond (= connection :starting) "Connecting"
                     (= connection :disconnected) "Disconnected"
                     (= connection :closing) "Closing"
-                    (= :cancelling (:status operation)) "Cancelling"
+                    (= :cancelling (:status operation)) "Stopping…"
                     running (str "Working" elapsed)
                     (= :failed (:status operation)) "Failed"
-                    (= :cancelled (:status operation)) "Cancelled"
+                    (= :cancelled (:status operation)) "Stopped"
                     (= :interrupted (:status operation)) "Interrupted"
                     :else "Idle")
         status-widgets (->> (active-widgets s)
@@ -962,13 +1130,16 @@
                       (str (when (:unknown-outcome? notice) "Outcome unknown; inspect before resubmitting. ")
                            (:message notice))
                       notice)]
-    (w/content! (:brand view) (str "ARRODES / " (basename (:cwd session))))
-    (w/content! (:session-title view) (or (:name session) "Opening session"))
+    (w/content! (:brand view) (str "arrodes · " (basename (:cwd session))))
+    (w/content! (:session-title view) (or (:name session) "Choose a provider to get started"))
     (set! (.-visible (:header-sessions view)) (>= width 70))
+    (set! (.-visible (:header-providers view)) (>= width 90))
     (set! (.-visible (:header-commands view)) (>= width 55))
     (w/content! (:footer-status view)
-                (str (or (:model config) "Core") " / "
-                     (name (keyword (or (:thinking config) "high"))) "   " phase
+                (str (or (:model config) "No model selected") " · "
+                     (name (keyword (or (:thinking config) "none"))) "   " (basename (:cwd session))
+                     (when (:branch s) (str " / " (:branch s))) "   " phase
+                     (when context-percent (str "   " context-percent "% context"))
                      (when (seq status-widgets) (str " · " (str/join " · " status-widgets)))))
     (set! (.-fg (:footer-status view))
           (if (contains? #{:disconnected :closing} connection) (:error w/colors) (:accent w/colors)))
@@ -986,8 +1157,8 @@
     (w/content! (:notice-text view) (or notice-text ""))
     (set! (.-fg (:notice-text view))
           (if (= :error (:kind notice)) (:error w/colors) (:muted w/colors)))
-    (set! (.-visible (:attachment-row view)) (>= height 14))
-    (set! (.-height (:header view)) (if (< height 14) 1 2))
+    (set! (.-visible (:attachment-row view)) (and (>= height 14) (seq (get-in s [:ui :attachments]))))
+    (set! (.-height (:header view)) 1)
     (set! (.-placeholder (:composer view))
           (cond (not= connection :ready) "Waiting for the core; your draft is preserved..."
                 running "Steer the current run, or Ctrl+Q to queue a follow-up..."
@@ -1032,6 +1203,16 @@
                           16))))
 
 (defn- frame! [view]
+  (when (and (not @(:closed? view)) (.-visible (:modal-sidebar view)))
+    (when-let [id (:sidebar-choice @(:local view))]
+      (when-let [row (.findDescendantById (:modal-sidebar view) id)]
+        (let [scroll (:modal-sidebar view) viewport (.-viewport scroll)
+              top (.-y row) bottom (+ top (.-height row))
+              delta (cond (< top (.-y viewport)) (- top (.-y viewport))
+                          (> bottom (+ (.-y viewport) (.-height viewport))) (- bottom (+ (.-y viewport) (.-height viewport)))
+                          :else 0)]
+          (swap! (:local view) dissoc :sidebar-choice)
+          (when-not (zero? delta) (.scrollBy scroll delta))))))
   (when (and (not @(:closed? view)) (.-visible (:modal-shade view)))
     (when-let [choice (:modal-scroll-choice @(:local view))]
       (let [scroll (:modal-list view)
@@ -1090,19 +1271,20 @@
         local (atom {:rows [] :prompt-history []})
         closed? (atom false)
         root (w/box renderer {:id "arrodes" :width "100%" :height "100%" :backgroundColor (:background w/colors)})
-        header (w/box renderer {:height 2 :width "100%" :flexDirection "row" :paddingX 2
-                                :border ["bottom"] :borderColor (:border w/colors)})
+        header (w/box renderer {:height 1 :width "100%" :flexDirection "row" :paddingX (:gutter w/layout)
+                                :border false})
         brand (w/text renderer "ARRODES" {:fg (:accent w/colors) :width 30 :height 1 :truncate true :wrapMode "none"})
-        session-title (w/text renderer "Opening session" {:flexGrow 1 :flexShrink 1 :height 1 :truncate true :wrapMode "none"})
-        header-sessions (w/button renderer "[Sessions]" (fn [] (open-sessions! @view-ref)) {:width 12})
-        header-commands (w/button renderer "[Commands]" (fn [] (open-overlay! @view-ref {:kind :commands :title "Commands" :query ""})) {:width 10})
+        session-title (w/text renderer "Choose a provider to get started" {:flexGrow 1 :flexShrink 1 :height 1 :truncate true :wrapMode "none"})
+        header-providers (w/button renderer "Providers" (fn [] (open-providers! @view-ref)) {:width 12})
+        header-sessions (w/button renderer "Sessions" (fn [] (open-sessions! @view-ref)) {:width 12})
+        header-commands (w/button renderer "Commands" (fn [] (open-overlay! @view-ref {:kind :commands :title "Commands" :query ""})) {:width 10})
         body (w/box renderer {:width "100%" :flexDirection "row" :flexGrow 1 :flexShrink 1 :minHeight 1 :overflow "hidden"})
         conversation (w/box renderer {:flexGrow 1 :flexShrink 1 :minWidth 1 :height "100%"})
         transcript (w/scrollbox renderer {:id "conversation" :width "100%" :height "100%" :stickyScroll true :stickyStart "bottom"
                                           :contentOptions {:paddingX 1 :paddingBottom 1 :flexDirection "column"}
                                           :onMouseDown (fn [_] (when-let [view @view-ref] (focus! view :transcript)))
                                           :onMouseScroll (fn [_] (when-let [view @view-ref] (ui! view assoc :follow? false)))})
-        welcome (w/text renderer "Describe what you want to do.\n\nUse @ to attach project context, or / to find a command.\nExecution stays inspectable without taking over the conversation."
+        welcome (w/text renderer "What are we working on?\n\nDescribe a change, ask a question, or explore this project.\n\n/providers  connect accounts     /models  choose a model\n@  attach a file                 /  all commands"
                         {:position "absolute" :top 3 :left 3 :width "85%" :fg (:muted w/colors)})
         inspector (w/box renderer {:id "inspector" :visible false :width 44 :height "100%" :paddingX 1
                                    :border ["left"] :borderColor (:border w/colors)})
@@ -1141,18 +1323,18 @@
                                    {:width 9 :visible false})
         inspector-lifetime (w/text renderer "" {:fg (:faint w/colors) :width "100%" :maxHeight 3 :marginBottom 1})
         new-activity (w/button renderer "New activity below - jump to latest" (fn [] (follow! @view-ref))
-                               {:visible false :width "100%" :height 1 :paddingX 2 :bg (:surface w/colors)})
-        pending (w/box renderer {:visible false :width "100%" :paddingX 2 :border ["top"] :borderColor (:border w/colors)})
+                               {:visible false :width "100%" :height 1 :paddingX (:gutter w/layout) :bg (:surface w/colors)})
+        pending (w/box renderer {:visible false :width "100%" :paddingX (:gutter w/layout) :border ["top"] :borderColor (:border w/colors)})
         pending-title (w/text renderer "PENDING" {:fg (:accent w/colors) :height 1})
         pending-items (w/box renderer {:width "100%"})
         pending-more (w/button renderer "" (fn [] (open-overlay! @view-ref {:kind :pending :title "Pending messages" :query ""
                                                                             :hint "Enter edits; Delete drops a still-pending message."}))
                                {:visible false :height 1 :fg (:muted w/colors)})
         widget-box (w/box renderer {:id "session-widgets" :visible false :width "100%"
-                                    :maxHeight 6 :paddingX 2 :border ["top"]
+                                    :maxHeight 6 :paddingX (:gutter w/layout) :border ["top"]
                                     :borderColor (:border w/colors)})
         widget-items (w/box renderer {:width "100%"})
-        notice-box (w/box renderer {:visible false :height 1 :width "100%" :paddingX 2 :flexDirection "row"})
+        notice-box (w/box renderer {:visible false :height 1 :width "100%" :paddingX (:gutter w/layout) :flexDirection "row"})
         notice-text (w/text renderer "" {:height 1 :flexGrow 1 :flexShrink 1 :truncate true :wrapMode "none"})
         notice-detail (w/button renderer "[Details]"
                                 (fn []
@@ -1164,7 +1346,7 @@
                                                             (str notice))})))
                                 {:width 10 :fg (:muted w/colors)})
         notice-close (w/button renderer "[x]" (fn [] (swap! (:state application) assoc :notice nil)) {:width 3 :fg (:faint w/colors)})
-        composer-box (w/box renderer {:width "100%" :paddingX 2 :paddingTop 1 :border ["top"] :borderColor (:accent w/colors)})
+        composer-box (w/box renderer {:width "100%" :paddingX 1 :border true :borderColor (:accent w/colors)})
         composer (w/create renderer "TextareaRenderable"
                            {:id "composer" :height 2 :width "100%" :wrapMode "word"
                             :initialValue "" :placeholder "Ask a question or describe a change..."
@@ -1192,15 +1374,28 @@
         attachment-row (w/box renderer {:height 1 :width "100%" :flexDirection "row"})
         attach-button (w/button renderer "[@ Context]" (fn [] (open-files! @view-ref nil)) {:width 13 :fg (:faint w/colors)})
         attachment-items (w/box renderer {:height 1 :flexGrow 1 :flexShrink 1 :flexDirection "row" :overflow "hidden"})
-        footer (w/box renderer {:width "100%" :height 1 :paddingX 2 :flexDirection "row" :backgroundColor (:surface w/colors)})
-        footer-status (w/text renderer "" {:flexGrow 1 :flexShrink 1 :height 1 :truncate true :wrapMode "none"})
+        footer (w/box renderer {:width "100%" :height 1 :paddingX (:gutter w/layout) :flexDirection "row" :backgroundColor (:surface w/colors)})
+        footer-status (w/button renderer "" (fn [] (open-models! @view-ref)) {:flexGrow 1 :flexShrink 1 :height 1 :truncate true :wrapMode "none"})
         footer-keys (w/text renderer "" {:height 1 :fg (:muted w/colors) :wrapMode "none" :truncate true})
         modal-shade (w/box renderer {:id "dialog-layer" :visible false :position "absolute" :top 0 :left 0
-                                     :width "100%" :height "100%" :zIndex 100 :backgroundColor "#0b0e12"})
-        modal (w/box renderer {:position "absolute" :width 90 :height 24 :paddingX 2 :paddingY 1
-                               :border true :borderColor (:accent w/colors) :backgroundColor (:surface w/colors)})
+                                     :width "100%" :height "100%" :zIndex 100 :backgroundColor "#08090a"})
+        modal (w/box renderer {:position "absolute" :width 90 :height 24 :paddingX 1 :paddingY 1
+                               :border true :borderColor (:border w/colors) :backgroundColor (:surface w/colors)})
         modal-header (w/box renderer {:width "100%" :height 2 :flexDirection "row"})
         modal-title (w/text renderer "" {:height 1 :flexGrow 1 :flexShrink 1 :fg (:accent w/colors) :truncate true :wrapMode "none"})
+        provider-switch (w/button renderer "Change provider"
+                                  (fn []
+                                    (let [previous (get-in (state @view-ref) [:ui :overlay])]
+                                      (open-overlay! @view-ref
+                                                     {:kind :choices :title "Choose provider" :return-overlay previous
+                                                      :items (mapv (fn [entry]
+                                                                     {:label (catalog/provider-name entry)
+                                                                      :description (catalog/status-label entry)
+                                                                      :choose (fn []
+                                                                                (ui! @view-ref assoc :overlay previous)
+                                                                                (browser-provider! @view-ref entry))})
+                                                                   (catalog/providers (:providers (state @view-ref))))})))
+                                  {:width 21 :visible false})
         modal-close (w/button renderer "[x]" (fn [] (escape! @view-ref)) {:width 3})
         modal-hint (w/text renderer "" {:width "100%" :maxHeight 4 :fg (:muted w/colors) :marginBottom 1})
         modal-input-frame (w/box renderer {:width "100%" :height 1})
@@ -1227,11 +1422,18 @@
         modal-mask (w/text renderer "" {:id "dialog-secret-mask" :position "absolute" :top 0 :left 0
                                         :zIndex 2 :width "100%" :height 1 :visible false
                                         :selectable false :fg (:text w/colors) :bg (:surface w/colors)})
-        modal-list (w/scrollbox renderer {:id "dialog-choices" :width "100%" :marginTop 1})
+        modal-content (w/box renderer {:width "100%" :flexDirection "row" :flexGrow 1 :flexShrink 1 :minHeight 1})
+        modal-sidebar (w/scrollbox renderer {:id "provider-sidebar" :width (:sidebar-width w/layout) :flexGrow 0 :visible false
+                                             :border ["right"] :borderColor (:border w/colors) :marginRight 2 :paddingRight 1})
+        modal-list (w/scrollbox renderer {:id "dialog-choices" :flexGrow 1 :flexShrink 1 :minWidth 1 :marginTop 1})
+        model-detail (w/text renderer "" {:id "model-detail" :width "100%" :height 3 :visible false
+                                         :fg (:muted w/colors) :border ["top"] :borderColor (:border w/colors)})
+        browser-status (w/text renderer "" {:id "browser-status" :width "100%" :height 1 :visible false
+                                           :fg (:accent w/colors) :truncate true :wrapMode "none"})
         modal-footer (w/text renderer "" {:width "100%" :height 1 :fg (:faint w/colors) :wrapMode "none" :truncate true})
         view {:app application :renderer renderer :root root :local local :closed? closed?
               :syntax (w/syntax-style) :records (atom {})
-              :header header :brand brand :session-title session-title :header-sessions header-sessions :header-commands header-commands
+              :header header :brand brand :session-title session-title :header-providers header-providers :header-sessions header-sessions :header-commands header-commands
               :body body :conversation conversation :transcript transcript :welcome welcome
               :inspector inspector :inspector-title inspector-title :inspector-tabs inspector-tabs
               :inspector-scroll inspector-scroll :inspector-output inspector-output :inspector-next inspector-next
@@ -1241,15 +1443,16 @@
               :widget-box widget-box :widget-items widget-items
               :notice-box notice-box :notice-text notice-text :composer-box composer-box :composer composer
               :attachment-row attachment-row :attachment-items attachment-items :footer-status footer-status :footer-keys footer-keys
-              :modal-shade modal-shade :modal modal :modal-title modal-title :modal-hint modal-hint
+              :provider-switch provider-switch :modal-shade modal-shade :modal modal :modal-title modal-title :modal-hint modal-hint
               :modal-input-frame modal-input-frame :modal-input modal-input :modal-mask modal-mask
-              :modal-list modal-list :modal-footer modal-footer
+              :modal-list modal-list :modal-footer modal-footer :modal-sidebar modal-sidebar
+              :model-detail model-detail :browser-status browser-status
               :on-quit (or (:on-quit options) (fn [] (-> (app/close! application) (.finally (fn [] (.destroy renderer))))))}
         key-handler (fn [event] (key! view event))
         frame-handler (fn [_] (frame! view))
         resize-handler (fn [& _] (remember-anchor! view) (schedule! view))]
     (reset! view-ref view)
-    (w/add! header brand session-title header-sessions header-commands)
+    (w/add! header brand session-title header-providers header-sessions header-commands)
     (w/add! conversation transcript welcome)
     (w/add! inspector-header inspector-title inspector-close)
     (doseq [tab [:summary :output :value :code]] (.add inspector-tab-row (get inspector-tabs tab)))
@@ -1263,9 +1466,10 @@
     (w/add! attachment-row attach-button attachment-items)
     (w/add! composer-box composer attachment-row)
     (w/add! footer footer-status footer-keys)
-    (w/add! modal-header modal-title modal-close)
+    (w/add! modal-header modal-title provider-switch modal-close)
     (w/add! modal-input-frame modal-input modal-mask)
-    (w/add! modal modal-header modal-hint modal-input-frame modal-list modal-footer)
+    (w/add! modal-content modal-sidebar modal-list)
+    (w/add! modal modal-header modal-hint modal-input-frame modal-content model-detail browser-status modal-footer)
     (w/add! modal-shade modal)
     (w/add! root header body new-activity pending widget-box notice-box composer-box footer modal-shade)
     (.add (.-root renderer) root)

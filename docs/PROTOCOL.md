@@ -39,7 +39,7 @@ Request IDs must be unique while a request remains active. `runtime.inspect` ret
 | Group | Methods |
 | --- | --- |
 | Runtime and project | `runtime.inspect`, `project.info`, `project.trust` |
-| Setup and auth | `setup.status`, `setup.run`, `auth.status`, `auth.login`, `auth.logout`, `model.list`, `model.refresh` |
+| Setup and auth | `setup.status`, `setup.run`, `auth.status`, `auth.login`, `auth.logout`, `model.list`, `model.refresh`, `model.select` |
 | Settings and resources | `settings.get`, `settings.update`, `resource.list`, `skill.read`, `prompt.render`, `prompt.run` |
 | Sessions | `session.list`, `session.create`, `session.inspect`, `session.state`, `session.view`, `session.entries`, `session.tree`, `session.configure`, `session.name`, `session.label`, `session.rewind`, `session.fork`, `session.clone`, `session.delete` |
 | Work and queues | `session.run`, `session.continue`, `session.compact`, `session.steer`, `session.follow-up`, `session.cancel`, `session.queue`, `session.queue.update`, `session.queue.drop`, `session.reload`, `session.evaluate`, `session.invoke`, `session.command` |
@@ -64,6 +64,17 @@ A `host-cancel` reply cancels setup. Authentication or settings writes completed
 Secret authentication inputs set `secret?` on the reverse request. Hosts must mask API keys and pasted OAuth codes or redirect URLs, exclude them from drafts/history, and clear editor storage when the dialog closes.
 
 `settings.get` returns the effective redacted settings map. `settings.update` accepts `changes` and `scope` (`global` or `project`, default `project`); a JSON `null` removes a key. Project changes require trust. `project.trust` accepts boolean `trusted?` and applies on the next session resource load.
+
+## Explicit model selection
+
+`model.select` accepts `provider`, `model`, `thinking`, and `scope` (`session` or
+`default`). Session scope requires `session-id`; default scope saves global defaults
+without changing any existing session. Selection validates provider availability,
+the exact model in its catalog, and the model's supported reasoning levels before
+writing. It returns `{scope, config}` and, for session scope, `session`.
+
+Authentication is separate: `auth.login` does not select a model. A TUI can cancel
+an in-progress login using the protocol `cancel` envelope with the login request ID.
 
 ## Asynchronous work
 
