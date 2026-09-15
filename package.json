@@ -1,6 +1,6 @@
 {
   "name": "arrodes",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
   "engines": {
@@ -10,6 +10,7 @@
     "build": "clojure -Srepro -M:tui-build",
     "release": "bun scripts/build-release.ts",
     "test:tui": "bun scripts/test-tui.ts",
+    "test:themes": "bun scripts/test-tui.ts arrodes.theme-ui-test",
     "tui": "bun scripts/tui.ts",
     "dev": "bun scripts/tui.ts",
     "test:core": "clojure -Srepro -M:test",

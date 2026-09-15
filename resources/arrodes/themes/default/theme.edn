@@ -1,0 +1,14 @@
+{:schema-version 1
+ :id "default" :name "Arrodes" :version "1.0.0" :author "Arrodes"
+ :description "Silver ink, antique gold, and layered charcoal. Inspired by the Fool."
+ :colors {:surface/base "#141821" :surface/panel "#1a202b" :surface/selected "#242832"
+          :text/primary "#d8dde5" :text/secondary "#9aa2af" :text/dim "#747d8c"
+          :ui/accent "#d7b763" :status/success "#93b6a1" :status/warning "#e0c078" :status/error "#d68e8e"
+          :border/default "#505762" :selection/background "#49412d"
+          :user/heading "#d7b763" :assistant/heading "#cbd3df" :execution/heading "#d7b763"
+          :syntax/comment "#747d8c" :syntax/string "#b5c3b1" :syntax/keyword "#d7b763"
+          :syntax/number "#d0bd91" :syntax/function "#e1e5ec"
+          :markdown/heading "#d7b763" :markdown/link "#d7b763"}
+ :styles {:user/heading {:bold true} :assistant/heading {:bold true} :execution/heading {}
+          :markdown/heading {:bold true} :markdown/strong {:bold true}
+          :markdown/emphasis {:italic true} :markdown/link {:underline true}}}

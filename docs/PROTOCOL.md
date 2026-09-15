@@ -181,3 +181,6 @@ Request an orderly shutdown:
 ```
 
 Shutdown and end-of-file cancel reverse waits, settle connection work, detach connection-owned capabilities, and close the runtime. Inspect the returned cleanup report. An incomplete report means some owned work did not terminate and must not be presented as a clean shutdown.
+
+`session.list` includes `last-message-at` (epoch milliseconds, or null when no message
+exists), derived from recorded message entries rather than the session update time.

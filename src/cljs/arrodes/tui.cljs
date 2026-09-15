@@ -15,6 +15,7 @@
        "  --provider NAME   Provider for a new session\n"
        "  --model ID        Model for a new session\n"
        "  --thinking LEVEL  Reasoning level for a new session\n"
+       "  --theme NAME      Preview a theme on startup (default, dracula, or a pack id)\n"
        "  --trust           Load trusted project resources\n"
        "  --no-trust        Do not load executable project resources\n"
        "  --memory          Ephemeral in-memory sessions\n"
@@ -47,13 +48,13 @@
                        "--version" (assoc opts :version? true) "--memory" (assoc opts :memory? true)
                        "--trust" (assoc opts :trust true) "--no-trust" (assoc opts :trust false)
                        "--no-mouse" (assoc opts :mouse? false)) prompt)
-          (contains? #{"--cwd" "--home" "--data-dir" "--session" "--runtime" "--provider" "--model" "--thinking"} arg)
+          (contains? #{"--cwd" "--home" "--data-dir" "--session" "--runtime" "--provider" "--model" "--thinking" "--theme"} arg)
           (let [value (second remaining)]
             (when (or (nil? value) (str/starts-with? value "--"))
               (throw (js/Error. (str arg " requires a value"))))
             (recur (nnext remaining)
                    (assoc opts (get {"--cwd" :cwd "--home" :home "--data-dir" :data-dir "--session" :session-id
-                                     "--runtime" :runtime-root "--provider" :provider "--model" :model "--thinking" :thinking} arg)
+                                     "--runtime" :runtime-root "--provider" :provider "--model" :model "--thinking" :thinking "--theme" :theme} arg)
                           (cond (contains? #{"--cwd" "--home" "--data-dir" "--runtime"} arg) (.resolve path launch value)
                                 (contains? #{"--provider" "--thinking"} arg) (keyword value)
                                 :else value)) prompt))
@@ -87,7 +88,7 @@
                             #js {:exitOnCtrlC false :exitSignals #js [] :screenMode "alternate-screen"
                                  :useMouse (:mouse? opts) :autoFocus false :targetFps 30 :maxFps 60
                                  :consoleMode "disabled" :externalOutputMode "passthrough"
-                                 :backgroundColor (:background widgets/colors) :openConsoleOnError false})
+                                 :backgroundColor (widgets/color nil :surface/base) :openConsoleOnError false})
         (.then (fn [r]
                  (reset! renderer r)
                  (reset! mounted (view/mount! application r {:on-quit shutdown}))
@@ -111,7 +112,7 @@
     (let [opts (options arguments)]
       (cond
         (:help? opts) (println usage)
-        (:version? opts) (println "Arrodes 0.1.2")
+        (:version? opts) (println "Arrodes 0.1.3")
         (not (and (.-isTTY (.-stdin js/process)) (.-isTTY (.-stdout js/process))))
         (throw (js/Error. "The TUI needs an interactive terminal. Use arrodes --rpc for headless RPC."))
         :else (launch! opts)))

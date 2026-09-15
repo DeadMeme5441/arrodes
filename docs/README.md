@@ -12,6 +12,7 @@ development procedures. Keep each fact in its owning document and link to it els
 | Where do settings and project resources live? | [Configuration](CONFIGURATION.md) |
 | How do extensions, MCP, skills, and packages work? | [Extensions](EXTENSIONS.md) |
 | What is the integration contract? | [RPC](PROTOCOL.md) |
+| How do I choose or create a theme pack? | [Themes](THEMES.md) |
 | What must the terminal interface preserve? | [TUI](TUI.md), [design system](TUI_DESIGN.md) |
 | How does development and CI work? | [Development](DEVELOPMENT.md) |
 | What is a releasable candidate? | [Releases](RELEASING.md) |

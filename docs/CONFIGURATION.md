@@ -16,13 +16,14 @@ The complete tree moves together when you select another home:
 HOME/
   config/
     settings.edn       global settings
+    tui.edn            saved TUI theme preference
     keybindings.edn    optional backend keybinding map; not TUI remapping
     trust.edn          exact-project trust decisions
   auth/                private provider credentials
   skills/              global skills
   extensions/          global extensions
   prompts/             global prompts
-  themes/              global themes
+  themes/              data-only TUI theme packs (see THEMES.md)
   packages/            installed global packages and index
   projects/
     <readable-name>-<sha256(real-worktree-root)>/

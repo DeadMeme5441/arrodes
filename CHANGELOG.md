@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.3
+
+- Add data-only theme packs with semantic colors/text treatments, live preview/cancel, and a saved UI preference; include the silver/gold Arrodes theme and Dracula.
+- Refactor the TUI into feature modules for screens, model controls, input, transcript, inspection, chrome, and controller responsibilities.
+- Add theme-colored turn dividers, outlined execution artifacts, syntax-colored code boundaries, and bordered tables while keeping prose open and full width.
+- Start the assistant turn before its first reasoning/tool activity so activity and final prose remain under the same speaker.
+- Show each session's last recorded message timestamp in local time, independently of configuration changes.
+
 ## 0.1.2
 
 - Simplify the header to the session name and distinguish user turns, assistant prose, code, and execution with spacing and restrained surfaces.
