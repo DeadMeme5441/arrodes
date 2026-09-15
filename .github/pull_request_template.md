@@ -1,13 +1,7 @@
-## Behavior
+## Change
 
-Describe the user-visible problem and resulting behavior.
+What changed and why? Mention breaking changes or migrations when relevant.
 
-## Verification
+## Tested
 
-List the checks actually run and their results. Include before/after rendered evidence
-for UI changes. Identify manual or platform checks not run.
-
-## Compatibility
-
-Describe any effect on sessions, configuration, RPC consumers, or upgrades. Link the
-updated contract or decision record when applicable.
+What did you run or try? Note anything still untested.

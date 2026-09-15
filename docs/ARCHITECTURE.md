@@ -39,5 +39,5 @@ or resurrecting delivered queue items. An unknown mutation outcome requires reco
 
 Use pure CLJC tests for projections; runtime/store tests for ownership and transactions;
 RPC process tests for framing, cancellation and reverse host requests; native OpenTUI
-checks for actual rendered behavior. The packaged executable has its own install/smoke
-checks because source tests cannot establish runtime bundling correctness.
+checks for actual rendered behavior. Distributable executables are built at release time;
+try the resulting candidate before publishing it.

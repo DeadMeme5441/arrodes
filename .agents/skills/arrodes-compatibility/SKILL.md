@@ -1,20 +1,16 @@
 ---
 name: arrodes-compatibility
-description: Evolve Arrodes session, configuration, result or RPC formats with explicit upgrade, rejection and recovery tests.
+description: Change Arrodes session, configuration, result, or RPC formats safely.
 ---
 
-Read [compatibility](../../../docs/COMPATIBILITY.md) plus the owning session/configuration/
-RPC contract. Identify the old and new representations and the supported reader/writer
-combinations. Distinguish additive changes from migrations and intentional incompatibility.
+Read [compatibility](../../../docs/COMPATIBILITY.md) and the owning contract. Identify
+the old and new representations and which reader/writer combinations remain supported.
 
-Create a small synthetic prior-version fixture. Verify fresh state, upgrade, restart,
-unsupported/ambiguous state and interrupted migration as relevant. Do not replay effects
-to repair history. Preserve result references and truthful live-only availability.
+Use a small synthetic prior-version fixture. Test the relevant fresh, upgrade, restart,
+rejection, and interrupted-recovery paths. Preserve original history and result references;
+never replay effects merely to repair retained state. For RPC work, test canonical frames
+and reconnect behavior. `python3 scripts/verify-rpc.py` is available when an end-to-end RPC
+diagnostic is useful.
 
-For a migration, specify the transactional boundary, completion marker and recovery behavior.
-For an RPC change, test canonical frames and reconnect behavior with an older supported
-client shape. Keep original history when the contract requires it.
-
-Run focused tests and the full local baseline. Update the owning docs and Unreleased notes;
-add a decision record only for a consequential contract choice. State downgrade/restore
-limits and remaining release upgrade checks in the handoff.
+Run the focused tests, update the owning docs and Unreleased notes, and record downgrade
+or restore limits in the handoff.

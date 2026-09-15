@@ -1,0 +1,92 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}-${{ matrix.arch }}
+    if: github.repository == 'DeadMeme5441/arrodes'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+            arch: x64
+          - os: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+          - os: macos-15-intel
+            platform: darwin
+            arch: x64
+          - os: macos-15
+            platform: darwin
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchain
+      - name: Build executable and checksum
+        run: bun run release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: arrodes-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            target/release/arrodes-${{ matrix.platform }}-${{ matrix.arch }}
+            target/release/arrodes-${{ matrix.platform }}-${{ matrix.arch }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+  sources:
+    name: Corresponding sources and notices
+    if: github.repository == 'DeadMeme5441/arrodes'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: python scripts/version.py check
+      - run: python scripts/package-source-release.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: arrodes-sources
+          path: |
+            target/release/arrodes-third-party-sources.tar.gz
+            target/release/arrodes-third-party-sources.tar.gz.sha256
+            target/release/THIRD_PARTY_NOTICES.txt
+          if-no-files-found: error
+          compression-level: 0
+  draft:
+    name: Stage draft release
+    needs: [build, sources]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: arrodes-*
+          path: target/release
+          merge-multiple: true
+      - name: Attach the built artifacts to a draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/publish-release.py

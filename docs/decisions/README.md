@@ -1,9 +1,8 @@
 # Decision records
 
-Create a short record when changing a durable contract, introducing a significant
-ownership boundary, changing supported platforms, or choosing a consequential tradeoff.
-Ordinary fixes do not require one.
+Decision records explain consequential, durable choices. Ordinary changes do not need one.
 
-Use `NNNN-short-title.md` with: status/date, context, decision, consequences, and evidence.
-Distinguish accepted decisions from proposals. Link to the owning contract and tests.
-When superseding a decision, retain the original record and link its replacement.
+- [0001: CI and release gates](0001-ci-release-gates.md) — superseded
+- [0002: Lightweight development and release](0002-lightweight-development-and-release.md) — accepted
+
+When a decision changes, keep the old record and link it to the replacement.

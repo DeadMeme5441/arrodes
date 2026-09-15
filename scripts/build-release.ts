@@ -150,6 +150,9 @@ async function main(): Promise<void> {
   const root = resolve(import.meta.dir, "..");
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string };
   const version = manifest.version;
+  if (process.env.GITHUB_REF_TYPE === "tag" && process.env.GITHUB_REF_NAME !== `v${version}`) {
+    throw new Error(`Release tag must match application version v${version}`);
+  }
   const platform = RELEASE_PLATFORM[process.platform];
   const arch = process.arch;
   const nativePackage = `@opentui/core-${process.platform}-${arch}`;
@@ -245,13 +248,7 @@ async function main(): Promise<void> {
   if (!result.success) throw new Error(result.logs.map(log => log.message).join("\n"));
   const executableDigest = await sha256(executable);
   writeFileSync(`${executable}.sha256`, `${executableDigest}  ${filename}\n`);
-  const manifestPath = `${executable}.manifest.json`;
-  const sourceDirty = run(["git", "status", "--porcelain"], { cwd: root, quiet: true }).length > 0;
-  run(["python3", join(root, "scripts", "release_manifest.py"), "create",
-    "--executable", executable, "--payload", archivePath, "--output", manifestPath,
-    "--version", version, "--commit", gitCommit, "--platform", platform, "--arch", arch,
-    "--bun", BUN_VERSION, "--java", java.JAVA_VERSION, ...(sourceDirty ? ["--dirty"] : [])], { cwd: root });
-  process.stdout.write(`${executable}\n${executable}.sha256\n${manifestPath}\n`);
+  process.stdout.write(`${executable}\n${executable}.sha256\n`);
 }
 
 try {

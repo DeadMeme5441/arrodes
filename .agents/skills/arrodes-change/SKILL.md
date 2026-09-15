@@ -1,24 +1,16 @@
 ---
 name: arrodes-change
-description: Implement a bounded Arrodes behavior change with contract-driven verification and an inspectable handoff.
+description: Implement and verify a focused Arrodes behavior change.
 ---
 
-Read the relevant contracts from [the documentation map](../../../docs/README.md).
-Identify the trigger and expected behavior, affected ownership boundaries and acceptance
-criteria. Preserve explicit user scope and existing unrelated work. Use a feature branch
-unless the user selected another arrangement.
+Read the relevant contracts from [the documentation map](../../../docs/README.md), then
+trace the current implementation and tests. Preserve the persistent REPL model, native
+Clojure function results, operation ownership, and durable/transient boundaries.
 
-Trace the current implementation and existing tests before editing. A model action is REPL
-evaluation; functions remain Clojure functions. Preserve durable/transient distinctions and
-operation ownership. For UI changes also use the TUI workflow; for persisted/RPC changes
-use the compatibility workflow.
+Develop with `bun run dev`. Run the focused core or TUI tests that cover the change.
+Use the TUI skill for interface work and the compatibility skill for persisted formats,
+configuration, results, or RPC. Update the owning documentation and Unreleased notes when
+behavior changes.
 
-Use `python3 scripts/dev.py check` for fast structure/script feedback and
-`python3 scripts/dev.py test` for the full local integration baseline. Run focused tests
-while iterating. Change tests when behavior changes, not merely to mirror implementation.
-Update each affected contract at its owning document and add user-facing changes to
-`CHANGELOG.md` under Unreleased.
-
-Before a requested commit, inspect the exact staged diff and verify only scoped files are
-included. Report changes, acceptance evidence, failed/not-run checks and remaining manual
-work. Commits, pushes, PRs and publication follow the user's existing authorization.
+Before handoff, inspect the diff and report the changed behavior, tests run, and any
+relevant verification left to the reviewer or release candidate.

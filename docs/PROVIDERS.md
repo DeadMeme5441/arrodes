@@ -30,6 +30,5 @@ through completion; retrying a request must not replay executed functions.
 
 Use isolated provider fixtures for authentication callbacks, errors, discovery, selection,
 streaming and cancellation. Retain provider-specific regression tests when wire semantics
-differ. Live account smoke checks are explicit release evidence: record provider/model and
-outcome without credentials or conversation contents. Do not call a fixture-backed test a
-successful live-provider verification.
+differ. When changing authentication or provider behavior, try the affected account flow when
+authorized. Do not call a fixture-backed test a successful live-provider verification.

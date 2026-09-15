@@ -1,6 +1,6 @@
 # 0001: CI and release gates
 
-Status: accepted, 2026-09-15
+Status: superseded by [0002](0002-lightweight-development-and-release.md), 2026-09-15
 
 ## Context
 

@@ -1,11 +1,10 @@
-"""Stage verified executables and source materials for the official Arrodes repository."""
+"""Stage built executables and source materials for the official Arrodes repository."""
 import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
-from release_manifest import validate_manifest
 
 
 def gh(*arguments):
@@ -15,15 +14,6 @@ def gh(*arguments):
 def local_digest(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
-
-
-def release_commit(root):
-    commit = os.environ.get("GITHUB_SHA")
-    if not commit:
-        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
-    if len(commit) != 40 or any(char not in "0123456789abcdefABCDEF" for char in commit):
-        raise RuntimeError("Release commit must be a full 40-character hexadecimal ID")
-    return commit.lower()
 
 
 def checksum_from(path):
@@ -42,7 +32,6 @@ def main():
     if metadata.get("full_name") != repository:
         raise RuntimeError("Repository identity does not match the release destination")
     version = json.loads((root / "package.json").read_text())["version"]
-    commit = release_commit(root)
     tag = os.environ.get("GITHUB_REF_NAME", "")
     if tag != f"v{version}":
         raise RuntimeError(f"Release tag must match application version v{version}")
@@ -52,18 +41,11 @@ def main():
     for name in names:
         binary = directory / name
         checksum = binary.with_name(binary.name + ".sha256")
-        manifest = binary.with_name(binary.name + ".manifest.json")
         expected = checksum_from(checksum)
         actual = local_digest(binary)
         if actual != expected:
             raise RuntimeError(f"Checksum mismatch: {binary.name}")
-        try:
-            data = json.loads(manifest.read_text())
-            validate_manifest(data, executable=binary, version=version, commit=commit,
-                              platform=name.split("-")[1], arch=name.split("-")[2], require_clean=True)
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"Invalid release manifest for {binary.name}: {error}") from error
-        assets.extend([str(binary), str(checksum), str(manifest)])
+        assets.extend([str(binary), str(checksum)])
     source_archive = directory / "arrodes-third-party-sources.tar.gz"
     source_checksum = source_archive.with_name(source_archive.name + ".sha256")
     if local_digest(source_archive) != checksum_from(source_checksum):

@@ -2,49 +2,32 @@
 
 ## Toolchains
 
-Use Bun 1.3.14, Clojure CLI, Python 3.12+ and Java 21. The release build requires a
-complete matching-architecture JDK in `JAVA_HOME`; CI pins the release toolchain.
-Install dependencies with `bun install --frozen-lockfile`. Source and packaged paths
-must both remain usable.
+Arrodes uses Bun 1.3.14, Clojure CLI, Python 3.12+, and Java 21. Install JavaScript
+dependencies with `bun install --frozen-lockfile`.
 
-For packaged smoke tooling, create an ignored virtual environment and install the
-pinned requirements:
+`bun run dev` starts the TUI from the checkout. Local development uses tests relevant to
+the change:
 
-```sh
-python3 -m venv target/verify-venv
-target/verify-venv/bin/python -m pip install -r scripts/requirements-verify.txt
-```
-
-Use that interpreter for `scripts/dev.py package` or `preview`.
-
-## Verification entry points
-
-| Command | Scope |
+| Command | Coverage |
 | --- | --- |
-| `python3 scripts/dev.py check` | Documentation links, skill metadata, versions, Python script tests, installer |
-| `python3 scripts/dev.py test` | Check plus Clojure behavior, native TUI/controller and source RPC |
-| `python3 scripts/dev.py package` | Build native executable, installed smoke, isolated preview launcher |
-| `python3 scripts/dev.py preview` | Test plus package in one local workflow |
+| `bun run test:core` | Clojure runtime and shared behavior |
+| `bun run test:tui` | TUI controller, RPC interaction, and rendering |
+| `bun run test` | Both suites; the pull request CI command |
 
-Set `ARRODES_TEST_OFFLINE=1` for fixture-only tests. No verification entry point commits,
-pushes, tags or publishes. Reports in `target/verification/` identify source revision,
-dirty state, completed checks and failed status. Skipping a command is not a passing test.
+Tests use fixtures by default and must not require real accounts or paid model calls.
+Optional diagnostics remain available for focused investigation:
 
-`target/preview/start` runs the self-contained binary outside the checkout, with a
-fresh temporary home and synthetic project, and clears inherited credential variables.
-The temporary state is removed on exit. This is environment isolation, not an OS/network
-sandbox. Supply a different `--cwd` explicitly to test a real project, or `--home` to
-deliberately retain preview state. Rebuild the
-preview after source changes; a source checkout launch is `bun scripts/tui.ts`.
+- `python3 scripts/verify-rpc.py`
+- `python3 scripts/verify-install.py`
+- `python3 scripts/verify-release.py PATH`
 
-## Change workflow
+These diagnostics are not a default local gate. `python3 scripts/version.py check` verifies
+that application version mirrors match `package.json`; `set X.Y.Z` updates them together.
 
-Agree on acceptance criteria, implement on a short feature branch, verify affected
-contracts, inspect the exact diff, and update documentation/Unreleased notes. Keep `main`
-buildable. A PR should describe the resulting behavior and validation, with visual evidence
-for UI changes. Existing task authorization determines which external steps to perform.
+## Pull requests
 
-CI classifies documentation-only changes, runs a fast preflight, and verifies executable
-changes across all four supported platform/architecture targets. Branch pushes do not
-also duplicate PR pipelines. Dependency caches contain inputs, not trusted build outputs.
-See [CI decisions](decisions/0001-ci-release-gates.md) and [releasing](RELEASING.md).
+Pull requests to `main` run one Linux job with `bun run test`, covering the core and TUI
+suites once. There is no push pipeline for `main` and no repeated test run after merge.
+The protected `main` branch requires a pull request and the **Core and TUI tests** check;
+force-pushes and deletion are disabled. No second-person approval is required.
+Release builds run only from version tags. See [decision 0002](decisions/0002-lightweight-development-and-release.md).

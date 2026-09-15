@@ -6,7 +6,7 @@
 - Refine the terminal conversation with a yellow/grey-on-black theme and expandable source/output.
 
 - Add a maintained documentation map, agent workflows, and local candidate verification commands.
-- Improve CI efficiency and release artifact identity checks.
+- Simplify CI to one Linux core/TUI test job per PR. Build each release target once, stage a draft, and publish the same artifacts.
 
 ## 0.1.1
 

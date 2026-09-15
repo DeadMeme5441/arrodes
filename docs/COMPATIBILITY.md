@@ -10,7 +10,10 @@ additive, requires migration, or intentionally rejects an older format. Capture 
 representative fixture from the preceding supported schema with synthetic data. Never
 use a developer's real session history as a committed fixture.
 
-## Required evidence
+## Evidence for format changes
+
+Cover the cases relevant to the format being changed. Ordinary features do not need a
+migration checklist.
 
 - A fresh store/configuration works.
 - The preceding supported representation opens or migrates as documented.

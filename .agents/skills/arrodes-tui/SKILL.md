@@ -1,22 +1,15 @@
 ---
 name: arrodes-tui
-description: Change Arrodes terminal layouts and interactions, then verify controller behavior and actual native OpenTUI rendering.
+description: Change and verify Arrodes terminal interactions and rendering.
 ---
 
-Read [the TUI contract](../../../docs/TUI.md) and the relevant source components.
-Use the user's current visual references and shared widget styles. Keep provider/runtime
-work in the core/controller and rendering decisions in the view/presentation layer.
+Read [the TUI contract](../../../docs/TUI.md) and the affected controller, presentation,
+view, and widget code. Keep provider/runtime work in the core or controller and rendering
+decisions in the view or presentation layer.
 
-Define the affected states before implementation: idle/running, success/error/cancel,
-focused/unfocused, long content, narrow viewport and navigation away/back as applicable.
-Preserve draft ownership, selection, scroll anchors, queued-input reconciliation and secret
-editor clearing. Use existing renderer and controller test helpers.
+Implement with `bun run dev`. Exercise the affected interaction in a real terminal and run
+`bun run test:tui`. Test the states that matter to the change, such as running, error,
+cancellation, long content, narrow width, focus, scrolling, or navigation. Preserve draft
+ownership, selection, scroll anchors, queued input, and secret clearing where applicable.
 
-Run `bun scripts/test-tui.ts`. Inspect actual rendered frames; a green reducer test is not
-visual verification. Reproduce with realistic synthetic content and test keyboard paths.
-When the capture option exists, retain native cell captures in ignored build output; do
-not check incidental captures into source. For packaged acceptance, use
-`python3 scripts/dev.py preview` and test outside the checkout with separate application state.
-
-Report the tested terminal sizes, interactions and any visual/manual gaps. Keep metadata
-and version information honest; fixture models are not live service observations.
+Report the interaction tested and any relevant terminal or rendering limitation.
