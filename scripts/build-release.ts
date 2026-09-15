@@ -206,8 +206,8 @@ async function main(): Promise<void> {
   copyNpmLicenses(root, licenses, nativePackage);
   copyMavenLicenses(root, javaHome, licenses, buildRoot);
 
-  const gitCommit = process.env.GITHUB_SHA;
-  if (gitCommit && !/^[0-9a-f]{7,64}$/i.test(gitCommit)) throw new Error("GITHUB_SHA must be a hexadecimal commit ID");
+  const gitCommit = process.env.GITHUB_SHA ?? run(["git", "rev-parse", "HEAD"], { cwd: root, quiet: true });
+  if (!/^[0-9a-f]{40}$/i.test(gitCommit)) throw new Error("Release commit must be a full 40-character hexadecimal ID");
   const buildInfo = [
     `Arrodes: ${version}`,
     `Platform: ${platform}`,
@@ -215,7 +215,7 @@ async function main(): Promise<void> {
     `Bun: ${BUN_VERSION}`,
     `Java: ${java.JAVA_VERSION}`,
     `Java implementor: ${java.IMPLEMENTOR ?? "unknown"}`,
-    ...(gitCommit ? [`Git commit: ${gitCommit}`] : []),
+    `Git commit: ${gitCommit}`,
   ];
   writeFileSync(join(payloadRoot, "BUILD-INFO.txt"), `${buildInfo.join("\n")}\n`);
 
@@ -245,7 +245,13 @@ async function main(): Promise<void> {
   if (!result.success) throw new Error(result.logs.map(log => log.message).join("\n"));
   const executableDigest = await sha256(executable);
   writeFileSync(`${executable}.sha256`, `${executableDigest}  ${filename}\n`);
-  process.stdout.write(`${executable}\n${executable}.sha256\n`);
+  const manifestPath = `${executable}.manifest.json`;
+  const sourceDirty = run(["git", "status", "--porcelain"], { cwd: root, quiet: true }).length > 0;
+  run(["python3", join(root, "scripts", "release_manifest.py"), "create",
+    "--executable", executable, "--payload", archivePath, "--output", manifestPath,
+    "--version", version, "--commit", gitCommit, "--platform", platform, "--arch", arch,
+    "--bun", BUN_VERSION, "--java", java.JAVA_VERSION, ...(sourceDirty ? ["--dirty"] : [])], { cwd: root });
+  process.stdout.write(`${executable}\n${executable}.sha256\n${manifestPath}\n`);
 }
 
 try {

@@ -210,6 +210,10 @@ See [Configuration and project state](docs/CONFIGURATION.md) and [Troubleshootin
 
 ## Documentation
 
+Start with the [documentation map](docs/README.md) for product contracts, architecture,
+development, compatibility and releases. [AGENTS.md](AGENTS.md) routes coding agents
+to the project workflows.
+
 - [Configuration and project state](docs/CONFIGURATION.md)
 - [Sessions and results](docs/SESSIONS.md)
 - [Extensions, resources, MCP, and packages](docs/EXTENSIONS.md)

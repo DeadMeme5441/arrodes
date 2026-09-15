@@ -1,19 +1,54 @@
 name: Verify and package
 on:
   push:
+    branches: [main]
+    tags: ['v*']
   pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       scope:
-        description: Verification or corresponding-source preparation
+        description: Full verification or corresponding-source preparation
         type: choice
         options: [verify, sources]
         default: verify
 permissions:
   contents: read
+concurrency:
+  group: verify-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  verify:
+  preflight:
+    name: Project preflight
     if: inputs.scope != 'sources'
+    runs-on: ubuntu-24.04
+    outputs:
+      native: ${{ steps.changes.outputs.native }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Check project contracts and scripts
+        run: python scripts/dev.py check
+      - name: Classify changes
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          FORCE_NATIVE: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
+        run: |
+          if [ "$FORCE_NATIVE" = 'true' ]; then
+            echo 'native=true' >> "$GITHUB_OUTPUT"
+          else
+            python scripts/ci_changes.py --base "$BASE_SHA" >> "$GITHUB_OUTPUT"
+          fi
+  verify:
+    name: Native ${{ matrix.platform }}-${{ matrix.arch }}
+    needs: preflight
+    if: needs.preflight.outputs.native == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -36,64 +71,94 @@ jobs:
       ARRODES_TEST_OFFLINE: '1'
       GIT_CONFIG_NOSYSTEM: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: '21.0.12+101.0.LTS'
-      - uses: DeLaGuardo/setup-clojure@13.7.0
-        with:
-          cli: '1.12.5.1654'
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.3.14'
-      - name: Install pinned terminal dependencies
-        run: bun install --frozen-lockfile
-      - name: Check repository privacy
-        run: python scripts/check-private.py
-      - name: Verify release installer
-        run: python scripts/verify-install.py
+      - uses: ./.github/actions/toolchain
       - name: Check behavioral invariants
         run: clojure -Srepro -M:test
       - name: Verify native TUI and controller
         run: bun run test:tui
       - name: Exercise source RPC
         run: python scripts/verify-rpc.py
-      - name: Build self-contained executable
-        run: bun run release
-      - name: Install terminal smoke tooling
-        run: python -m pip install -r scripts/requirements-verify.txt
-      - name: Exercise installed executable without developer tools
-        run: python scripts/verify-release.py --directory target/release
-      - name: Package headless SDK
-        run: clojure -Srepro -T:build uber
-      - uses: actions/upload-artifact@v4
+      - name: Build and exercise installed executable
+        run: python scripts/dev.py package
+      - name: Upload target-specific artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: arrodes-${{ matrix.platform }}-${{ matrix.arch }}
-          path: target/release/*
+          path: |
+            target/release/arrodes-${{ matrix.platform }}-${{ matrix.arch }}
+            target/release/arrodes-${{ matrix.platform }}-${{ matrix.arch }}.sha256
+            target/release/arrodes-${{ matrix.platform }}-${{ matrix.arch }}.manifest.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+      - name: Upload verification summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verification-${{ matrix.platform }}-${{ matrix.arch }}
+          path: target/verification/*.json
+          if-no-files-found: ignore
+          retention-days: 14
+  sdk:
+    name: Headless SDK
+    needs: preflight
+    if: needs.preflight.outputs.native == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/toolchain
+      - run: clojure -Srepro -T:build uber
+      - name: Load packaged SDK
+        run: java -cp target/arrodes.jar clojure.main -e "(require 'arrodes.runtime) (println :sdk-loaded)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sdk
+          path: target/arrodes.jar
+          if-no-files-found: error
+          compression-level: 0
+  gate:
+    name: Build gate
+    if: always() && inputs.scope != 'sources'
+    needs: [preflight, verify, sdk]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require all applicable checks
+        env:
+          PREFLIGHT: ${{ needs.preflight.result }}
+          NATIVE: ${{ needs.preflight.outputs.native }}
+          VERIFY: ${{ needs.verify.result }}
+          SDK: ${{ needs.sdk.result }}
+        run: |
+          test "$PREFLIGHT" = success
+          if [ "$NATIVE" = true ]; then
+            test "$VERIFY" = success
+            test "$SDK" = success
+          else
+            test "$NATIVE" = false
+            test "$VERIFY" = skipped
+            test "$SDK" = skipped
+          fi
   sources:
     name: Package corresponding sources
     if: startsWith(github.ref, 'refs/tags/v') || inputs.scope == 'sources'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
       - name: Package corresponding third-party sources
         run: python scripts/package-source-release.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: arrodes-source-materials
           path: |
@@ -104,19 +169,19 @@ jobs:
           compression-level: 0
   release:
     name: Stage verified release
-    needs: [verify, sources]
+    needs: [gate, sources]
     if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'DeadMeme5441/arrodes'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: arrodes-*
           path: target/release

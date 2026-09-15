@@ -20,3 +20,6 @@
 *.db-*
 *.hprof
 *.jfr
+
+__pycache__/
+*.pyc
