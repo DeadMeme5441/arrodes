@@ -8,11 +8,12 @@ import { createTestRenderer } from "@opentui/core/testing";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const temporary = mkdtempSync(join(tmpdir(), "arrodes-tui-test-"));
 const output = join(temporary, "main.cjs");
+const entrypoint = process.argv[2] ?? "arrodes.tui-view-test";
 try {
-  const options = `{:target :nodejs :main arrodes.tui-view-test :optimizations :simple :infer-externs true :output-to ${JSON.stringify(output)} :output-dir ${JSON.stringify(join(temporary, "out"))}}`;
+  const options = `{:target :nodejs :main ${entrypoint} :optimizations :simple :infer-externs true :output-to ${JSON.stringify(output)} :output-dir ${JSON.stringify(join(temporary, "out"))}}`;
   const compiled = Bun.spawnSync([
     "clojure", "-Srepro", "-Sdeps", '{:paths ["src/cljc" "src/cljs" "test"]}',
-    "-M:cljs", "-co", options, "-c", "arrodes.tui-view-test",
+    "-M:cljs", "-co", options, "-c", entrypoint,
   ], { cwd: root, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
   if (compiled.exitCode !== 0) throw new Error(`TUI regression compilation failed (${compiled.exitCode})`);
   process.env.ARRODES_TUI_ROOT = root;

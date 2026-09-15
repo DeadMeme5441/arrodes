@@ -1,8 +1,9 @@
 # TUI design system
 
-The provider browser and conversation share `tui-widgets/colors` and `layout`. Use
-black or charcoal surfaces, grey text, muted yellow for focus and links, and semantic
-status colors. Selection also has a cursor, label, or boundary. Thin frames mark an
+The provider browser and conversation share semantic theme roles and fixed layout
+constants. The default uses layered black/charcoal surfaces, silver text, and antique-gold accents inspired by the Fool;
+Dracula supplies an alternate palette. Theme packs control colors and text treatments,
+while layout and interaction remain fixed. See [Themes](THEMES.md). Selection also has a cursor, label, or boundary. Thin frames mark an
 interactive region or expanded execution; prose stays on the base surface.
 
 ## Components
@@ -17,10 +18,14 @@ interactive region or expanded execution; prose stays on the base surface.
   Secret editor contents never enter draft state or a rendered unmasked field.
 - The header shows only the session name. Providers, sessions, and commands remain
   available through slash commands and keyboard shortcuts.
-- The transcript uses the full available width. User turns have a subtle shaded surface,
-  left rule, and You label. Assistant prose has an Arrodes label and clear turn spacing.
-  Reasoning and function activity are indented and muted. Code blocks use a distinct
-  surface and language label so they are visibly separate from prose.
+- The transcript uses the full available width. User turns have a gold diamond and You label; replies have a silver star and Arrodes
+  label. Thin role-colored horizontal rules sit above every user and assistant turn across the
+  available width. The assistant boundary precedes its first reasoning/tool/prose row;
+  subsequent activity and prose share that turn until the next user message.
+  Prose remains open on the base surface. Execution artifacts use thin outlines with
+  a header/output separator, while reasoning and read summaries stay compact.
+  Code has top/bottom rules and Clojure/EDN syntax colors; tables have visible cell
+  boundaries. Only active keyboard selection adds a highlighted surface.
   Both the chevron and heading toggle reasoning/execution blocks. Expanded activity
   shows highlighted Clojure source and output. Large output stays bounded
   and inspectable, and native values remain available through the inspector.

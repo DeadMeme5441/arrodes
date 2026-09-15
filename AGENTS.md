@@ -12,7 +12,11 @@ documents relevant to the change.
 - `src/clj/arrodes/store.clj`, `artifacts.clj`: transactional records and retained content.
 - `src/clj/arrodes/provider*.clj`, `auth.clj`: provider boundary and credentials.
 - `src/cljc/arrodes/`: shared pure session, context, and presentation decisions.
-- `src/cljs/arrodes/`: OpenTUI controller, rendering, and RPC client.
+- `src/cljs/arrodes/tui_app.cljs`, `tui_view.cljs`: controller and view composition roots.
+- `src/cljs/arrodes/tui/`: feature modules, local theme packs, and palette bindings.
+- `src/cljs/arrodes/tui/controller/`: transport helpers, sessions, submission, catalogs, attachments.
+- `src/cljc/arrodes/theme.cljc`, `resources/arrodes/themes/`: theme schema and built-in manifests.
+- `src/cljs/arrodes/tui_rpc.cljs`: RPC client transport lifecycle.
 - `hosts/rpc/arrodes/`: transport-independent commands, setup, and JSONL host.
 
 ## Project skills

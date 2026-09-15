@@ -22,6 +22,10 @@ Use `/new` to open a new composer and `/sessions` or `F2` to switch. Resume a kn
 arrodes --session SESSION_ID
 ```
 
+The sessions screen shows the timestamp of the last recorded message in local time.
+Renaming a session or changing its model does not change that timestamp. Sessions with
+no recorded messages show “No messages yet.”
+
 The session keeps the working directory where it was created. Sessions for a project are stored in that project's external data directory; they are not stored in the repository.
 
 Over RPC, the corresponding methods are `session.create`, `session.list`, `session.inspect`, and `session.view`. `session.view` returns a consistent session state, active history path, and event cursor for reconnecting clients.

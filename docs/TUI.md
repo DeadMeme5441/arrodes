@@ -1,8 +1,16 @@
 # Terminal interface contract
 
 The interface is implemented in ClojureScript with OpenTUI on Bun. `tui-app` owns
-controller state, `tui-model` projects durable and transient events, `tui-view` renders,
-`tui-present` formats activity, and `tui-widgets` owns shared visual primitives.
+controller lifecycle and action dispatch, and `tui-model` projects durable and transient
+events. `tui-view` is the mount/render composition root. Feature modules under
+`src/cljs/arrodes/tui/` own screens, models, transcript, inspection, input, and chrome;
+`controller/` owns catalog, sessions, submission, and attachments. `tui-present` formats
+activity and `tui-widgets` owns theme-aware visual primitives.
+
+The module dependency direction is explicit: shared context and transport helpers sit
+at the bottom; feature modules call them directly. The shell injects navigation actions
+where direct peer imports would create cycles. UI nodes and the controller are not
+recreated when a theme changes. See [theme packs](THEMES.md).
 
 ## Design and interaction
 

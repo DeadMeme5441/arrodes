@@ -1,0 +1,13 @@
+{:schema-version 1
+ :id "dracula" :name "Dracula" :version "1.0.0" :author "Dracula Theme / Arrodes"
+ :description "Purple accents and the official Dracula color palette."
+ :homepage "https://draculatheme.com/contribute"
+ :colors {:surface/base "#282a36" :surface/panel "#282a36" :surface/selected "#44475a"
+          :text/primary "#f8f8f2" :text/secondary "#b6bfdf" :text/dim "#6272a4"
+          :ui/accent "#bd93f9" :status/success "#50fa7b" :status/warning "#ffb86c" :status/error "#ff5555"
+          :border/default "#6272a4" :selection/background "#44475a"
+          :user/heading "#bd93f9" :assistant/heading "#8be9fd" :execution/heading "#bd93f9"
+          :syntax/comment "#6272a4" :syntax/string "#f1fa8c" :syntax/keyword "#ff79c6"
+          :syntax/number "#bd93f9" :syntax/function "#50fa7b"
+          :markdown/heading "#bd93f9" :markdown/link "#8be9fd"}
+ :styles {:user/heading {:bold true} :assistant/heading {:bold true}}}

@@ -433,10 +433,14 @@
   ([store {:keys [cwd]}]
    (store-read store
      (fn [connection]
-       (mapv public-session
-             (if cwd
-               (query-sql connection "SELECT * FROM sessions WHERE cwd = ? ORDER BY updated_at DESC, id" [(util/canonical-path cwd)] session-row)
-               (query-sql connection "SELECT * FROM sessions ORDER BY updated_at DESC, id" [] session-row)))))))
+       (let [sql (str "SELECT s.*, (SELECT e.created_at FROM entries e "
+                      "WHERE e.session_id = s.id AND e.kind = 'message' ORDER BY e.seq DESC LIMIT 1) AS last_message_at "
+                      "FROM sessions s " (when cwd "WHERE s.cwd = ? ")
+                      "ORDER BY s.updated_at DESC, s.id")]
+         (query-sql connection sql (if cwd [(util/canonical-path cwd)] [])
+                    (fn [^ResultSet rs]
+                      (assoc (public-session (session-row rs))
+                             :last-message-at (some-> (.getObject rs "last_message_at") long)))))))))
 
 (defn- insert-session! [^Connection connection snapshot base-config]
   (execute-sql! connection

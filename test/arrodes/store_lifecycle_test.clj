@@ -352,3 +352,18 @@
                   (catch clojure.lang.ExceptionInfo error error))]
       (is (= "secret-config" (:error/code (ex-data error))))
       (is (empty? (store/list-sessions database {}))))))
+
+(deftest session-list-reports-message-time-not-configuration-time
+  (with-memory-store [database]
+    (let [sid (:id (new-session database))
+          listed #(first (filter (fn [s] (= sid (:id s))) (store/list-sessions database)))]
+      (is (nil? (:last-message-at (listed))))
+      (with-redefs [util/now (constantly 1000)]
+        (store/commit! database sid {:entries [(message-entry :user "Hello")]}))
+      (with-redefs [util/now (constantly 2000)]
+        (store/commit! database sid {:entries [(message-entry :assistant "Reply")]}))
+      (with-redefs [util/now (constantly 3000)]
+        (store/configure! database sid {:name "Renamed later"}))
+      (is (= 2000 (:last-message-at (listed))))
+      (is (= 3000 (:updated-at (listed))))
+      (is (= 2000 (:last-message-at (first (store/list-sessions database {:cwd (System/getProperty "java.io.tmpdir")}))))))))

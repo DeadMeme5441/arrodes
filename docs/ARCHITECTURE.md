@@ -24,6 +24,20 @@ results. The UI combines a consistent snapshot, durable events and transient out
 The evaluator is live execution state. The session is durable conversation/configuration
 state. A model change or compaction must not quietly replace the evaluator.
 
+## TUI modules
+
+`tui-app` composes the controller lifecycle and dispatches actions. Its `tui/controller/`
+modules own sessions, submission/queue receipts, provider catalogs, attachments, and
+transport helpers. `tui-view` composes the renderer tree and lifecycle; `tui/` feature
+modules own input/focus, screens, model controls, transcript/scrolling, inspection, and
+chrome. Shared context helpers sit below these components. Navigation callbacks are
+injected by the view root where peer imports would create a dependency cycle.
+
+Theme resolution is pure CLJC. Pack discovery and preferences are local frontend data;
+per-renderer paint bindings apply semantic roles to existing nodes. Preview does not
+remount editors, recreate the controller, or change session/runtime state. Built-in EDN
+packs are embedded when the TUI compiles. See [theme packs](THEMES.md).
+
 ## Durable versus transient
 
 SQLite transactions commit canonical entries, session changes, queue changes,

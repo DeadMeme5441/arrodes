@@ -5,6 +5,7 @@
             [arrodes.catalog-flow-test :as catalog-flow]
             [arrodes.tui-model :as model]
             [arrodes.tui-view :as view]
+            [arrodes.theme-ui-test :as theme-test]
             [clojure.string :as str]))
 
 (defn- node [terminal id]
@@ -346,7 +347,8 @@
                  (until! terminal #(and (str/includes? (.captureCharFrame terminal) "def settings")
                                         (str/includes? (.captureCharFrame terminal) "Output")
                                         (str/includes? (.captureCharFrame terminal) "provider flow is ready")
-                                        (false? (.-border (node terminal "row:message:answer")))) "Chat lost expanded source/output, plain prose, or the final answer")))
+                                        (false? (.-border (node terminal "row:message:answer")))
+                                        (true? (.-border (node terminal "artifact:activity:eval")))) "Chat lost expanded source/output, plain prose, or the final answer")))
         (.then (fn [_]
                  (capture! terminal "chat")
                  (.setText (node terminal "composer") "Keep this draft while I inspect")
@@ -666,10 +668,56 @@
                    (throw (js/Error. "An old confirmation timer cleared a newer error")))
                  (println "Footer passed: placement, compact provider, reported/unknown context, expiring confirmations and persistent errors."))))))
 
+(defn- assistant-turn-ownership! [application terminal]
+  (.resize terminal 110 54)
+  (swap! (:state application)
+         #(-> %
+              (assoc :notice nil :host-requests []
+                     :view {:session {:id "ownership" :name "Turn ownership" :cwd "/project"}
+                            :entries [{:id "ask" :kind :message :data {:message/role :user :message/content "Explain how retained values work."}}
+                                      {:id "work" :kind :message
+                                       :data {:message/role :assistant
+                                              :message/content [{:part/type :reasoning :text "Inspect the implementation first."}]
+                                              :message/tool-calls [{:tool-call/id "read-owner" :tool-call/name "read"}]}}
+                                      {:id "reply" :kind :message :data {:message/role :assistant :message/content "Values load on demand."}}
+                                      {:id "ask-again" :kind :message :data {:message/role :user :message/content "And after restart?"}}
+                                      {:id "reply-again" :kind :message :data {:message/role :assistant :message/content "Durable results remain available."}}]
+                            :activities {"read-owner" {:id "read-owner" :kind :capability :name "read" :status :completed :start-seq 1 :content "Read session source"}}
+                            :activity-order ["read-owner"] :snapshot-cursor 0})
+              (update :ui assoc :overlay nil :inspector? false :follow? true :draft "")))
+  (-> (until! terminal
+              #(and (str/includes? (.captureCharFrame terminal) "Explain how retained values work.")
+                     (str/includes? (.captureCharFrame terminal) "Values load on demand.")
+                     (str/includes? (.captureCharFrame terminal) "Durable results remain available.")
+                     (node terminal "turn-heading:reasoning:work")
+                     (.-visible (node terminal "turn-heading:reasoning:work"))
+                     (< (.-screenY (node terminal "turn-heading:reasoning:work"))
+                        (.-screenY (node terminal "heading:reasoning:work")))
+                     (< (.-screenY (node terminal "turn-heading:reasoning:work"))
+                        (.-screenY (node terminal "row:activity:read-owner")))
+                     (not (.-visible (node terminal "turn-rule:message:reply")))
+                     (.-visible (node terminal "turn-rule:message:ask-again")))
+              "The assistant turn must begin before reasoning/tools, with no new divider before its final prose")
+      (.then (fn [_] (theme-test/capture! terminal "assistant-turn-ownership")
+               (println "Assistant ownership passed: reasoning, tools and final prose share the assistant turn.")))))
+
+(defn- session-timestamps! [application terminal]
+  (swap! (:state application)
+         #(-> %
+              (assoc :notice nil :sessions [{:id "dated" :name "Recent conversation" :cwd "/project"
+                                           :last-message-at (js/Date.UTC 2026 8 15 14 45)}
+                                          {:id "empty" :name "Empty conversation" :cwd "/project"}])
+              (assoc-in [:ui :overlay] {:kind :sessions :title "Sessions" :token "timestamps" :index 0 :query ""})))
+  (-> (until! terminal #(let [frame (.captureCharFrame terminal)]
+                         (and (str/includes? frame "Last message:") (str/includes? frame "2026")
+                              (str/includes? frame "No messages yet")))
+              "Session rows must show local message timestamps and an explicit empty state")
+      (.then (fn [_] (println "Session timestamps passed: recorded message date and empty state.")))))
+
 (defn- exercise! [terminal]
   (let [application (app/create! {:runtime-root (.cwd js/process) :cwd (.cwd js/process)
                                   :setup? false})
-        mounted (view/mount! application (.-renderer terminal) {})]
+        mounted (view/mount! application (.-renderer terminal) {:theme "default"})]
     (show! application :choices)
     (-> (visible! application terminal)
         (.then (fn []
@@ -718,6 +766,8 @@
         (.then (fn [_] (composer-interactions! application terminal)))
         (.then (fn [_] (footer-and-feedback! application terminal)))
         (.then (fn [_] (wheel-follow! application terminal)))
+        (.then (fn [_] (session-timestamps! application terminal)))
+        (.then (fn [_] (assistant-turn-ownership! application terminal)))
         (.then (fn [] (println "Native TUI passed: full-screen layout, inspector selection ownership, session widgets, render/editor requests and cancelled overlay cleanup.")))
         (.finally (fn []
                     (view/destroy! mounted)
@@ -732,6 +782,7 @@
             (.then (fn []
                      ((aget js/globalThis "ARRODES_CREATE_TEST_RENDERER")
                       #js {:width 120 :height 40 :kittyKeyboard true :consoleMode "disabled"})))
-            (.then exercise!))))
+            (.then exercise!)
+            (.then (fn [_] (theme-test/exercise!))))))
 
 (set! *main-cli-fn* -main)
