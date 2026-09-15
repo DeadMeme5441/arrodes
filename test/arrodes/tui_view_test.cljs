@@ -1,5 +1,5 @@
 (ns arrodes.tui-view-test
-  "TUI regression entry point: real RPC lifecycle followed by native popup rendering."
+  "TUI regression entry point: real RPC lifecycle followed by native screen rendering."
   (:require [arrodes.tui-app :as app]
             [arrodes.tui-app-test :as app-test]
             [arrodes.catalog-flow-test :as catalog-flow]
@@ -21,11 +21,11 @@
            (< y (+ (.-screenY viewport) (.-height viewport)))
            (str/includes? line (.-plainText label))))))
 
-(defn- popup-fits? [terminal]
-  (let [popup (.-parent (node terminal "dialog-choices"))
-        renderer (.-renderer terminal)]
-    (and (<= (+ (.-screenX popup) (.-width popup)) (.-terminalWidth renderer))
-         (<= (+ (.-screenY popup) (.-height popup)) (.-terminalHeight renderer)))))
+(defn- screen-fits? [terminal]
+  (let [screen (node terminal "active-screen") renderer (.-renderer terminal)]
+    (and (= 0 (.-screenX screen)) (= 0 (.-screenY screen))
+         (= (.-width screen) (.-terminalWidth renderer))
+         (= (.-height screen) (.-terminalHeight renderer)))))
 
 (defn- until! [terminal predicate message]
   (let [deadline (+ (js/Date.now) 2000)]
@@ -49,7 +49,7 @@
                  label (node terminal (str "choice-" index "-label"))
                  scroll (node terminal "dialog-choices")
                  viewport (.-viewport scroll)]
-             (str "Keyboard selection left the popup viewport "
+             (str "Keyboard selection left the screen viewport "
                   (pr-str {:index index :label (.-plainText label)
                            :row-y (.-y row) :row-height (.-height row)
                            :label-y (.-y label) :label-screen-y (.-screenY label)
@@ -79,7 +79,7 @@
                         :models (mapv (fn [label] {:id label :provider :codex-backend}) labels))
                  (assoc-in [:view :queue] (mapv (fn [label] {:id label :kind :steering :content label}) labels))
                  (assoc-in [:ui :overlay] {:kind kind :token (str (random-uuid)) :index 0 :query ""
-                                           :title "Popup scrolling regression" :items items
+                                           :title "Screen scrolling regression" :items items
                                            :entries entries :paths labels}))))))
 
 (defn- menu! [application terminal kind]
@@ -113,7 +113,7 @@
                                      :snapshot-cursor 0))
                  (update :ui merge {:selected "activity:old"
                                     :inspected-row activity-row
-                                    :inspector? true
+                                    :inspector? false
                                     :inspect-tab :value
                                     :inspection {:result-id "old-result"
                                                  :descriptor (:result activity)
@@ -129,6 +129,11 @@
                         (str/includes? frame "Renderer error")
                         (str/includes? frame "done")))
                 "Custom presentation or its non-fatal renderer error was not visible")
+        (.then (fn [_]
+                 (swap! (:state application) assoc-in [:ui :inspector?] true)
+                 (until! terminal #(and (= (.-width (node terminal "inspector")) (.-terminalWidth (.-renderer terminal)))
+                                        (not (.-visible (.-parent (node terminal "conversation")))))
+                         "Inspection must occupy its own full-width screen")))
         (.then (fn [_] (.pressArrow (.-mockInput terminal) "up")))
         (.then (fn [_]
                  (until! terminal
@@ -137,6 +142,7 @@
                          "Selecting a message retained the prior result descriptor")))
         (.then
          (fn [_]
+           (.pressEscape (.-mockInput terminal))
            (app/command! application :host-widget
                          {:request {:kind :widget :session-id "view-session"
                                     :id "widget" :placement :header
@@ -239,6 +245,7 @@
          (fn [_]
            (until! terminal
                    #(and (= :commands (get-in @(:state application) [:ui :overlay :kind]))
+                         (.-focused (node terminal "composer"))
                          (nil? (get-in @(:state application) [:ui :overlay :host-id])))
                    "Cancelled reverse-request overlay remained active"))))))
 
@@ -279,18 +286,33 @@
                                              (str/includes? (.captureCharFrame terminal) "128000 context")) "Model browser lost sidebar or details")))
         (.then (fn [_]
                  (capture! terminal "models")
-                 (.pressKey (.-mockInput terminal) "TAB")
+                 (.pressTab (.-mockInput terminal) #js {:shift true})
                  (.pressArrow (.-mockInput terminal) "down")
                  (until! terminal #(and (str/includes? (.captureCharFrame terminal) "other-model")
                                        (not (str/includes? (.captureCharFrame terminal) "Current ·")))
                          "Provider navigation failed or another provider's same-named model was marked current")))
         (.then (fn [_]
-                 (.pressKey (.-mockInput terminal) "TAB")
-                 (.pressEnter (.-mockInput terminal))
-                 (until! terminal #(= "Reasoning" (get-in @(:state application) [:ui :overlay :title])) "Enter did not open model reasoning")))
+                 (let [provider (node terminal "provider-codex-backend")]
+                   (.click (.-mockMouse terminal) (+ 2 (.-screenX provider)) (.-screenY provider)))))
+        (.then (fn [_]
+                 (until! terminal #(and (= :codex-backend (get-in @(:state application) [:ui :overlay :provider]))
+                                        (not (str/includes? (.captureCharFrame terminal) "other-model")))
+                         "Clicking a provider must remove every other provider's models")))
+        (.then (fn [_]
+                 (let [provider (node terminal "provider-openai")]
+                   (.click (.-mockMouse terminal) (+ 2 (.-screenX provider)) (.-screenY provider)))))
+        (.then (fn [_]
+                 (until! terminal #(and (= :openai (get-in @(:state application) [:ui :overlay :provider]))
+                                        (str/includes? (.captureCharFrame terminal) "other-model")
+                                        (.-focused (node terminal "dialog-input")))
+                         "Provider clicks must select its catalog and keep search ready")))
         (.then (fn [_]
                  (.pressEnter (.-mockInput terminal))
-                 (until! terminal #(str/includes? (.captureCharFrame terminal) "Make default for new conversations") "Model selection did not expose explicit default scope")))
+                 (until! terminal #(and (= :models (get-in @(:state application) [:ui :overlay :kind]))
+                                        (= :effort (get-in @(:state application) [:ui :overlay :pane]))) "Enter must focus inline effort controls")))
+        (.then (fn [_]
+                 (.pressEnter (.-mockInput terminal))
+                 (until! terminal #(str/includes? (.captureCharFrame terminal) "Apply here + make default") "Model selection did not expose explicit default scope")))
         (.then (fn [_]
                  (.pressEscape (.-mockInput terminal))
                  (until! terminal #(= :models (get-in @(:state application) [:ui :overlay :kind])) "Model choice lost browser return location")))
@@ -298,7 +320,7 @@
                  (.resize terminal 60 20)
                  (until! terminal #(and (not (.-visible (node terminal "provider-sidebar")))
                                         (str/includes? (.captureCharFrame terminal) "other-model")
-                                        (popup-fits? terminal)) "Narrow model browser is not usable")))
+                                        (screen-fits? terminal)) "Narrow model browser is not usable")))
         (.then (fn [_]
                  (capture! terminal "models-narrow")
                  (.resize terminal 120 36)
@@ -310,7 +332,7 @@
                                 {:id "result" :parent-id "call" :kind :message :data {:message/role :tool :message/tool-call-id "eval" :message/name "repl"
                                                                                  :message/content "=> :example"}}
                                 {:id "answer" :parent-id "result" :kind :message
-                                 :data {:message/role :assistant :message/content "The provider flow is ready.\n\n- Connected accounts stay visible.\n- Model changes preserve the conversation and live values.\n- Defaults apply to new conversations.\n\nUse **/providers** to try it."}}]
+                                 :data {:message/role :assistant :message/content "The provider flow is ready.\n\n- Connected accounts stay visible.\n- Model changes preserve the conversation and live values.\n- Defaults apply here and to new conversations.\n\n```clojure\n(result 23)\n```\n\nUse **/providers** to try it."}}]
                        snapshot {:state {:session {:id "preview" :name "Provider experience" :cwd "/work/arrodes" :head "answer"
                                                    :config {:provider :codex-backend :model "gpt-example" :thinking :high}}}
                                  :entries entries :cursor 2}
@@ -333,14 +355,323 @@
         (.then (fn [_] (capture! terminal "chat-narrow")
                  (println "Browser/chat rendering passed: provider states, two-pane navigation, scope selection, narrow layout, source/output, draft preservation."))))))
 
+(defn- model-column-edges! [application terminal]
+  (let [input (.-mockInput terminal) editor (node terminal "dialog-input")
+        pane? #(= % (get-in @(:state application) [:ui :overlay :pane]))]
+    (.pressArrow input "left")
+    (-> (until! terminal #(pane? :providers) "Left at empty search must enter providers")
+        (.then (fn [_] (.pressArrow input "left")
+                 (until! terminal #(pane? :providers) "Left at outer provider edge must not wrap")))
+        (.then (fn [_] (.pressArrow input "right")
+                 (until! terminal #(and (pane? :models) (.-focused editor)) "Right from providers must focus model search")))
+        (.then (fn [_] (.setText editor "luna")
+                 (until! terminal #(= "luna" (get-in @(:state application) [:ui :overlay :query])) "Search should update")))
+        (.then (fn [_] (set! (.-cursorOffset editor) 2) (.pressArrow input "left")
+                 (until! terminal #(and (pane? :models) (= 1 (.-cursorOffset editor))) "Interior arrows must move the text cursor")))
+        (.then (fn [_] (set! (.-cursorOffset editor) 0) (.pressArrow input "left")
+                 (until! terminal #(pane? :providers) "Left at start of search must cross to providers")))
+        (.then (fn [_] (.pressArrow input "right") (set! (.-cursorOffset editor) 4) (.pressArrow input "right")
+                 (until! terminal #(and (pane? :effort) (= "luna" (.-plainText editor))) "Right at end must cross to effort without changing search")))
+        (.then (fn [_] (.pressArrow input "left") (.pressArrow input "left")
+                 (until! terminal #(and (pane? :effort) (= :none (get-in @(:state application) [:ui :overlay :thinking])))
+                         "Arrows within the effort range must adjust it before changing columns")))
+        (.then (fn [_] (.pressArrow input "left")
+                 (until! terminal #(and (pane? :models) (.-focused editor)) "Left beyond minimum effort must return to models")))
+        (.then (fn [_] (.pressArrow input "right")
+                 (dotimes [_ 6] (.pressArrow input "right"))
+                 (until! terminal #(and (pane? :effort) (= :max (get-in @(:state application) [:ui :overlay :thinking])))
+                         "Right at the outer effort edge must clamp without wrapping")))
+        (.then (fn [_] (.pressTab input) (.pressArrow input "left")
+                 (until! terminal #(pane? :models) "Left from apply actions must return to model search")))
+        (.then (fn [_] (.setText editor "no-match")
+                 (until! terminal #(= "no-match" (get-in @(:state application) [:ui :overlay :query])) "Empty search result must settle")))
+        (.then (fn [_] (set! (.-cursorOffset editor) 8) (.pressArrow input "right") (.pressArrow input "left")
+                 (until! terminal #(pane? :models) "Empty results must not trap focus in settings")))
+        (.then (fn [_] (.setText editor "")
+                 (until! terminal #(= "" (get-in @(:state application) [:ui :overlay :query])) "Clearing search must restore models")))
+        (.then (fn [_] (let [button (node terminal "effort-medium")]
+                         (.click (.-mockMouse terminal) (+ 1 (.-screenX button)) (.-screenY button)))))
+        (.then (fn [_] (.pressEscape input)
+                 (until! terminal #(pane? :models) "Return to models after mouse selection"))))))
+
+(defn- transcript-hierarchy! [application terminal]
+  (.resize terminal 150 55)
+  (-> (until! terminal
+              #(and (= "Provider experience" (.-plainText (node terminal "session-title")))
+                     (= 1 (alength (.getChildren (.-parent (node terminal "session-title"))))))
+              "The app header must contain only the session title")
+      (.then (fn [_]
+               (until! terminal
+                       #(and (= "You" (.-plainText (node terminal "heading:message:question")))
+                              (= "Arrodes" (.-plainText (node terminal "heading:message:answer")))
+                              (> (.-width (node terminal "row:message:answer")) 140)
+                              (= (.-width (node terminal "row:message:question")) (.-width (node terminal "row:message:answer")))
+                              (str/includes? (.captureCharFrame terminal) "clojure")
+                              (str/includes? (.captureCharFrame terminal) "(result 23)"))
+                       "Turns and fenced code must remain legible with clear labels and full-width blocks")))
+      (.then (fn [_] (capture! terminal "conversation-hierarchy-wide") (.resize terminal 60 36)
+               (until! terminal #(<= (.-width (node terminal "row:message:answer")) 60)
+                       "Conversation blocks must fit narrow terminals")))
+      (.then (fn [_] (capture! terminal "conversation-hierarchy-narrow")
+               (println "Transcript hierarchy passed: minimal header, role labels, code blocks and full-width layout.")))))
+
+(defn- inline-effort! [application terminal]
+  (let [input (.-mockInput terminal) mouse (.-mockMouse terminal)]
+    (.resize terminal 130 32)
+    (swap! (:state application)
+           #(-> %
+                (assoc :notice nil :host-requests []
+                       :models [{:provider :fixture :id "luna-example" :thinking-levels [:none :low :medium :high :xhigh :max]}
+                                {:provider :fixture :id "second-model" :thinking-levels [:none :high]}]
+                       :providers [{:provider :fixture :name "Fixture" :available? true}])
+                (assoc-in [:view :session :config :thinking] :medium)
+                (assoc-in [:ui :overlay] {:kind :models :title "Models" :provider :fixture :query "" :index 0 :pane :models :token "inline-effort"})))
+    (-> (until! terminal #(and (node terminal "effort-medium")
+                               (str/includes? (.captureCharFrame terminal) "Effort: Medium")
+                               (> (.-screenX (node terminal "model-settings")) (.-screenX (node terminal "dialog-choices"))))
+                "Wide terminals must keep effort beside the model list")
+        (.then (fn [_] (model-column-edges! application terminal)))
+        (.then (fn [_] (capture! terminal "model-effort-wide") (.pressTab input)
+                 (until! terminal #(= :effort (get-in @(:state application) [:ui :overlay :pane]))
+                         "Tab must go from the model list directly to effort")))
+        (.then (fn [_] (.pressArrow input "right")))
+        (.then (fn [_]
+                 (until! terminal #(and (= :models (get-in @(:state application) [:ui :overlay :kind]))
+                                        (= :high (get-in @(:state application) [:ui :overlay :thinking]))
+                                        (= :medium (get-in @(:state application) [:view :session :config :thinking]))
+                                        (str/includes? (.-plainText (node terminal "effort-high")) "✓"))
+                         "Arrow changes must select effort without applying or leaving the model list")))
+        (.then (fn [_] (let [button (node terminal "effort-low")]
+                         (.click mouse (+ 1 (.-screenX button)) (.-screenY button)))))
+        (.then (fn [_]
+                 (until! terminal #(str/includes? (.-plainText (node terminal "effort-value")) "Low")
+                         "Click must select the effort directly")))
+        (.then (fn [_] (.pressTab input)
+                 (until! terminal #(= :session (get-in @(:state application) [:ui :overlay :pane]))
+                         "Tab must move from effort to apply")))
+        (.then (fn [_] (.pressTab input)
+                 (until! terminal #(= :default (get-in @(:state application) [:ui :overlay :pane]))
+                         "Tab must advance to the default action")))
+        (.then (fn [_] (.pressArrow input "up")
+                 (until! terminal #(= :session (get-in @(:state application) [:ui :overlay :pane]))
+                         "Up must move from default to the session action")))
+        (.then (fn [_] (.pressArrow input "down")
+                 (until! terminal #(= :default (get-in @(:state application) [:ui :overlay :pane]))
+                         "Down must move from session to the default action")))
+        (.then (fn [_] (.pressTab input #js {:shift true})
+                 (until! terminal #(= :session (get-in @(:state application) [:ui :overlay :pane]))
+                         "Shift+Tab must reverse the action order")))
+        (.then (fn [_] (.pressTab input #js {:shift true}) (.pressArrow input "left")
+                 (until! terminal #(= :none (get-in @(:state application) [:ui :overlay :thinking]))
+                         "Left must lower effort when the effort field is active")))
+        (.then (fn [_] (.pressTab input #js {:shift true})
+                 (until! terminal #(and (= :models (get-in @(:state application) [:ui :overlay :pane]))
+                                        (.-focused (node terminal "dialog-input")))
+                         "Shift+Tab back to models must restore search focus")))
+        (.then (fn [_] (.pressTab input #js {:shift true}) (.pressEnter input)
+                 (until! terminal #(and (= :models (get-in @(:state application) [:ui :overlay :pane]))
+                                        (.-focused (node terminal "dialog-input")))
+                         "Enter from provider navigation must restore model search focus")))
+        (.then (fn [_] (.pressArrow input "down")
+                 (until! terminal #(and (str/includes? (.-plainText (node terminal "model-selection-summary")) "second-model")
+                                        (str/includes? (.-plainText (node terminal "effort-value")) "None"))
+                         "Changing models must use that model's supported effort")))
+        (.then (fn [_] (.resize terminal 60 20)
+                 (until! terminal #(and (node terminal "effort-next")
+                                        (> (.-screenY (node terminal "model-settings")) (.-screenY (node terminal "dialog-choices")))
+                                        (<= (+ (.-screenY (node terminal "apply-default-model")) 1) 20))
+                         "Narrow terminals must fit effort and apply below the list")))
+        (.then (fn [_] (let [button (node terminal "effort-next")]
+                         (.click mouse (+ 1 (.-screenX button)) (.-screenY button)))))
+        (.then (fn [_]
+                 (until! terminal #(str/includes? (.-plainText (node terminal "effort-value")) "High")
+                         "Compact effort arrows must work")))
+        (.then (fn [_] (capture! terminal "model-effort-narrow")
+                 (.pressEscape input) (.pressEscape input)
+                 (println "Inline effort passed: same-screen selection, keyboard/mouse changes, apply focus, per-model levels and responsive layout."))))))
+
+(defn- composer-interactions! [application terminal]
+  (let [input (.-mockInput terminal) mouse (.-mockMouse terminal)
+        composer #(node terminal "composer")
+        bottom? #(let [box (node terminal "composer-box")]
+                   (= (+ (.-screenY box) (.-height box) 2) (.-terminalHeight (.-renderer terminal))))
+        above? #(let [menu (node terminal "command-menu")]
+                  (and (>= (.-screenY menu) 0)
+                       (<= (+ (.-screenY menu) (.-height menu)) (.-screenY (node terminal "composer-box")))))
+        initial-y (atom nil)]
+    (swap! (:state application)
+           #(-> % (assoc :host-requests [] :notice nil)
+                (assoc :view (assoc (model/empty-state) :session {:id "composer-test" :name "New session" :cwd "/tmp/project"}))
+                (update :ui assoc :overlay nil :draft "" :inspector? false :focus :composer)))
+    (.focus (composer))
+    (.resize terminal 100 32)
+    (-> (until! terminal #(and (.-visible (node terminal "welcome")) (bottom?)) "Fresh composer must stay at the terminal bottom")
+        (.then (fn [_] (reset! initial-y (.-screenY (composer))) (capture! terminal "welcome") (.typeText input "/resume")))
+        (.then (fn [_]
+                 (until! terminal #(and (.-visible (node terminal "command-menu"))
+                                        (not (.-visible (node terminal "dialog-layer")))
+                                        (str/includes? (.captureCharFrame terminal) "Resume a previous")
+                                        (above?) (bottom?) (= @initial-y (.-screenY (composer))))
+                         "Commands must open upward without moving the composer")))
+        (.then (fn [_] (capture! terminal "inline-commands") (.pressEscape input)
+                 (until! terminal #(and (not (.-visible (node terminal "command-menu")))
+                                        (= "/resume" (.-plainText (composer)))
+                                        (bottom?) (= @initial-y (.-screenY (composer)))) "Escape must preserve the draft and composer position")))
+        (.then (fn [_]
+                 (.setText (composer) "")
+                 (swap! (:state application) assoc-in [:view :entries]
+                        [{:id "mouse-message" :kind :message :data {:message/role :assistant :message/content "Read this assistant response, then type again."}}])
+                 (until! terminal #(and (not (.-visible (node terminal "welcome")))
+                                        (node terminal "row:message:mouse-message")) "Conversation should replace welcome")))
+        (.then (fn [_]
+                 (let [scroll (node terminal "conversation")]
+                   (.click mouse (+ 5 (.-screenX scroll)) (+ 1 (.-screenY scroll))))))
+        (.then (fn [_] (.typeText input "jkby")))
+        (.then (fn [_]
+                 (until! terminal #(and (= "jkby" (.-plainText (composer)))
+                                        (= :composer (get-in @(:state application) [:ui :focus])))
+                         "Typing after reading must preserve every first character, including navigation letters")))
+        (.then (fn [_]
+                 (let [scroll (node terminal "conversation")]
+                   (.click mouse (+ 5 (.-screenX scroll)) (+ 1 (.-screenY scroll))))))
+        (.then (fn [_] (.click mouse (+ 2 (.-screenX (composer))) (.-screenY (composer)))))
+        (.then (fn [_] (.typeText input "Z")))
+        (.then (fn [_]
+                 (until! terminal #(and (= :composer (get-in @(:state application) [:ui :focus]))
+                                        (str/includes? (.-plainText (composer)) "Z"))
+                         "Clicking the editor must restore app and native focus")))
+        (.then (fn [_]
+                 (.setText (composer) "/models")
+                 (until! terminal #(= "models" (get-in @(:state application) [:ui :overlay :query])) "Command query must stay in the editor")))
+        (.then (fn [_] (.pressEnter input)
+                 (until! terminal #(and (= :models (get-in @(:state application) [:ui :overlay :kind]))
+                                        (= "" (get-in @(:state application) [:ui :draft])))
+                         "Enter must execute the selected command and clear its text")))
+        (.then (fn [_] (.pressEscape input)
+                 (.resize terminal 48 16)
+                 (.setText (composer) "/")
+                 (until! terminal #(and (above?) (bottom?))
+                         "Upward commands must fit a short terminal and keep the composer at bottom")))
+        (.then (fn [_] (capture! terminal "inline-narrow")
+                 (swap! (:state application) assoc :view (assoc (model/empty-state) :session {:id "short-welcome" :cwd "/tmp/project"}))
+                 (until! terminal #(and (.-visible (node terminal "welcome"))
+                                        (above?) (bottom?))
+                         "Welcome plus upward suggestions must fit a short terminal")))
+        (.then (fn [_] (capture! terminal "welcome-narrow-commands") (.pressEscape input)
+                 (println "Composer passed: welcome, inline description search, command execution, mouse focus and type-to-compose."))))))
+
+(defn- wheel-follow! [application terminal]
+  (let [scroll #(node terminal "conversation")
+        at-bottom? #(<= (- (.-scrollHeight (scroll)) (.-height (.-viewport (scroll))) (.-scrollTop (scroll))) 1)
+        wheel (fn [direction]
+                (.scroll (.-mockMouse terminal) (+ 8 (.-screenX (scroll))) (+ (.-screenY (scroll)) (min 3 (max 0 (dec (.-height (.-viewport (scroll))))))) direction #js {:delayMs 10}))
+        message (fn [id text] {:id id :kind :message :data {:message/role :assistant :message/content text}})]
+    (.resize terminal 100 24)
+    (swap! (:state application)
+           #(-> % (assoc :notice nil :host-requests []
+                          :view (assoc (model/empty-state) :session {:id "scroll-test" :cwd "/tmp/project"}
+                                       :entries (mapv (fn [i] (message (str "line-" i) (str "Recorded response " i))) (range 40))))
+                  (update :ui assoc :overlay nil :inspector? false :follow? true :draft "" :scroll-top 0)))
+    (-> (until! terminal #(and (at-bottom?) (> (.-scrollHeight (scroll)) 50)) "Long conversation must initially follow the end")
+        (.then (fn [_]
+                 (letfn [(leave-bottom [remaining]
+                           (if (or (zero? remaining) (not (at-bottom?)))
+                             (js/Promise.resolve nil)
+                             (-> (wheel "up") (.then (fn [_] (.renderOnce terminal)))
+                                 (.then (fn [_] (leave-bottom (dec remaining)))))))]
+                   (leave-bottom 20))))
+        (.then (fn [_]
+                 (until! terminal #(and (not (get-in @(:state application) [:ui :follow?]))
+                                        (.-visible (node terminal "jump-to-latest")))
+                         "Scrolling away must pause following and show a jump action")))
+        (.then (fn [_]
+                 (swap! (:state application) update-in [:view :entries] conj (message "new" "New content while reading earlier output"))
+                 (until! terminal #(and (not (at-bottom?)) (not (get-in @(:state application) [:ui :follow?])))
+                         "New output must not pull the reader to the bottom")))
+        (.then (fn [_]
+                 ;; Native wheel acceleration depends on prior event timing. Scroll
+                 ;; until the actual boundary, not an assumed number of wheel ticks.
+                 (letfn [(reach-bottom [remaining]
+                           (if (or (zero? remaining)
+                                   (and (at-bottom?) (get-in @(:state application) [:ui :follow?])))
+                             (js/Promise.resolve nil)
+                             (-> (wheel "down")
+                                 (.then (fn [_] (.renderOnce terminal)))
+                                 (.then (fn [_] (reach-bottom (dec remaining)))))))]
+                   (reach-bottom 200))))
+        (.then (fn [_]
+                 (until! terminal #(and (at-bottom?) (get-in @(:state application) [:ui :follow?])
+                                        (not (.-visible (node terminal "jump-to-latest"))))
+                         #(str "Wheeling to the bottom must resume following and clear the banner "
+                               (pr-str {:top (.-scrollTop (scroll)) :height (.-scrollHeight (scroll))
+                                        :viewport (.-height (.-viewport (scroll)))
+                                        :bar (.-scrollSize (.-verticalScrollBar (scroll)))
+                                        :bar-viewport (.-viewportSize (.-verticalScrollBar (scroll)))
+                                        :x (.-screenX (scroll)) :y (.-screenY (scroll))
+                                        :follow (get-in @(:state application) [:ui :follow?])})))))
+        (.then (fn [_] (wheel "down")))
+        (.then (fn [_]
+                 (until! terminal #(and (get-in @(:state application) [:ui :follow?])
+                                        (not (.-visible (node terminal "jump-to-latest"))))
+                         "Extra downward wheel events at the bottom must not leave a banner")))
+        (.then (fn [_]
+                 (swap! (:state application) update-in [:view :entries] conj (message "followed" "Latest content after follow resumes"))
+                 (until! terminal #(and (at-bottom?) (str/includes? (.captureCharFrame terminal) "Latest content after follow resumes"))
+                         "Further output must follow after manual return to bottom")))
+        (.then (fn [_]
+                 (swap! (:state application) assoc-in [:view :entries] [(message "short" "Short conversation")])
+                 (until! terminal #(<= (.-scrollHeight (scroll)) (.-height (.-viewport (scroll)))) "Short content must settle")))
+        (.then (fn [_] (wheel "up")))
+        (.then (fn [_]
+                 (until! terminal #(and (get-in @(:state application) [:ui :follow?])
+                                        (not (.-visible (node terminal "jump-to-latest"))))
+                         "Non-scrollable content must not leave follow mode")))
+        (.then (fn [_] (println "Wheel following passed: pause, incoming activity, manual bottom return, repeated wheel and short content."))))))
+
+(defn- footer-and-feedback! [application terminal]
+  (let [pause #(js/Promise. (fn [resolve] (js/setTimeout resolve 3650)))
+        routine {:kind :info :message "Model applied here and saved as default."}]
+    (.resize terminal 110 30)
+    (swap! (:state application)
+           #(-> % (assoc :notice routine :models [{:provider :codex-backend :id "example-model" :context-window 128000}])
+                (assoc-in [:ui :overlay] nil)
+                (assoc-in [:view :session :config] {:provider :codex-backend :model "example-model" :thinking :medium})
+                (assoc-in [:view :entries]
+                          [{:id "usage" :kind :message :data {:message/role :assistant :message/content "Done"
+                                                             :message/provider-data {:response/usage {:usage/input-tokens 11000 :usage/output-tokens 1000}}}}])))
+    (-> (until! terminal
+                #(and (> (.-screenY (node terminal "model-footer")) (.-screenY (node terminal "composer")))
+                       (> (.-screenY (node terminal "project-footer")) (.-screenY (node terminal "model-footer")))
+                       (str/includes? (.-plainText (node terminal "footer-context")) "12k / 128k · 9%")
+                       (= "  codex" (.-plainText (node terminal "footer-provider")))
+                       (not (.-visible (node terminal "notice-box")))
+                       (not (.-visible (node terminal "notice-details"))))
+                "Metadata and reported context belong below the composer; routine feedback must not create an alert")
+        (.then (fn [_] (capture! terminal "footer-with-context") (pause)))
+        (.then (fn [_]
+                 (until! terminal #(nil? (:notice @(:state application))) "Routine confirmation must expire automatically")))
+        (.then (fn [_]
+                 (swap! (:state application) assoc :notice routine)
+                 (until! terminal #(str/includes? (.-plainText (node terminal "footer-feedback")) "Model applied") "Feedback must appear briefly")))
+        (.then (fn [_]
+                 (swap! (:state application) assoc :notice {:kind :error :message "Request failed" :data {:reason "fixture"}})
+                 (swap! (:state application) assoc-in [:view :entries] [])
+                 (until! terminal #(and (.-visible (node terminal "notice-box"))
+                                        (.-visible (node terminal "notice-details"))
+                                        (= "Context —" (.-plainText (node terminal "footer-context"))))
+                         "Errors must retain diagnostics; missing usage must not be shown as zero")))
+        (.then (fn [_] (pause)))
+        (.then (fn [_]
+                 (when-not (= :error (get-in @(:state application) [:notice :kind]))
+                   (throw (js/Error. "An old confirmation timer cleared a newer error")))
+                 (println "Footer passed: placement, compact provider, reported/unknown context, expiring confirmations and persistent errors."))))))
+
 (defn- exercise! [terminal]
   (let [application (app/create! {:runtime-root (.cwd js/process) :cwd (.cwd js/process)
                                   :setup? false})
         mounted (view/mount! application (.-renderer terminal) {})]
-    (.pressKey (.-mockInput terminal) "F3")
+    (show! application :choices)
     (-> (visible! application terminal)
-        (.then #(walk! application terminal "down" 40))
-        (.then #(walk! application terminal "up" 40))
         (.then (fn []
                  (reduce (fn [pending kind] (.then pending #(menu! application terminal kind)))
                          (js/Promise.resolve nil) [:sessions :models :history :files :pending :choices])))
@@ -348,9 +679,9 @@
         (.then (fn []
                  (.resize terminal 78 24)
                  (until! terminal
-                         #(and (popup-fits? terminal)
+                         #(and (screen-fits? terminal)
                                (selected-visible? application terminal))
-                         "Resize hid the selected popup row")))
+                         "Resize hid the selected screen row")))
         (.then #(walk! application terminal "up" 23))
         (.then #(walk! application terminal "down" 23))
         (.then (fn []
@@ -372,7 +703,7 @@
         (.then (fn []
                  (.resize terminal 78 16)
                  (until! terminal
-                         #(and (popup-fits? terminal)
+                         #(and (screen-fits? terminal)
                                (selected-visible? application terminal))
                          "Short viewport hid the selected item label")))
         (.then #(walk! application terminal "down" 23))
@@ -382,7 +713,12 @@
                  (.resize terminal 120 40)
                  (inspector-and-host-lifetimes! application terminal)))
         (.then (fn [_] (browser-and-chat! application terminal)))
-        (.then (fn [] (println "Native TUI passed: popup layout, inspector selection ownership, session widgets, render/editor requests and cancelled overlay cleanup.")))
+        (.then (fn [_] (transcript-hierarchy! application terminal)))
+        (.then (fn [_] (inline-effort! application terminal)))
+        (.then (fn [_] (composer-interactions! application terminal)))
+        (.then (fn [_] (footer-and-feedback! application terminal)))
+        (.then (fn [_] (wheel-follow! application terminal)))
+        (.then (fn [] (println "Native TUI passed: full-screen layout, inspector selection ownership, session widgets, render/editor requests and cancelled overlay cleanup.")))
         (.finally (fn []
                     (view/destroy! mounted)
                     (.destroy (.-renderer terminal))

@@ -111,7 +111,7 @@
     (let [opts (options arguments)]
       (cond
         (:help? opts) (println usage)
-        (:version? opts) (println "Arrodes 0.1.1")
+        (:version? opts) (println "Arrodes 0.1.2")
         (not (and (.-isTTY (.-stdin js/process)) (.-isTTY (.-stdout js/process))))
         (throw (js/Error. "The TUI needs an interactive terminal. Use arrodes --rpc for headless RPC."))
         :else (launch! opts)))

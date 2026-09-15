@@ -220,18 +220,8 @@
                                   :value :trust}])))]
       (resources/trust! (:resources rt) (:root project) trusted?))))
 
-(defn apply-model!
-  "Validate a browser selection and change exactly one scope. Connecting an
-  account is separate; saving defaults never changes an existing session."
-  [rt params]
-  (let [scope (keyword-value (or (:scope params) :session))
-        sid (:session-id params)
-        _ (value/check! (contains? #{:session :default} scope) :invalid-scope
-                        "Choose session or default scope" {})
-        _ (when (= :session scope)
-            (value/check! (and (string? sid) (not (str/blank? sid))) :invalid-session-id
-                          "Select a conversation first" {}))
-        manager (if (= :session scope) (runtime/provider-manager rt sid) (:provider rt))
+(defn- validate-model-selection! [rt params scope sid]
+  (let [manager (if (= :session scope) (runtime/provider-manager rt sid) (:provider rt))
         config (normalized-config params)
         entry (provider-entry (:providers (provider/status manager)) (:provider config))
         _ (value/check! entry :provider-unavailable
@@ -240,11 +230,33 @@
                           "This provider is not available in the conversation") {})
         _ (value/check! (:available? entry) :provider-not-connected
                         "Connect this provider before selecting a model" {})
-        model (provider/model manager (:provider config) (:model config))
+        model (or (provider/model manager (:provider config) (:model config))
+                  ;; Session discovery is cached in its own manager. A newly listed
+                  ;; model may need discovery in the global catalog before saving it.
+                  (when (and (= :default scope) (:refreshable? entry))
+                    (provider/refresh! manager (:provider config))
+                    (provider/model manager (:provider config) (:model config))))
         _ (value/check! model :model-unavailable "Refresh this provider to find an available model" {})
         levels (mapv keyword-value (or (seq (:thinking-levels model)) [:none]))
         _ (value/check! (some #{(:thinking config)} levels) :thinking-unavailable
                         "Select a reasoning level supported by this model" {:available levels})]
+    config))
+
+(defn apply-model!
+  "Apply a model to this session, or save the default and apply it here too."
+  [rt params]
+  (let [scope (keyword-value (or (:scope params) :session))
+        sid (:session-id params)
+        current? (and (= :default scope) (some? sid))
+        _ (value/check! (contains? #{:session :default} scope) :invalid-scope
+                        "Choose session or default scope" {})
+        _ (when (or (= :session scope) current?)
+            (value/check! (and (string? sid) (not (str/blank? sid))) :invalid-session-id
+                          "Select a conversation first" {}))
+        config (validate-model-selection! rt params scope sid)
+        _ (when current?
+            (runtime/session rt sid)
+            (validate-model-selection! rt params :session sid))]
     (if (= :session scope)
       {:scope scope :config config :session (runtime/configure! rt sid {:config config})}
       (do
@@ -255,7 +267,14 @@
                      (assoc changes key (zipmap config-keys (repeat nil))) changes))
                  config [:session-defaults :session :session-config])
          {:scope :global})
-        {:scope scope :config config}))))
+        (cond-> {:scope scope :config config}
+          current?
+          (assoc :session
+                 (try (runtime/configure! rt sid {:config config})
+                      (catch Exception e
+                        (throw (ex-info "Default saved, but applying it to this session failed. Refresh the session before retrying."
+                                        {:error/type :model-partially-applied :default-saved? true
+                                         :session-id sid} e))))))))))
 
 (defn run!
   "Complete missing setup interactively and return the resulting public status."

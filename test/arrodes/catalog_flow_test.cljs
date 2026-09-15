@@ -21,16 +21,18 @@
                                 label))))))
       provider-id (fn [manager] (if (:parent manager) :project-fixture :fixture))
       models-for (fn [manager]
-                   (case (manager-label manager)
-                     :root root-models
-                     :first project-models
-                     other-project-models))]
+                   (conj (case (manager-label manager)
+                           :root root-models
+                           :first project-models
+                           other-project-models)
+                         {:provider :shared :id \"shared-model\" :thinking-levels [:none :high]}))]
   (with-redefs [p/status (fn [manager]
                           (let [id (provider-id manager)]
                             {:providers [{:provider id
                                           :name (if (= id :fixture) \"Local test provider\" \"Project test provider\")
                                           :available? (contains? @connected id)
-                                          :auth {:type :api-key}}]}))
+                                          :auth {:type :api-key}}
+                                         {:provider :shared :name \"Shared provider\" :available? true :auth {:type :none}}]}))
                 p/catalog (fn [manager] (models-for manager))
                 p/model (fn [manager id model]
                           (some #(when (and (= id (:provider %)) (= model (:id %))) %)
@@ -118,13 +120,25 @@
                  (app/command! application :provider-models {:provider :fixture})))
         (.then (fn [_] (app/command! application :select-model {:scope :default :provider :fixture :model "alpha" :thinking :high})))
         (.then (fn [_]
-                 (reset! sid (get-in @(:state application) [:view :session :id]))
-                 (check! @sid "Choosing the first default must create a conversation")
-                 (check! (= "alpha" (get-in @(:state application) [:view :session :config :model])) "Session uses selected default")
-                 (request "session.evaluate" {:session-id @sid :source "(def kept 42)"})))
-        (.then (fn [_] (app/command! application :select-model {:scope :default :provider :fixture :model "beta" :thinking :none})))
+                 (check! (nil? (get-in @(:state application) [:view :session :id])) "Choosing a default must not create a session")
+                 (check! (= "alpha" (get-in @(:state application) [:view :session :config :model])) "Composer must reflect the chosen model")
+                 (app/command! application :select-model {:scope :session :provider :fixture :model "beta" :thinking :none})))
         (.then (fn [_]
-                 (check! (= "alpha" (get-in @(:state application) [:view :session :config :model])) "Saving a default must not switch the conversation")
+                 (check! (= "beta" (get-in @(:state application) [:view :session :config :model])) "Choosing a model before Send must update only the composer")
+                 (request "session.list" {})))
+        (.then (fn [wire]
+                 (check! (empty? (sessions wire)) "Model setup must leave session storage empty")
+                 ;; The remaining catalog tests explicitly create an RPC fixture session.
+                 (request "session.create" {})))
+        (.then (fn [wire]
+                 (reset! sid (:id (js->clj (clj->js wire) :keywordize-keys true)))
+                 (app/command! application :switch-session {:id @sid})))
+        (.then (fn [_] (request "session.evaluate" {:session-id @sid :source "(def kept 42)"})))
+        (.then (fn [_]
+                 (expect-error! (app/command! application :select-model {:scope :default :provider :fixture :model "beta" :thinking :none})
+                                "provider-unavailable" "A default unavailable in this session must fail before changing settings")))
+        (.then (fn [_]
+                 (check! (= "alpha" (get-in @(:state application) [:view :session :config :model])) "Rejected default selection must preserve the conversation")
                  (app/command! application :providers {})))
         (.then (fn [_]
                  (check! (provider @(:state application) :project-fixture)
@@ -137,11 +151,17 @@
                          "Project provider sign-in must refresh through the active conversation")
                  (app/command! application :provider-models {:provider :project-fixture})))
         (.then (fn [_]
-                 (let [models (:models @(:state application))]
+                 (let [models (filterv #(= :project-fixture (:provider %)) (:models @(:state application)))]
                    (check! (and (= 1 (count models))
                                 (= :project-fixture (:provider (first models)))
                                 (= "alpha" (:id (first models))))
                            "Project model refresh must use the session provider manager"))
+                 (app/command! application :select-model
+                               {:scope :default :provider :shared :model "shared-model" :thinking :high})))
+        (.then (fn [_]
+                 (check! (= {:provider :shared :model "shared-model" :thinking :high}
+                            (select-keys (get-in @(:state application) [:view :session :config]) [:provider :model :thinking]))
+                         "Saving a default must also update the current session")
                  (app/command! application :select-model
                                {:scope :session :provider :project-fixture :model "alpha" :thinking :high})))
         (.then (fn [_]

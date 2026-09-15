@@ -311,7 +311,8 @@
 (defn- create-session! [app data]
   (let [base (default-session-params app)
         params (cond-> base
-                 (:name data) (assoc :name (:name data)))]
+                 (:name data) (assoc :name (:name data))
+                 (:config data) (assoc :config (:config data)))]
     (-> (mutation! app "session.create" params)
         (.then
          (fn [wire-session]
@@ -355,7 +356,9 @@
 (defn- auth-observation! [app context provider cancelled?]
   (-> (load-providers! app context)
       (.then (fn [providers]
-               (let [entry (some #(when (= (keyword provider) (keyword (:provider %))) %) providers)
+               (let [_ (when (owns-catalog? app context)
+                         (swap! (:state app) update :discovery dissoc (keyword provider)))
+                     entry (some #(when (= (keyword provider) (keyword (:provider %))) %) providers)
                      connected? (:available? entry)]
                  (when (owns-catalog? app context)
                    (swap! (:state app) assoc :notice
@@ -376,18 +379,67 @@
           (.then work)
           (.finally (fn [] (swap! (:state app) assoc :catalog-operation nil)))))))
 
+(defn- browse-provider! [app data]
+  (let [context (catalog-context app)
+        id (keyword (:provider data))
+        previous (get-in @(:state app) [:discovery id])
+        fresh? (and (= context (:context previous))
+                    (or (:loading? previous)
+                        (and (:at previous) (< (- (.now js/Date) (:at previous)) 60000))))]
+    (if (and fresh? (not (:refresh? data)))
+      (resolved nil)
+      (let [token (str (random-uuid))
+            owned? #(and (owns-catalog? app context)
+                         (= token (get-in @(:state app) [:discovery id :token])))
+            merge-models! (fn [wire]
+                            (when (owned?)
+                              (let [models (filterv #(= id (keyword (:provider %))) (:models (decode wire)))]
+                                (swap! (:state app) update :models
+                                       #(into (filterv (fn [m] (not= id (keyword (:provider m)))) %) models)))))]
+        (swap! (:state app) assoc-in [:discovery id]
+               {:token token :context context :loading? true})
+        (-> (call! app "model.list" (catalog-params context {:provider id}))
+            (.then (fn [wire]
+                     (merge-models! wire)
+                     (when (:available? data)
+                       (-> (call! app "model.refresh" (catalog-params context {:provider id}))
+                           (.then merge-models!)))))
+            (.then (fn [_]
+                     (when (owned?)
+                       (swap! (:state app) update-in [:discovery id]
+                              assoc :loading? false :at (.now js/Date)))))
+            (.catch (fn [failure]
+                      (when (owned?)
+                        (swap! (:state app) update-in [:discovery id]
+                               assoc :loading? false :error (or (ex-message failure) (.-message failure)))))))))))
+
+(defn- start-empty! [app data]
+  (swap! (:state app)
+         (fn [state]
+           (let [config (merge (get-in state [:setup :config])
+                               (:config (default-session-params app)) (:config data))]
+             (-> state
+                 (save-session-ui (session-id-from state))
+                 (update :navigation-generation (fnil inc 0))
+                 (assoc :empty-composer? true :first-send-unknown? false
+                        :view (assoc (model/empty-state) :session
+                                     {:name (or (:name data) (get-in app [:options :session-name]) "Untitled session") :cwd (workspace app) :config config})
+                        :history nil :hydrating nil :notice nil)
+                 (restore-session-ui nil)
+                 (assoc-in [:ui :overlay] nil)
+                 (assoc-in [:ui :focus] :composer)))))
+  (resolved (get-in @(:state app) [:view :session])))
+
 (defn- select-start-session! [app sessions preferred]
   (let [requested (or preferred (get-in app [:options :session-id]))
-        cwd (.realpathSync fs (or (get-in app [:options :cwd]) (.cwd js/process)))
-        selected (if requested
-                   (some #(when (= requested (value-field % :id)) %) sessions)
-                   (first (filter #(= cwd (.resolve path-module (value-field % :cwd))) sessions)))]
+        selected (when requested
+                   (some #(when (= requested (value-field % :id)) %) sessions))]
     (cond
       selected (hydrate-session! app (value-field selected :id) true)
       requested (rejected (error "session-not-found" "The requested session does not exist"
                                  {:session-id requested}))
-      :else (-> (create-session! app {})
-                (.then #(hydrate-session! app (value-field % :id) true))))))
+      (:empty-composer? @(:state app)) (resolved (:view @(:state app)))
+      :else (start-empty! app {}))))
 
 (defn- setup-params [app]
   (let [options (:options app)
@@ -670,7 +722,8 @@
         sid (session-id-from state)
         text (or (:text data) (get-in state [:ui :draft]) "")
         mode (normalize-mode (:mode data))
-        attachments (if (= :evaluate mode) [] (vec (get-in state [:ui :attachments])))
+        attachments (if (= :evaluate mode) [] (vec (if (contains? data :attachments) (:attachments data)
+                                                  (get-in state [:ui :attachments]))))
         oid (operation-id-from state)]
     (when-not sid
       (throw (error "no-session" "No active session" {})))
@@ -708,10 +761,43 @@
                    (swap! (:state app) update-in [:view :queue] enrich-pending-by-id result))
                  result))))))))
 
+(defn- submit-first! [app data]
+  (let [state @(:state app)
+        mode (normalize-mode (:mode data))
+        text (or (:text data) (get-in state [:ui :draft]) "")
+        attachments (vec (get-in state [:ui :attachments]))
+        session (get-in state [:view :session])
+        created (atom nil) submitted? (atom false)]
+    (when (or (:first-submit? state) (:first-send-unknown? state))
+      (throw (error "submission-pending" "The first submission is pending or has an unknown outcome; inspect before retrying." {})))
+    (when (not= :prompt mode)
+      (throw (error "no-session" "Send a first message before evaluating or queueing work." {})))
+    (prompt-parts text attachments)
+    (swap! (:state app) assoc :first-submit? true)
+    (-> (create-session! app (select-keys session [:name :config]))
+        (.then (fn [session]
+                 (reset! created (:id session))
+                 (hydrate-session! app (:id session) false)))
+        (.then (fn [_]
+                 (swap! (:state app) assoc :empty-composer? false)
+                 (reset! submitted? true)
+                 (submit! app (assoc data :text text :attachments attachments))))
+        (.catch (fn [failure]
+                  (cond
+                    (:unknown-outcome? (ex-data failure))
+                    (do (swap! (:state app) assoc :first-send-unknown? true) (throw failure))
+                    (and @created (not @submitted?))
+                    (-> (mutation! app "session.delete" {:session-id @created})
+                        (.then (fn [_]
+                                 (swap! (:state app) update :sessions #(filterv (fn [x] (not= @created (:id x))) %))
+                                 (throw failure))))
+                    :else (throw failure))))
+        (.finally (fn [] (swap! (:state app) assoc :first-submit? false))))))
+
 (defn- switch-session! [app sid]
   (when-not (and (string? sid) (not (str/blank? sid)))
     (throw (error "invalid-session" "Session id must be non-empty" {})))
-  (swap! (:state app) assoc :models [] :providers [])
+  (swap! (:state app) assoc :models [] :providers [] :empty-composer? false)
   (let [pending (hydrate-session! app sid true)
         context {:session-id sid :navigation (:navigation-generation @(:state app))}]
     (-> pending
@@ -933,16 +1019,21 @@
         oid (operation-id-from state)
         navigation (:navigation-generation state)
         context {:session-id sid :navigation navigation}]
+    (when (and (:first-submit? state) (contains? #{:new-session :switch-session :select-model} action))
+      (throw (error "submission-pending" "Wait for the first message to finish submitting." {})))
     (case action
-      :submit (if sid (submit! app data)
-                  (rejected (error "setup-required" "Open /providers and choose a default model to start a conversation." {})))
+      :submit (cond (:first-submit? state) (rejected (error "submission-pending" "The first message is being submitted." {}))
+                    sid (submit! app data)
+                    (or (false? (get-in app [:options :setup?])) (get-in state [:setup :configuration-ready?]))
+                    (submit-first! app data)
+                    :else (rejected (error "setup-required" "Open /providers and choose a default model to start a conversation." {})))
 
       :cancel
       (if oid
         (-> (mutation! app "operation.cancel" {:operation-id oid}) (.then decode))
         (resolved {:session-id sid :operation-id nil :status :idle}))
 
-      :refresh (hydrate-session! app sid false)
+      :refresh (if sid (hydrate-session! app sid false) (resolved (:view state)))
       :sessions (load-sessions! app)
       :switch-session (switch-session! app (:id data))
 
@@ -950,13 +1041,15 @@
       (if (and (not= false (get-in app [:options :setup?]))
                (not (get-in state [:setup :configuration-ready?])))
         (rejected (error "setup-required" "Choose a default model in /providers before creating a conversation." {}))
-        (-> (create-session! app data)
-            (.then #(switch-session! app (value-field % :id)))))
+        (start-empty! app data))
 
       :rename-session
+      (if (and (nil? sid) (nil? (:id data)))
+        (do (swap! (:state app) assoc-in [:view :session :name] (:name data))
+            (resolved (get-in @(:state app) [:view :session])))
       (let [target (or (:id data) sid)]
         (-> (mutation! app "session.name" {:session-id target :name (:name data)})
-            (.then #(update-session-state! app %))))
+            (.then #(update-session-state! app %)))))
 
       :delete-session
       (let [target (:id data)]
@@ -982,8 +1075,7 @@
                         (if-let [next-session (first sessions)]
                           (-> (hydrate-session! app (value-field next-session :id) true)
                               (.then (fn [_] (decode wire-result))))
-                          (-> (create-session! app {})
-                              (.then #(hydrate-session! app (value-field % :id) true))
+                          (-> (start-empty! app {})
                               (.then (fn [_] (decode wire-result))))))))
                  (decode wire-result))))))
 
@@ -998,6 +1090,8 @@
                    (.then (fn [_] session)))))))
 
       :models (load-models! app (boolean (:refresh? data)))
+
+      :browse-provider (browse-provider! app data)
 
       :providers (load-providers! app)
 
@@ -1033,18 +1127,28 @@
       (catalog-work!
        app "Saving model selection…"
        (fn [_]
-         (-> (mutation! app "model.select"
-                        (cond-> (select-keys data [:provider :model :thinking :scope])
-                          sid (assoc :session-id sid)))
+         (-> (if (and (nil? sid) (= :session (keyword (:scope data))))
+               (let [entry (some #(when (= (keyword (:provider data)) (keyword (:provider %))) %) (:providers state))
+                     m (some #(when (and (= (keyword (:provider data)) (keyword (:provider %)))
+                                        (= (:model data) (:id %))) %) (:models state))]
+                 (when-not (and (:available? entry) m
+                                (some #{(keyword (:thinking data))} (map keyword (or (seq (:thinking-levels m)) [:none]))))
+                   (throw (error "model-unavailable" "Select a connected provider and a supported model/effort." {})))
+                 (resolved {:config (select-keys data [:provider :model :thinking])}))
+               (mutation! app "model.select"
+                          (cond-> (select-keys data [:provider :model :thinking :scope])
+                            sid (assoc :session-id sid))))
              (.then (fn [wire]
                       (let [result (decode wire)]
                         (when (= :default (keyword (:scope data)))
                           (swap! (:state app) assoc :browser-selection? true))
                         (when-let [session (:session result)] (update-session-state! app session))
+                        (when (and (nil? sid) (owns-catalog? app context))
+                          (swap! (:state app) update-in [:view :session :config] merge (:config result)))
                         (when (or (= :default (keyword (:scope data))) (owns-catalog? app context))
                           (swap! (:state app) assoc :notice
                                  {:kind :info :message (if (= :default (keyword (:scope data)))
-                                                        "Default saved for new conversations."
+                                                        (if sid "Model applied here and saved as the default for new sessions." "Default saved for new sessions.")
                                                         (if oid "Model saved for the next turn; the current run continues."
                                                             "Model changed for this conversation."))}))
                         (if sid
@@ -1054,8 +1158,9 @@
                                          (swap! (:state app) assoc :setup (decode status))
                                          result)))
                             result)
-                          (-> (run-setup! app true nil)
-                              (.then (fn [_] result))))))))))
+                          (if (= :default (keyword (:scope data)))
+                            (-> (run-setup! app true nil) (.then (fn [_] result)))
+                            result))))))))
 
       :setup (run-setup! app false nil)
 

@@ -10,7 +10,13 @@ Start Arrodes in a project:
 arrodes
 ```
 
-Use `/new` to create another session and `/sessions` or `F2` to switch. Resume a known session directly with:
+Normal startup and `/new` open an empty composer without creating a stored session.
+Only Send creates the session, after validating that the message contains text or an
+attachment. Model selection and typing do not create sessions or saved drafts. Recent
+sessions on the welcome screen are explicit resume actions. Reconnecting retains the
+current session or unsent composer text.
+
+Use `/new` to open a new composer and `/sessions` or `F2` to switch. Resume a known session directly with:
 
 ```sh
 arrodes --session SESSION_ID
@@ -26,7 +32,8 @@ Over RPC, the corresponding methods are `session.create`, `session.list`, `sessi
 - `Enter` steers the current operation while it is running.
 - `Ctrl+Q` adds a follow-up to the queue.
 - `/pending` edits or drops input that has not been delivered.
-- `Esc` requests cancellation when no dialog or panel is open.
+- `Esc` dismisses suggestions/dialogs or returns from reading to the composer before
+  requesting cancellation. With the composer already active, it requests cancellation.
 - `/continue` asks the model to continue from current context.
 - `/compact` reduces model context while preserving original history.
 
