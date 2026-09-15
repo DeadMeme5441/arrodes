@@ -78,7 +78,19 @@ jobs:
       - name: Check behavioral invariants
         run: clojure -Srepro -M:test
       - name: Verify native TUI and controller
+        env:
+          ARRODES_CAPTURE_UI: target/ui-preview
         run: bun run test:tui
+      - name: Upload native UI captures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tui-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            target/ui-preview/*.txt
+            target/ui-preview/*.json
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Exercise source RPC
         run: python scripts/verify-rpc.py
       - name: Build and exercise installed executable

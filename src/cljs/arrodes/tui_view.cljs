@@ -132,7 +132,7 @@
                   (when (:available? entry) (fire! view :provider-models {:provider id})))]
     (open-overlay!
      view {:kind :choices :title (catalog/provider-name entry) :return-overlay previous
-           :hint (str (catalog/status-label entry) " · " (catalog/auth-label entry))
+           :hint (str (name id) " · " (catalog/status-label entry) " · " (catalog/auth-label entry))
            :items (vec (concat
                         (when (:available? entry)
                           [{:label "Browse models" :description "Choose for this conversation or save a default" :choose browse!}])
@@ -228,11 +228,13 @@
                   {:label (str (if (:available? entry) "● " "○ ") (catalog/provider-name entry))
                    :description (str (catalog/status-label entry) " · " (catalog/auth-label entry))
                    :connected? (:available? entry)
+                   :search-text (name (catalog/provider-id entry))
                    :choose #(provider-actions! view entry)}) (catalog/providers (:providers s)))
           :models
           (mapv (fn [m]
                   {:label (:id m) :model m
-                   :description (str (when (= (:id m) (get-in s [:view :session :config :model])) "Current · ")
+                   :description (str (when (and (= (:id m) (get-in s [:view :session :config :model]))
+                                               (= (catalog/provider-id m) (some-> (get-in s [:view :session :config :provider]) keyword))) "Current · ")
                                      (when (:context-window m) (str (:context-window m) " context · "))
                                      (str/join "/" (map name (:thinking-levels m))))
                    :choose #(open-model-choice! view m)})
@@ -281,7 +283,7 @@
           (or (:items overlay) []))]
     (->> raw
          (filter #(or (str/blank? query)
-                      (str/includes? (str/lower-case (str (:label %) " " (:description %))) query)))
+                      (str/includes? (str/lower-case (str (:label %) " " (:description %) " " (:search-text %))) query)))
          (take (if (contains? #{:models :providers} (:kind overlay)) 2000 100))
          vec)))
 
@@ -351,7 +353,11 @@
           120)))
 
 (defn- commands [view]
-  [{:label "New session" :description "/new" :choose #(do (close-overlay! view) (fire! view :new-session {}))}
+  [{:label "New session" :description "/new"
+    :choose #(if (and (not= false (get-in view [:app :options :setup?]))
+                      (not (get-in (state view) [:setup :configuration-ready?])))
+               (open-providers! view)
+               (do (close-overlay! view) (fire! view :new-session {})))}
    {:label "Sessions" :description "/sessions  F2" :choose #(open-sessions! view)}
    {:label "History and branches" :description "/history" :choose #(open-history! view)}
    {:label "Refresh session state" :description "/refresh  Read-only reconciliation; keeps live definitions"

@@ -27,4 +27,6 @@ empty, running, completed, failed, cancelled, long output, long menus and narrow
 Use fixtures for repeatability. Captures illustrate layout; they do not establish live
 provider behavior. Test controller transitions independently and together with rendering.
 
+The current visual system is documented in [TUI design](TUI_DESIGN.md).
+
 The [TUI skill](../.agents/skills/arrodes-tui/SKILL.md) gives the implementation workflow.

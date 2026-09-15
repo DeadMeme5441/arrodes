@@ -12,7 +12,7 @@ workflow. Keep a fact in its owning document and link to it elsewhere.
 | Where do settings and project resources live? | [Configuration](CONFIGURATION.md) |
 | How do extensions, MCP, skills and packages work? | [Extensions](EXTENSIONS.md) |
 | What is the integration contract? | [RPC](PROTOCOL.md) |
-| What must the terminal interface preserve? | [TUI](TUI.md) |
+| What must the terminal interface preserve? | [TUI](TUI.md), [design system](TUI_DESIGN.md) |
 | How do I develop and verify a change? | [Development](DEVELOPMENT.md), [Contributing](../CONTRIBUTING.md) |
 | What makes an artifact ready to ship? | [Releasing](RELEASING.md) |
 | Which compatibility decisions need recording? | [Compatibility](COMPATIBILITY.md) |

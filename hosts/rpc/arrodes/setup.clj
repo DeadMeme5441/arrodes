@@ -234,6 +234,10 @@
         manager (if (= :session scope) (runtime/provider-manager rt sid) (:provider rt))
         config (normalized-config params)
         entry (provider-entry (:providers (provider/status manager)) (:provider config))
+        _ (value/check! entry :provider-unavailable
+                        (if (= :default scope)
+                          "Configure this provider globally before making it a default"
+                          "This provider is not available in the conversation") {})
         _ (value/check! (:available? entry) :provider-not-connected
                         "Connect this provider before selecting a model" {})
         model (provider/model manager (:provider config) (:model config))

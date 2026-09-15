@@ -317,20 +317,35 @@ def terminal_smoke(executable, home, project, environment):
         raise AssertionError("Terminal did not reach " + repr(text) + ":\n" + "\n".join(screen.display))
 
     try:
+        wait_for(b"Welcome to Arrodes.")
+        os.write(master, b"Release fixture")
+        wait_for(b"Release fixture")
+        os.write(master, b"\r")
+        wait_for(b"Connect provider")
+        os.write(master, b"\r")
         wait_for(b"Enter API key")
         os.write(master, b"\x1b")
-        wait_for(b"Enter API key", absent=True)
-        os.write(master, b"/login\r")
+        wait_for(b"Sign-in cancelled")
+        os.write(master, b"\r")
+        wait_for(b"Connect provider")
+        os.write(master, b"\r")
         wait_for(b"Enter API key")
         os.write(master, b"local-release-check")
         wait_for("••".encode())
         assert b"local-release-check" not in capture, "API key appeared in terminal output"
         os.write(master, b"\r")
-        wait_for(b"Choose a model")
+        wait_for(b"Provider connected")
         os.write(master, b"\r")
-        wait_for(b"Choose a thinking level")
+        wait_for(b"Browse models")
         os.write(master, b"\r")
-        wait_for(b"Choose a thinking level", absent=True)
+        wait_for(b"fixture-model")
+        wait_for(b"Discovering models", absent=True)
+        os.write(master, b"\r")
+        wait_for(b"Reasoning")
+        os.write(master, b"\r")
+        wait_for(b"Make default for new conversations")
+        os.write(master, b"\r")
+        wait_for(b"Make default for new conversations", absent=True)
         wait_for(b"fixture-model")
         wait_for(b"Idle")
         os.write(master, b"/eval\r")
@@ -353,7 +368,7 @@ def terminal_smoke(executable, home, project, environment):
         except subprocess.TimeoutExpired:
             raise AssertionError("Terminal did not exit:\n" + "\n".join(screen.display))
         assert process.returncode == 0, capture.decode(errors="replace")[-4000:]
-        return "PTY setup cancel/login, hidden API key, model selection, evaluation 42, clean exit"
+        return "PTY providers, cancelled/secret login, model/default selection, evaluation 42, clean exit"
     finally:
         if process.poll() is None:
             process.kill()

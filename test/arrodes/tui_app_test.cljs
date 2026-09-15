@@ -12,6 +12,7 @@
 (let [open-runtime runtime/open!
       dispatch commands/dispatch!
       mode (atom nil)
+      catalog-session (atom nil)
       entered (atom (promise))
       release (atom (promise))
       run-release (atom (promise))
@@ -38,11 +39,22 @@
             \"__arm-reload\" (do (arm! :reload) (runtime/session rt (:session-id params)))
             \"__arm-ack\" (do (arm! :ack) (runtime/session rt (:session-id params)))
             \"__arm-queue\" (do (arm! :queue) (runtime/session rt (:session-id params)))
+            \"__arm-models\" (do (arm! :models) (reset! catalog-session (:session-id params)) (runtime/session rt (:session-id params)))
+            \"__arm-providers\" (do (arm! :providers) (reset! catalog-session (:session-id params)) (runtime/session rt (:session-id params)))
             \"__await-entered\" (do (await! @entered \"delayed request admission\")
                                     (runtime/session rt (:session-id params)))
             \"__release-run\" (do (deliver @run-release true) (runtime/session rt (:session-id params)))
             \"__release\" (do (deliver @release true) (runtime/session rt (:session-id params)))
             (dispatch rt method params))
+
+          (\"model.list\" \"auth.status\")
+          (let [result (dispatch rt method params)
+                kind (if (= method \"model.list\") :models :providers)]
+            (if (and (= kind @mode) (= @catalog-session (:session-id params)))
+              (do (deliver @entered true) (await! @release \"catalog release\")
+                  (reset! mode nil)
+                  (update result kind conj {:provider :stale-provider :id \"stale-A\" :name \"Stale A\" :available? true}))
+              result))
 
           \"session.configure\"
           (let [result (dispatch rt method params)]
@@ -234,6 +246,24 @@
                   (check! (= "newer draft" (get-in @(:state application) [:ui :draft]))
                           "Newer edits did not survive a later round trip")))))))))
 
+(defn- catalog-interleaving! [application a b action]
+  (let [before (atom nil)]
+    (-> (app/command! application :switch-session {:id a})
+        (.then (fn [_] (control! application (if (= action :models) "__arm-models" "__arm-providers"))))
+        (.then (fn [_]
+                 (let [pending (app/command! application action {})]
+                   (-> (control! application "__await-entered")
+                       (.then (fn [_] (app/command! application :switch-session {:id b})))
+                       (.then (fn [_]
+                                (reset! before (get @(:state application) action))
+                                (control! application "__release")))
+                       (.then (fn [_] pending))
+                       (.then (fn [_]
+                                (check! (= b (get-in @(:state application) [:view :session :id]))
+                                        "Catalog response changed the selected session")
+                                (check! (= @before (get @(:state application) action))
+                                        "Late catalog response from A overwrote B's catalog"))))))))))
+
 (defn- controller-interleavings! [application]
   (let [a (get-in @(:state application) [:view :session :id])]
     (-> (app/command! application :new-session {:name "Interleaving target"})
@@ -253,7 +283,9 @@
                                                b "B reload draft" "Reload")))
                  (.then (fn [_] (app/command! application :switch-session {:id a})))
                  (.then (fn [_] (queue-receipt! application)))
-                 (.then (fn [_] (acknowledgement! application a b))))))))))
+                 (.then (fn [_] (acknowledgement! application a b)))
+                 (.then (fn [_] (catalog-interleaving! application a b :models)))
+                 (.then (fn [_] (catalog-interleaving! application a b :providers))))))))))
 
 (defn- graceful-close! []
   (let [source "process.on('SIGTERM', () => process.exit(99));

@@ -261,10 +261,12 @@
                    {:provider :openai :name "OpenAI" :available? true :auth {:type :api-key}}
                    {:provider :anthropic :name "Anthropic" :available? false :auth {:type :api-key}}]
         models [{:provider :codex-backend :id "gpt-example" :context-window 128000 :thinking-levels [:none :medium :high] :input [:text :image]}
+                {:provider :openai :id "gpt-example" :context-window 64000 :thinking-levels [:none]}
                 {:provider :openai :id "other-model" :context-window 64000 :thinking-levels [:none]}]
         open! (fn [kind]
                 (swap! (:state application)
                        #(-> % (assoc :providers providers :models models :host-requests [] :notice nil)
+                            (assoc-in [:view :session :config] {:provider :codex-backend :model "gpt-example" :thinking :high})
                             (assoc-in [:ui :overlay] {:kind kind :title (if (= kind :models) "Models" "Providers")
                                                      :token (str (random-uuid)) :index 0 :query ""
                                                      :provider :codex-backend :pane :models
@@ -279,7 +281,9 @@
                  (capture! terminal "models")
                  (.pressKey (.-mockInput terminal) "TAB")
                  (.pressArrow (.-mockInput terminal) "down")
-                 (until! terminal #(str/includes? (.captureCharFrame terminal) "other-model") "Provider keyboard navigation did not filter models")))
+                 (until! terminal #(and (str/includes? (.captureCharFrame terminal) "other-model")
+                                       (not (str/includes? (.captureCharFrame terminal) "Current ·")))
+                         "Provider navigation failed or another provider's same-named model was marked current")))
         (.then (fn [_]
                  (.pressKey (.-mockInput terminal) "TAB")
                  (.pressEnter (.-mockInput terminal))
