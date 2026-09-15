@@ -10,7 +10,8 @@
 (def colors {:background "#0c0d0e" :surface "#0c0d0e" :raised "#24231d"
              :text "#d8d8d2" :muted "#a4a49e" :faint "#797b76"
              :accent "#d6c16b" :success "#8eb39a" :warning "#d6b878" :error "#d78080"
-             :border "#323430" :selection "#48432c"})
+             :border "#323430" :selection "#48432c"
+             :user-surface "#17191b" :code-surface "#141618"})
 
 (def layout {:gutter 2 :section-gap 1 :sidebar-width 28})
 
@@ -77,8 +78,14 @@
                   ;; is needed to read an answer, including unfamiliar languages.
                   :renderNode (fn [token _]
                                 (when (= "code" (.-type token))
-                                  (text renderer (.-text token)
-                                        {:bg (:surface colors) :paddingX 1 :marginY 1})))
+                                  (let [block (box renderer {:width "100%" :paddingX 1 :paddingY 1 :marginY 1
+                                                             :backgroundColor (:code-surface colors)
+                                                             :border ["left"] :borderColor (:border colors)})]
+                                    (add! block
+                                          (text renderer (or (not-empty (.-lang token)) "Code")
+                                                {:height 1 :fg (:faint colors) :selectable false})
+                                          (text renderer (.-text token) {:width "100%" :fg (:text colors)}))
+                                    block)))
                   :flexShrink 0}
                  options)))
 

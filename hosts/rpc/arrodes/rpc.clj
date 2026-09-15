@@ -11,7 +11,7 @@
            (java.util.concurrent.atomic AtomicBoolean)))
 
 (def protocol-version 1)
-(def version "0.1.1")
+(def version "0.1.2")
 (def ^:private default-workers 8)
 (def ^:private default-queue-size 128)
 (def ^:private default-line-limit (* 16 1024 1024))

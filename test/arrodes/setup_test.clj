@@ -98,3 +98,38 @@
                   runtime/ui! (fn [& _] (throw (ex-info "cancelled" {:error/code "cancelled"})))]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cancelled" (setup/run! rt {})))
       (is (empty? @settings)))))
+
+(deftest default-selection-can-also-configure-current-session
+  (let [settings (atom {}) configured (atom [])
+        rt {:provider :global :resources :resources}
+        params {:scope :default :provider :fixture :model "beta" :thinking :high
+                :session-id "current"}
+        available? (atom true)]
+    (with-redefs [provider/status (fn [manager]
+                                  {:providers (when (or (= manager :global) @available?)
+                                                [{:provider :fixture :available? true}])})
+                  provider/model (fn [& _] {:thinking-levels [:none :high]})
+                  runtime/provider-manager (fn [_ _] :session)
+                  runtime/session (fn [_ sid] {:id sid})
+                  runtime/configure! (fn [_ sid changes]
+                                       (swap! configured conj sid)
+                                       {:id sid :config (:config changes)})
+                  resources/settings (fn [_] @settings)
+                  resources/update-settings! (fn [_ changes _] (swap! settings merge changes))]
+      (let [result (setup/apply-model! rt params)]
+        (is (= "beta" (get-in result [:session :config :model])))
+        (is (= :high (:thinking @settings)))
+        (is (= ["current"] @configured)))
+      (reset! configured [])
+      (setup/apply-model! rt (dissoc params :session-id))
+      (is (empty? @configured) "Initial setup has no current session to configure")
+      (reset! available? false)
+      (reset! settings {})
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not available"
+                            (setup/apply-model! rt params)))
+      (is (empty? @settings) "Validate both scopes before writing either")
+      (reset! available? true)
+      (with-redefs [runtime/configure! (fn [& _] (throw (ex-info "store failed" {})))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Default saved, but"
+                              (setup/apply-model! rt params)))
+        (is (= "beta" (:model @settings)))))))

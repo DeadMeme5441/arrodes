@@ -2,9 +2,22 @@
 
 ## Unreleased
 
+## 0.1.2
+
+- Simplify the header to the session name and distinguish user turns, assistant prose, code, and execution with spacing and restrained surfaces.
+- Make reasoning and execution headings clickable to expand or collapse their blocks.
+- Resume following when wheel scrolling reaches the transcript bottom and only show Jump to latest while content remains below.
+- Move compact model/provider, project/branch, and reported context metadata below the composer; expire routine confirmations without an alert toolbar.
+- Allow left/right arrows to cross model-browser columns at search and effort boundaries.
+- Put effort and apply controls directly in the model listing screen, with responsive placement and consistent arrow/Tab navigation.
+- Open an empty composer on launch and /new; create a session only on Send, and resume saved sessions only by explicit selection.
+- Apply a default model to the current session too, including reasoning; validate both scopes before saving.
+- Load models for the selected provider with cached results, provider-specific discovery, and inline connection/error status.
+- Add a welcome screen with recent sessions, a bottom-anchored composer, and separated model/project metadata.
+- Show searchable slash commands expanding upward above the composer and restore typing immediately after mouse reading or clicking the editor.
+- Use full-screen navigation and inspection views instead of floating popups, combine reasoning and model application controls, and consolidate provider command aliases.
 - Add a provider-management browser, searchable model selection and explicit conversation/default settings.
 - Refine the terminal conversation with a yellow/grey-on-black theme and expandable source/output.
-
 - Add a maintained documentation map, agent workflows, and local candidate verification commands.
 - Simplify CI to one Linux core/TUI test job per PR. Build each release target once, stage a draft, and publish the same artifacts.
 

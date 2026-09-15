@@ -19,8 +19,10 @@ must terminate its owned work; completed credential writes are not undone by can
 
 A provider/model identity is the pair of provider ID and exact model ID. Validate reasoning
 against the selected model. Do not silently substitute a model unless the explicit fallback
-setting enables that behavior. Stored defaults affect new sessions; existing sessions retain
-their configuration unless explicitly configured.
+setting enables that behavior. Selecting a default applies the provider, model, and reasoning level to the current
+session too, when one exists. Other existing sessions retain their configuration.
+Both catalogs are validated before changing either scope; a project-only provider
+must be configured globally before it can become a default.
 
 Requests preserve valid assistant/tool boundaries, provider-native metadata and cache
 semantics. Retries are bounded and stop after visible output. Cancellation is observable

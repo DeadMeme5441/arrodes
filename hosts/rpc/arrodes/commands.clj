@@ -16,7 +16,7 @@
             [clojure.string :as str])
   (:import (java.util.concurrent TimeUnit)))
 
-(def version "0.1.1")
+(def version "0.1.2")
 (def protocol-version 1)
 (def methods
   ["runtime.inspect" "session.list" "session.create" "session.inspect" "session.state"
@@ -307,7 +307,8 @@
     "prompt.run" (runtime/start! rt (sid params)
                                  (resources/render-prompt (resource-manager rt params) (required-string params :name) (or (:arguments params) {}))
                                  (run-options params))
-    "model.list" {:models (provider/catalog (provider-manager rt params))}
+    "model.list" {:models (cond->> (provider/catalog (provider-manager rt params))
+                            (:provider params) (filterv #(= (keyword-value (:provider params)) (:provider %))))}
     "model.refresh" {:models (if (:provider params) (provider/refresh! (provider-manager rt params) (keyword-value (:provider params))) (provider/refresh! (provider-manager rt params)))}
     "model.select" (setup/apply-model! rt params)
     "auth.status" (value/redact (provider/status (provider-manager rt params)))

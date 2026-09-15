@@ -16,7 +16,7 @@
     (is (re-find #"32000 context" (catalog/model-details (first models))))
     (is (nil? (catalog/model-details nil)))))
 
-(deftest model-selection-validates-before-writing-and-keeps-scopes-independent
+(deftest model-selection-validates-before-writing-and-applies-default-here
   (let [writes (atom [])
         connected? (atom true)
         rt {:provider ::global :resources ::resources}
@@ -25,12 +25,13 @@
     (with-redefs [provider/status (fn [_] {:providers [{:provider :one :available? @connected?}]})
                   provider/model (fn [_ id model] (when (and (= id :one) (= model "shared"))
                                                    {:id model :thinking-levels [:none :high]}))
+                  runtime/session (fn [_ _] session)
                   runtime/provider-manager (fn [_ sid] (is (= "conversation" sid)) ::session)
                   resources/settings (constantly {:session-defaults {:model "old"}})
                   resources/update-settings! (fn [_ changes options] (swap! writes conj [:defaults changes options]))
                   runtime/configure! (fn [_ sid changes] (swap! writes conj [:session sid changes]) session)]
       (is (= :default (:scope (setup/apply-model! rt (assoc config :scope "default" :session-id "conversation")))))
-      (is (= [:defaults] (mapv first @writes)))
+      (is (= [:defaults :session] (mapv first @writes)))
       (is (= {:provider nil :model nil :thinking nil} (get-in @writes [0 1 :session-defaults])))
       (reset! writes [])
       (is (= session (:session (setup/apply-model! rt (assoc config :scope "session" :session-id "conversation")))))

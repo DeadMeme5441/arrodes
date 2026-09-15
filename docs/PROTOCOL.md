@@ -68,10 +68,17 @@ Secret authentication inputs set `secret?` on the reverse request. Hosts must ma
 ## Explicit model selection
 
 `model.select` accepts `provider`, `model`, `thinking`, and `scope` (`session` or
-`default`). Session scope requires `session-id`; default scope saves global defaults
-without changing any existing session. Selection validates provider availability,
-the exact model in its catalog, and the model's supported reasoning levels before
-writing. It returns `{scope, config}` and, for session scope, `session`.
+`default`). Session scope requires `session-id`. Default scope saves global defaults
+and also configures `session-id` when supplied; without a session it supports initial
+setup. Selection validates provider availability, the exact model, and supported
+reasoning in both affected catalogs before writing. It returns `{scope, config}` plus
+`session` whenever a session was configured. Settings and session storage are separate:
+if settings were saved but session configuration fails, the error explicitly reports
+`default-saved?` and asks the client to refresh before retrying.
+
+`model.list` accepts an optional `provider` to restrict the returned catalog.
+The TUI loads that provider's cached catalog first, then discovers models through
+`model.refresh` when connected. Requests retain session/navigation ownership.
 
 Authentication is separate: `auth.login` does not select a model. A TUI can cancel
 an in-progress login using the protocol `cancel` envelope with the login request ID.

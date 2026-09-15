@@ -120,7 +120,8 @@
 
 (defn- create-during-connection! [application connection name]
   (let [creation (-> (js/Promise.resolve nil)
-                     (.then (fn [] (app/command! application :new-session {:name name}))))]
+                     (.then (fn [] (app/command! application :new-session {:name name})))
+                     (.then (fn [_] (app/command! application :submit {:text (str "First message: " name)}))))]
     (-> (js/Promise.all #js [connection creation])
         (.then (fn [_] (app/command! application :sessions)))
         (.then (fn [sessions]
@@ -267,6 +268,7 @@
 (defn- controller-interleavings! [application]
   (let [a (get-in @(:state application) [:view :session :id])]
     (-> (app/command! application :new-session {:name "Interleaving target"})
+        (.then (fn [_] (app/command! application :submit {:text "First message for interleaving checks"})))
         (.then
          (fn [_]
            (let [b (get-in @(:state application) [:view :session :id])]
@@ -316,6 +318,50 @@ process.stdin.on('data', chunk => {
                          "Graceful shutdown must not signal the owned process")))
         (.finally (fn [] (rpc/close! client))))))
 
+(defn- fresh-start-and-resume! [options previous]
+  (let [old-id (get-in @(:state previous) [:view :session :id])
+        fresh (app/create! options)
+        resumed (app/create! (assoc options :session-id old-id))
+        fresh-id (atom nil)]
+    (answer-initialization! fresh)
+    (answer-initialization! resumed)
+    (-> (app/close! previous)
+        (.then (fn [_] (app/start! fresh)))
+        (.then (fn [_]
+                 (reset! fresh-id (get-in @(:state fresh) [:view :session :id]))
+                 (check! (nil? @fresh-id) "Normal startup must not create a session")
+                 (check! (some #(= old-id (:id %)) (:sessions @(:state fresh))) "Fresh startup must retain older sessions")
+                 (let [before (count (:sessions @(:state fresh)))]
+                   (-> (app/command! fresh :new-session {})
+                       (.then (fn [_] (app/command! fresh :sessions)))
+                       (.then (fn [sessions]
+                                (check! (= before (count sessions)) "New must not persist an empty session")
+                                (rejects-with! (app/command! fresh :submit {:text "   "}) "empty-prompt")))
+                       (.then (fn [_]
+                                (swap! (:state fresh) assoc-in [:ui :draft] "Unsent input")
+                                (app/command! fresh :reconnect)))))))
+        (.then (fn [_]
+                 (check! (nil? (get-in @(:state fresh) [:view :session :id])) "Reconnect of an empty composer must not create a session")
+                 (check! (= "Unsent input" (get-in @(:state fresh) [:ui :draft])) "Reconnect must preserve unsent composer text")
+                 (let [before (count (:sessions @(:state fresh)))]
+                   (-> (let [first-send (app/command! fresh :submit {:text "First actual message"})
+                             duplicate (rejects-with! (app/command! fresh :submit {:text "First actual message"}) "submission-pending")]
+                         (js/Promise.all #js [first-send duplicate]))
+                       (.then (fn [_]
+                                (until-state! fresh
+                                              #(some (fn [entry] (= :user (keyword (get-in entry [:data :message/role]))))
+                                                     (get-in % [:view :entries]))
+                                              "The first Send must retain a user message")))
+                       (.then (fn [_] (app/command! fresh :sessions)))
+                       (.then (fn [sessions]
+                                (check! (= (inc before) (count sessions)) "First Send must create exactly one session")
+                                (check! (get-in @(:state fresh) [:view :session :id]) "First Send must activate the saved session")
+                                (app/close! fresh)))))))
+        (.then (fn [_] (app/start! resumed)))
+        (.then (fn [_]
+                 (check! (= old-id (get-in @(:state resumed) [:view :session :id])) "Explicit session startup must resume exactly that session")))
+        (.finally (fn [] (js/Promise.all #js [(app/close! fresh) (app/close! resumed)]))))))
+
 (defn exercise! []
   (let [temporary (.mkdtempSync fs (.join path (.tmpdir os) "arrodes-client-test-"))
         script (.join path temporary "host.clj")
@@ -351,7 +397,9 @@ process.stdin.on('data', chunk => {
                          "Releasing the store owner must allow explicit reconnect")
                  (check! (not= :error (get-in @(:state contender) [:notice :kind]))
                          "Successful reconnect must remove the stale connection error")))
+        (.then (fn [_] (app/command! contender :submit {:text "First message after reconnect"})))
         (.then (fn [_] (controller-interleavings! contender)))
+        (.then (fn [_] (fresh-start-and-resume! options contender)))
         (.then (fn [_] (graceful-close!)))
         (.then (fn [_]
                  (println "RPC/controller passed: startup recovery, navigation-owned refresh, delivered queue reconciliation and acknowledged draft ownership.")))
