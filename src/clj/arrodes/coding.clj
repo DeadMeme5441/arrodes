@@ -170,7 +170,7 @@
                       "File is neither supported image data nor valid UTF-8 text"
                       {:path display}))))))
 
-(defn- read-tool [cwd current-context put-artifact! {:keys [path offset limit]}]
+(defn- read-tool [cwd current-context put-artifact! {:keys [path offset limit detailed]}]
   (check-cancelled! current-context)
   (let [target (resolve-path cwd path)
         _ (require-regular-file! target path)
@@ -192,7 +192,12 @@
                                " bytes; artifact " (:id artifact) "]")}
                    {:part/type :image :image/mime-type mime :image/data encoded}]
          :details descriptor})
-      (read-text-page target path current-context offset limit))))
+      (let [result (read-text-page target path current-context offset limit)
+            details (:details result)]
+        (if detailed
+          (assoc result :value (assoc details :text (:value result)
+                                     :eof? (nil? (:next-offset details))))
+          result)))))
 
 (defn- write-tool [cwd current-context {:keys [path content]}]
   (check-cancelled! current-context)
@@ -248,7 +253,8 @@
                                (if (empty? positions)
                                  (str "Edit " (inc index) " oldText was not found in " path)
                                  (str "Edit " (inc index) " oldText is not unique in " path))
-                               {:path path :edit-index index :matches (count positions)})
+                               {:path path :edit-index index :matches (count positions)
+                                :match-count-lower-bound? (= 2 (count positions)) :changed? false})
                   {:start (first positions) :end (+ (first positions) (count (normalize-newlines oldText)))
                    :replacement (normalize-newlines newText) :index index}))
               (map-indexed vector edits))
@@ -256,7 +262,7 @@
     (doseq [[left right] (partition 2 1 ordered)]
       (value/check! (<= (:end left) (:start right)) :overlapping-edits
                    "Edit replacements overlap in the original file"
-                   {:path path :edit-indexes [(:index left) (:index right)]}))
+                   {:path path :edit-indexes [(:index left) (:index right)] :changed? false}))
     (loop [cursor 0 remaining (seq ordered) output (StringBuilder. (count content))]
       (if-let [{:keys [start end replacement]} (first remaining)]
         (do
@@ -556,17 +562,20 @@
                                     (.relativize root file) (.getFileName file))]
                      (when (matches-glob? matchers relative)
                        (vswap! results conj
-                               (str/replace (str relative) File/separator "/")))))
+                               {:path (str file) :relative-path (str/replace (str relative) File/separator "/")
+                                :name (str (.getFileName file)) :kind :file}))))
                  (when (>= (count @results) limit)
                    (vreset! stopped? true)
                    :terminate))]
     (if (Files/isRegularFile root (make-array LinkOption 0))
       (accept root)
       (walk-files root current-context (fn [file _] (accept file))))
-    (let [ordered (vec (sort-by (juxt str/lower-case identity) @results))]
-      {:value ordered
+    (let [ordered (vec (sort-by (juxt (comp str/lower-case :relative-path) :relative-path) @results))
+          display-lines (mapv :relative-path ordered)]
+      {:value {:root (str root) :entries ordered :limit-reached? @stopped?
+               :complete? (not @stopped?)}
        :content (if (seq ordered)
-                  (str/join "\n" ordered)
+                  (str/join "\n" display-lines)
                   "No files found matching pattern")
        :details {:path (str root) :count (count ordered)
                  :result-limit-reached? @stopped?}})))
@@ -603,24 +612,32 @@
   (if (> (count line) max-line-chars)
     (str (subs line 0 max-line-chars) "…") line))
 
-(defn- grep-file [^Path root ^Path file ^Pattern pattern context remaining]
+(defn- grep-file [^Path file ^Pattern pattern context remaining]
   (when-let [lines (text-file-lines file)]
-    (let [relative (if (Files/isDirectory root (make-array LinkOption 0))
-                     (str (.relativize root file)) (str (.getFileName file)))]
-      (loop [index 0 blocks []]
-        (if (or (>= index (count lines)) (>= (count blocks) remaining))
-          blocks
+    (let [line-record (fn [index kind]
+                        (let [text (nth lines index)]
+                          {:path (str file) :line (inc index) :text (clipped-line text)
+                           :kind kind :text-truncated? (> (count text) max-line-chars)}))]
+      (loop [index 0 matches []]
+        (if (or (>= index (count lines)) (>= (count matches) remaining))
+          matches
           (if (.find (.matcher pattern (nth lines index)))
-            (let [start (max 0 (- index context))
-                  end (min (count lines) (+ index context 1))
-                  block (mapv (fn [line-index]
-                                (str (str/replace relative File/separator "/")
-                                     (if (= line-index index) ":" "-") (inc line-index)
-                                     (if (= line-index index) ": " "- ")
-                                     (clipped-line (nth lines line-index))))
-                              (range start end))]
-              (recur (inc index) (conj blocks block)))
-            (recur (inc index) blocks)))))))
+            (recur (inc index)
+                   (conj matches
+                         (assoc (line-record index :match)
+                                :context (mapv #(line-record % :context)
+                                               (concat (range (max 0 (- index context)) index)
+                                                       (range (inc index) (min (count lines) (+ index context 1))))))))
+            (recur (inc index) matches)))))))
+
+(defn- display-match-block [^Path root match]
+  (let [file (util/path (:path match))
+        relative (if (Files/isDirectory root (make-array LinkOption 0))
+                   (str (.relativize root file)) (str (.getFileName file)))]
+    (mapv (fn [{:keys [line text kind]}]
+            (let [separator (if (= :match kind) ":" "-")]
+              (str (str/replace relative File/separator "/") separator line separator " " text)))
+          (sort-by :line (conj (:context match) match)))))
 
 (defn- grep-tool [cwd current-context {:keys [pattern path glob ignoreCase literal context limit]}]
   (value/check! (and (string? pattern) (not (empty? pattern))) :invalid-arguments
@@ -633,27 +650,30 @@
         matchers (when glob (glob-matchers glob))
         compiled (compile-pattern pattern literal ignoreCase)
         matches (volatile! [])
+        skipped (volatile! 0)
         hit-limit? (volatile! false)
         accept (fn [^Path file]
                  (when (< (count @matches) limit)
                    (let [relative (if (Files/isDirectory root (make-array LinkOption 0))
                                     (.relativize root file) (.getFileName file))]
                      (when (or (nil? matchers) (matches-glob? matchers relative))
-                       (let [blocks (grep-file root file compiled context
-                                               (- limit (count @matches)))]
-                         (vswap! matches into blocks)))))
+                       (if-let [found (grep-file file compiled context (- limit (count @matches)))]
+                         (vswap! matches into found)
+                         (vswap! skipped inc)))))
                  (when (>= (count @matches) limit)
                    (vreset! hit-limit? true)
                    :terminate))]
     (if (Files/isRegularFile root (make-array LinkOption 0))
       (accept root)
       (walk-files root current-context (fn [file _] (accept file))))
-    (let [blocks @matches
+    (let [blocks (mapv #(display-match-block root %) @matches)
           output (if (seq blocks)
                    (str/join "\n--\n" (map #(str/join "\n" %) blocks))
                    "No matches found")]
-      {:value blocks :content output
-       :details {:path (str root) :matches (count blocks)
+      {:value {:root (str root) :matches @matches :limit-reached? @hit-limit?
+               :skipped-files @skipped :complete? (and (not @hit-limit?) (zero? @skipped))}
+       :content output
+       :details {:path (str root) :matches (count blocks) :skipped-files @skipped
                  :match-limit-reached? @hit-limit?}})))
 
 (defn- ls-tool [cwd current-context {:keys [path limit]}]
@@ -671,9 +691,12 @@
                   (if (.hasNext iterator)
                     (let [entry ^Path (.next iterator)
                           entries (conj entries
-                                        (str (.getFileName entry)
-                                             (when (Files/isDirectory entry (make-array LinkOption 0))
-                                               "/")))]
+                                        {:path (str entry) :name (str (.getFileName entry))
+                                         :symlink? (Files/isSymbolicLink entry)
+                                         :kind (cond
+                                                 (Files/isDirectory entry (make-array LinkOption 0)) :directory
+                                                 (Files/isRegularFile entry (make-array LinkOption 0)) :file
+                                                 :else :other)})]
                       (value/check! (<= (count entries) max-directory-entries)
                                    :traversal-limit
                                    (str "Directory contains more than "
@@ -681,13 +704,30 @@
                                    {:path (str dir) :limit max-directory-entries})
                       (recur entries))
                     entries))
-            all (vec (sort-by (juxt str/lower-case identity) all))
-            shown (subvec all 0 (min limit (count all)))]
+            all (vec (sort-by (juxt (comp str/lower-case :name) :name) all))
+            shown (subvec all 0 (min limit (count all)))
+            display-lines (mapv #(str (:name %) (when (= :directory (:kind %)) "/")) shown)]
         (check-cancelled! current-context)
-        {:value shown
-         :content (if (seq shown) (str/join "\n" shown) "(empty directory)")
+        {:value {:root (str dir) :entries shown :total-count (count all)
+                 :limit-reached? (> (count all) limit) :complete? (<= (count all) limit)}
+         :content (if (seq shown) (str/join "\n" display-lines) "(empty directory)")
          :details {:path (str dir) :entries (count shown)
                    :entry-limit-reached? (> (count all) limit)}}))))
+
+(def ^:private return-contracts
+  {"read" {:description "UTF-8 string, or image byte array. :detailed true returns {:text :path :offset :lines :next-offset :eof?} for text. Offsets are 1-based; only the selected page is returned."
+           :example {:text "hello" :offset 1 :lines 1 :next-offset nil :eof? true}}
+   "grep" {:description "{:root :matches :limit-reached? :skipped-files :complete?}. Matches have absolute :path, 1-based :line, :text, :text-truncated?, :kind :match and :context line maps. Skipped binary, invalid UTF-8 or oversized files prevent a complete result. Limit reached means traversal stopped, not a known omitted count."
+           :example {:matches [{:path "/project/src/app.clj" :line 12 :text "(defn start ...)" :kind :match :context []}] :complete? true}}
+   "find" {:description "{:root :entries :limit-reached? :complete?}. Entries have absolute :path, root-relative :relative-path, :name and :kind :file. Pass :path directly to read. Limit reached means traversal stopped."
+           :example {:entries [{:path "/project/src/app.clj" :relative-path "app.clj" :name "app.clj" :kind :file}] :complete? true}}
+   "ls" {:description "{:root :entries :total-count :limit-reached? :complete?}. Entries have absolute :path, :name, :symlink? and :kind (:file, :directory or :other), sorted by name."
+         :example {:entries [{:path "/project/src" :name "src" :kind :directory}] :total-count 1 :complete? true}}
+   "edit" {:description "Absolute edited path. Matching/overlap failures identify the zero-based edit index and :changed? false; :matches 2 is a lower bound. Inspect result-info for structured errors and receipts. All matches are validated before atomic replacement."}
+   "write" {:description "Absolute written path. Creates or atomically replaces the file. Inspect result-info for byte count and permission-preservation receipt."}
+   "bash" {:description "{:exit-code :stdout :stderr :stdout-truncated? :stderr-truncated?}. Nonzero exit is a normal value. Timeout/cancellation throw. Streams retain up to 16 MiB each; hard-truncated tails are unavailable. For a shortened display, inspect the native value or result-info output artifact and artifact-page; do not rerun effects just to recover output."
+           :example {:exit-code 3 :stdout "" :stderr "failed" :stdout-truncated? false :stderr-truncated? false}}
+   "powershell" {:description "Same return/error contract as bash; fails clearly if PowerShell is unavailable."}})
 
 (defn descriptors
   "Returns all built-in coding capability descriptors. current-context returns
@@ -699,10 +739,12 @@
                         :timeout {:type "number" :exclusiveMinimum 0
                                   :description "Optional timeout in seconds"}}
                        ["command"])]
-    [{:name "read" :owner "arrodes.builtin" :description
+    (mapv #(assoc % :returns (get return-contracts (:name %)))
+     [{:name "read" :owner "arrodes.builtin" :description
       "Read a UTF-8 text file with 1-based paging, or return supported images as canonical image parts."
       :parameters (schema-object
                     {:path (string-property "File path, relative to the session cwd or absolute")
+                     :detailed {:type "boolean" :description "Return text with path, line count, next-offset and EOF information"}
                      :offset (positive-integer-property "First line to read, 1-based")
                      :limit (bounded-positive-integer-property
                              100000 "Maximum lines to return")}
@@ -746,6 +788,8 @@
                      :limit (bounded-positive-integer-property
                              max-search-results "Maximum matching lines")}
                     ["pattern"])
+      :examples [{:source "(grep {:path \"src\" :pattern \"*e\" :literal true})"}
+                 {:source "(group-by :path (:matches (grep {:path \"src\" :pattern \"defn\"})))"}]
       :execution :parallel :permission :read :fn #(grep-tool cwd current-context %)}
      {:name "find" :owner "arrodes.builtin" :description
       "Find files by glob under a directory. Excludes generated and VCS directories by default."
@@ -767,4 +811,4 @@
      {:name "powershell" :owner "arrodes.builtin" :description
       "Execute PowerShell in the trusted local session cwd when available. Captures bounded stdout and stderr, reports truncation, and cleans up the process tree."
       :parameters shell-schema :execution :parallel :permission :execute
-      :fn #(powershell-tool cwd current-context %)}]))
+      :fn #(powershell-tool cwd current-context %)}])))

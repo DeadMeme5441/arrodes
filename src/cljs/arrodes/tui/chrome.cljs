@@ -54,7 +54,7 @@
         selected-model (some #(when (and (= (:id %) (:model config))
                                          (= (catalog/provider-id %) (some-> (:provider config) keyword))) %) (:models s))
         usage (run/latest-usage (vec (get-in s [:view :entries])))
-        last-usage (when (some number? [(:usage/input-tokens usage) (:usage/output-tokens usage)]) usage)
+        last-usage (when (number? (run/context-tokens usage)) usage)
         window (:context-window selected-model)
         context-percent (when (and (number? window) (pos? window) last-usage)
                           (js/Math.round (* 100 (/ (run/context-tokens last-usage) window))))
@@ -68,6 +68,7 @@
                     (= connection :disconnected) "Disconnected"
                     (= connection :closing) "Closing"
                     (= :cancelling (:status operation)) "Stopping…"
+                    (and running (= :compacting (get-in s [:view :phase]))) "Compacting context…"
                     running (str "Working" elapsed)
                     (= :failed (:status operation)) "Failed"
                     (= :cancelled (:status operation)) "Stopped"
@@ -149,6 +150,9 @@
         signature [sid recent height]]
     (set! (.-visible (:welcome view)) (and empty? (not (get-in s [:ui :inspector?]))))
     (set! (.-visible (:body view)) (or (not empty?) (get-in s [:ui :inspector?])))
+    ;; Only the welcome screen needs a spacer. The transcript itself fills the
+    ;; remaining space, independent of the size of a partially streamed answer.
+    (set! (.-visible (:spacer view)) (not (.-visible (:body view))))
     (set! (.-height (:welcome view)) (if (< height 24) 5 (+ 7 (count recent))))
     (when (and empty? (not= signature (:welcome-signature @(:local view))))
       (swap! (:local view) assoc :welcome-signature signature)
@@ -201,4 +205,3 @@
                                      (fn [items] (vec (remove (fn [x] (= path (or (:path x) (:name x)))) items))))
                                {:fg :text/secondary :marginRight 1})]
           (.add (:attachment-items view) button))))))
-

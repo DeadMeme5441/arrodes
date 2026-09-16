@@ -1034,11 +1034,21 @@
              {:session-id (:session-id context) :expected (:cwd manager) :actual session-cwd})))
   context)
 
+(defn- resource-catalog-value [manager kind]
+  {:items (mapv public-resource (get-in @(:state manager) [:catalog kind]))
+   :scope {:global-directory (str (u/resolve-path (:home manager) (name kind)))
+           :project-directory (str (u/resolve-path (:project-dir manager) (name kind)))
+           :project-trusted? (boolean (trusted-project? manager))
+           :configured-paths (get (settings manager) kind [])
+           :repository-auto-discovery? false}
+   :load-policy :fail-on-invalid-resource})
+
 (defn- skill-capability [manager owner]
   {:name "skill"
    :owner owner
    :replace? true
    :replace-owner? true
+   :returns {:description "catalog returns {:items [...] :scope {...} :load-policy :fail-on-invalid-resource}. Scope identifies external discovery directories and configured paths; repository .agents files are not automatically installed. read returns the skill descriptor with :content and :resource-path."}
    :description
    (str "Discover and read installed skills from the persistent Clojure REPL. "
         "Use {:action \"catalog\"} to inspect skills and "
@@ -1064,8 +1074,7 @@
    (fn [{:keys [action name path]}]
      (case action
        "catalog"
-       (let [value (mapv public-resource
-                         (get-in @(:state manager) [:catalog :skills]))]
+       (let [value (resource-catalog-value manager :skills)]
          {:value value :content (pr-str value)
           :details {:resource :skills :action :catalog}})
 
@@ -1085,6 +1094,7 @@
    :owner owner
    :replace? true
    :replace-owner? true
+   :returns {:description "catalog returns {:items [...] :scope {...} :load-policy :fail-on-invalid-resource}. Scope identifies external discovery directories and configured paths. render returns the prompt descriptor with rendered :content."}
    :description
    (str "Discover and render installed prompt material from the persistent Clojure REPL. "
         "Use {:action \"catalog\"} or "
@@ -1113,8 +1123,7 @@
    (fn [{:keys [action name arguments]}]
      (case action
        "catalog"
-       (let [value (mapv public-resource
-                         (get-in @(:state manager) [:catalog :prompts]))]
+       (let [value (resource-catalog-value manager :prompts)]
          {:value value :content (pr-str value)
           :details {:resource :prompts :action :catalog}})
 

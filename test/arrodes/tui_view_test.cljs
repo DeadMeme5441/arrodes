@@ -5,6 +5,7 @@
             [arrodes.catalog-flow-test :as catalog-flow]
             [arrodes.tui-model :as model]
             [arrodes.tui-view :as view]
+            [arrodes.tui.screens :as screens]
             [arrodes.theme-ui-test :as theme-test]
             [clojure.string :as str]))
 
@@ -640,7 +641,7 @@
                 (assoc-in [:view :session :config] {:provider :codex-backend :model "example-model" :thinking :medium})
                 (assoc-in [:view :entries]
                           [{:id "usage" :kind :message :data {:message/role :assistant :message/content "Done"
-                                                             :message/provider-data {:response/usage {:usage/input-tokens 11000 :usage/output-tokens 1000}}}}])))
+                                                             :message/provider-data {:response/usage {:usage/input-tokens 1000 :usage/cached-input-tokens 10000 :usage/output-tokens 1000}}}}])))
     (-> (until! terminal
                 #(and (> (.-screenY (node terminal "model-footer")) (.-screenY (node terminal "composer")))
                        (> (.-screenY (node terminal "project-footer")) (.-screenY (node terminal "model-footer")))
@@ -650,6 +651,20 @@
                        (not (.-visible (node terminal "notice-details"))))
                 "Metadata and reported context belong below the composer; routine feedback must not create an alert")
         (.then (fn [_] (capture! terminal "footer-with-context") (pause)))
+        (.then (fn [_]
+                 (swap! (:state application) update-in [:view :entries] conj
+                        {:id "new-usage" :kind :message
+                         :data {:message/role :assistant :message/content "Next reply"
+                                :message/provider-data {:response/usage {:usage/total-tokens 64000}}}})
+                 (until! terminal #(str/includes? (.-plainText (node terminal "footer-context"))
+                                                  "64k / 128k · 50%")
+                         "Latest reported total replaces previous context; it is not accumulated")))
+        (.then (fn [_]
+                 (swap! (:state application) update-in [:view :entries] conj
+                        {:id "compacted" :kind :compaction
+                         :data {:summary "Reduced context" :usage {:usage/total-tokens 100000}}})
+                 (until! terminal #(= "Context —" (.-plainText (node terminal "footer-context")))
+                         "Compaction invalidates the old context count; summary usage is not the new context")))
         (.then (fn [_]
                  (until! terminal #(nil? (:notice @(:state application))) "Routine confirmation must expire automatically")))
         (.then (fn [_]
@@ -700,6 +715,159 @@
               "The assistant turn must begin before reasoning/tools, with no new divider before its final prose")
       (.then (fn [_] (theme-test/capture! terminal "assistant-turn-ownership")
                (println "Assistant ownership passed: reasoning, tools and final prose share the assistant turn.")))))
+
+(defn- compaction-and-titles! [application terminal]
+  (let [sid "status-session" oid "status-operation"
+        event! (fn [operation phase]
+                 (app/event! application {:type :operation/phase :session-id sid :operation-id operation
+                                          :data {:phase phase}}))]
+    (swap! (:state application) assoc :notice nil
+           :sessions [{:id sid :name "Initial title"} {:id "background" :name "Other title"}]
+           :view (model/hydrate {:state {:session {:id sid :name "Initial title" :cwd "/project"}
+                                        :operation {:id oid :status :running} :phase :compacting}
+                                 :entries [] :cursor 0} []))
+    (swap! (:state application) update :ui assoc :overlay nil :inspector? false :draft "")
+    (-> (until! terminal #(str/includes? (.-plainText (node terminal "footer-feedback")) "Compacting context")
+                "A snapshot taken during compaction must show its actual phase")
+        (.then (fn [_] (event! "older-operation" :provider)
+                 (until! terminal #(= :compacting (get-in @(:state application) [:view :phase]))
+                         "A stale operation phase must not clear current compaction status")))
+        (.then (fn [_] (event! oid :provider)
+                 (until! terminal #(str/includes? (.-plainText (node terminal "footer-feedback")) "Working")
+                         "Compaction completion must return to ordinary work status")))
+        (.then (fn [_]
+                 (app/event! application {:type :session/named :session-id "background"
+                                          :data {:name "Generated elsewhere" :source :auto}})
+                 (until! terminal #(and (= "Initial title" (get-in @(:state application) [:view :session :name]))
+                                        (= "Generated elsewhere" (:name (second (:sessions @(:state application))))))
+                         "A background title must update its own list row, not the active session")))
+        (.then (fn [_]
+                 (app/event! application {:type :session/named :session-id sid
+                                          :data {:name "Generated session title" :source :auto}})
+                 (until! terminal #(= "Generated session title" (.-plainText (node terminal "session-title")))
+                         "Generated titles must update the header without a refresh")))
+        (.then (fn [_]
+                 (app/event! application {:type :operation/completed :session-id sid :operation-id oid :data {}})
+                 (until! terminal #(= :idle (get-in @(:state application) [:view :phase]))
+                         "Settling an operation must clear its phase")))
+        (.then (fn [_] (println "Compaction/title UI passed: hydration, phase ownership, resumed work, and session-scoped title updates."))))))
+
+(defn- streaming-layout! [application mounted terminal]
+  (let [geometry (fn []
+                   (let [title (node terminal "session-title")
+                         transcript (node terminal "conversation")
+                         composer (node terminal "composer-box")]
+                     {:title-y (.-screenY title) :title-height (.-height title)
+                      :transcript-y (.-screenY transcript) :transcript-height (.-height transcript)
+                      :composer-y (.-screenY composer)}))
+        baseline (atom nil)
+        frames! (fn frames! [remaining check!]
+                  (if (zero? remaining)
+                    (js/Promise.resolve nil)
+                    (-> (.renderOnce terminal)
+                        (.then (fn [_] (check!)
+                                 (js/Promise. (fn [resolve] (js/setTimeout resolve 20)))))
+                        (.then #(frames! (dec remaining) check!)))))
+        check! (fn []
+                 (when-not (= @baseline (geometry))
+                   (throw (js/Error. (str "Streaming moved the viewport or composer: "
+                                         (pr-str @baseline) " -> " (pr-str (geometry)))))))]
+    (.resize terminal 100 32)
+    (swap! (:state application)
+           #(-> % (assoc :notice nil :widgets-by-session {})
+                (assoc :view (assoc (model/empty-state)
+                                   :session {:id "stream-layout" :name "A session title kept apart from the conversation" :cwd "/project"}
+                                   :operation {:id "stream-op" :status :running}
+                                   :streams {:operation-id "stream-op" :content "Starting an answer." :reasoning ""}))
+                (update :ui assoc :overlay nil :draft "" :attachments [] :inspector? false :follow? true)))
+    (view/refresh! mounted)
+    (-> (frames! 5 (fn [] nil))
+        (.then (fn [_] (reset! baseline (geometry))))
+        (.then (fn [_]
+                 (reduce (fn [pending chunk]
+                           (.then pending
+                                  (fn [_]
+                                    (swap! (:state application) update-in [:view :streams :content] str chunk)
+                                    (view/refresh! mounted)
+                                    (frames! 4 check!))))
+                         (js/Promise.resolve nil)
+                         (concat ["\n\n```clojure\n" "(def x 42)\n" "```\n"
+                                  "\n- First item\n" "- Second item\n"]
+                                 (map #(str "\n\nParagraph " % ": " (str/join " " (repeat 25 "streamed"))) (range 12))))))
+        (.then (fn [_] (frames! 10 check!)))
+        (.then (fn [_]
+                 (until! terminal #(let [scroll (node terminal "conversation")]
+                                     (and (<= (js/Math.abs (- (.-scrollTop scroll)
+                                                             (max 0 (- (.-scrollHeight scroll) (.-height (.-viewport scroll)))))) 1)
+                                          (str/includes? (.captureCharFrame terminal) "Paragraph 11")))
+                         "Native following must keep the end of streamed content visible")))
+        (.then (fn [_]
+                 (let [{:keys [title-y title-height transcript-y transcript-height composer-y]} (geometry)]
+                   (when-not (and (>= (- transcript-y (+ title-y title-height)) 1)
+                                  (>= (- composer-y (+ transcript-y transcript-height)) 1))
+                     (throw (js/Error. (str "Title and composer must have clear gaps around the transcript: " (pr-str (geometry)))))))
+                 (println "Streaming layout passed: stable viewport/title/composer through Markdown growth, with gaps above and below."))))))
+
+(defn- sessions-loading! [application mounted terminal]
+  (let [open-delayed! (fn []
+                        (let [resolve! (atom nil) reject! (atom nil)
+                              response (js/Promise. (fn [resolve reject]
+                                                      (reset! resolve! resolve)
+                                                      (reset! reject! reject)))
+                              pending (with-redefs [app/command! (fn [_ action _]
+                                                                 (when-not (= :sessions action)
+                                                                   (throw (js/Error. "Unexpected session browser action")))
+                                                                 response)]
+                                        (screens/open-sessions! mounted))]
+                          {:pending pending
+                           :resolve! (fn [rows] (swap! (:state application) assoc :sessions rows)
+                                       (@resolve! rows))
+                           :reject! (fn [] (@reject! (js/Error. "Synthetic list failure")))}))
+        first-load (atom nil) old-load (atom nil) new-load (atom nil)]
+    (swap! (:state application) assoc :sessions [] :notice nil)
+    (reset! first-load (open-delayed!))
+    (-> (until! terminal #(str/includes? (.captureCharFrame terminal) "Loading sessions")
+                "First session open must show loading while the request is pending")
+        (.then (fn [_]
+                 (.setText (node terminal "dialog-input") "Saved")
+                 ((:resolve! @first-load) [{:id "saved" :name "Saved conversation" :cwd "/project"}])
+                 (:pending @first-load)))
+        (.then (fn [_]
+                 (until! terminal #(and (= :sessions (get-in @(:state application) [:ui :overlay :kind]))
+                                        (= "Saved" (get-in @(:state application) [:ui :overlay :query]))
+                                        (str/includes? (.captureCharFrame terminal) "Saved conversation")
+                                        (not (get-in @(:state application) [:ui :overlay :loading?])))
+                         "The first response must populate the open browser and preserve its filter")))
+        (.then (fn [_]
+                 (swap! (:state application) assoc :sessions [])
+                 (reset! old-load (open-delayed!))
+                 (reset! new-load (open-delayed!))
+                 ((:resolve! @old-load) [])
+                 (:pending @old-load)))
+        (.then (fn [_]
+                 (until! terminal #(true? (get-in @(:state application) [:ui :overlay :loading?]))
+                         "A stale response must not settle the newer session browser")))
+        (.then (fn [_] ((:reject! @new-load)) (:pending @new-load)))
+        (.then (fn [_]
+                 (until! terminal #(and (= :sessions (get-in @(:state application) [:ui :overlay :kind]))
+                                        (str/includes? (.captureCharFrame terminal) "Synthetic list failure"))
+                         "A session-list failure must remain visible in the browser")))
+        (.then (fn [_]
+                 (reset! new-load (open-delayed!))
+                 ((:resolve! @new-load) [])
+                 (:pending @new-load)))
+        (.then (fn [_]
+                 (until! terminal #(str/includes? (.captureCharFrame terminal) "No saved sessions.")
+                         "A completed empty list must differ from a loading list")))
+        (.then (fn [_]
+                 (reset! new-load (open-delayed!))
+                 (screens/close-overlay! mounted)
+                 ((:resolve! @new-load) [{:id "late" :name "Late response" :cwd "/project"}])
+                 (:pending @new-load)))
+        (.then (fn [_]
+                 (until! terminal #(nil? (get-in @(:state application) [:ui :overlay]))
+                         "A late session-list response must not reopen a dismissed screen")))
+        (.then (fn [_] (println "Sessions passed: loading, first response, filter preservation, stale responses, failure, empty and dismissal."))))))
 
 (defn- session-timestamps! [application terminal]
   (swap! (:state application)
@@ -766,6 +934,9 @@
         (.then (fn [_] (composer-interactions! application terminal)))
         (.then (fn [_] (footer-and-feedback! application terminal)))
         (.then (fn [_] (wheel-follow! application terminal)))
+        (.then (fn [_] (compaction-and-titles! application terminal)))
+        (.then (fn [_] (streaming-layout! application mounted terminal)))
+        (.then (fn [_] (sessions-loading! application mounted terminal)))
         (.then (fn [_] (session-timestamps! application terminal)))
         (.then (fn [_] (assistant-turn-ownership! application terminal)))
         (.then (fn [] (println "Native TUI passed: full-screen layout, inspector selection ownership, session widgets, render/editor requests and cancelled overlay cleanup.")))

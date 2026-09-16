@@ -28,8 +28,16 @@
 
 
 (defn open-sessions! [view]
-  (open-overlay! view {:kind :sessions :title "Sessions" :query "" :hint "Search by name or project. Enter opens; Esc returns."})
-  (c/fire! view :sessions {}))
+  (let [token (str (random-uuid))]
+    (open-overlay! view {:kind :sessions :title "Sessions" :token token :query "" :loading? true
+                         :hint "Search by name or project. Enter opens; Esc returns."})
+    (-> (c/invoke! view :sessions {})
+        (.then (fn [_]
+                 (when (= token (get-in (c/state view) [:ui :overlay :token]))
+                   (c/ui! view update :overlay assoc :loading? false))))
+        (.catch (fn [error]
+                  (when (= token (get-in (c/state view) [:ui :overlay :token]))
+                    (c/ui! view update :overlay assoc :loading? false :error (c/error-text error))))))))
 
 (defn open-history! [view]
   (open-overlay! view {:kind :history :title "History" :query "" :items []
@@ -230,7 +238,7 @@
 
 (defn render-command-menu! [view overlay]
   (let [items (overlay-items view overlay)
-        fixed (+ 3 (max 4 (.-height (:composer-box view)))
+        fixed (+ 3 (* 2 (:region-gap w/layout)) (max 4 (.-height (:composer-box view)))
                  (if (.-visible (:welcome view)) (.-height (:welcome view)) 1)
                  (reduce + 0 (for [node [(:notice-box view) (:pending view) (:widget-box view)]
                                   :when (.-visible node)] (.-height node))))
@@ -286,6 +294,7 @@
             items (overlay-items view overlay)
             index (min (max 0 (dec (count items))) (or (:index overlay) 0))
             signature [(:token overlay) (:query overlay) (:body overlay) (:provider overlay) browser?
+                       (:loading? overlay) (:error overlay)
                        (mapv #(select-keys % [:label :description]) items)]
             rebuild? (not= signature (:modal-signature @(:local view)))
             selection-signature [signature index width height]]
@@ -355,7 +364,16 @@
                                      "Shift+Enter inserts a newline. Enter submits this value.")
                           {:fg :text/secondary :marginTop 1}))
             body? (.add (:modal-list view) (w/text renderer (:body overlay) {:width "100%"}))
-            (empty? items) (.add (:modal-list view) (w/text renderer "No matching items." {:fg :text/secondary}))
+            (empty? items)
+            (.add (:modal-list view)
+                  (w/text renderer
+                          (if (= :sessions (:kind overlay))
+                            (cond (:loading? overlay) "Loading sessions…"
+                                  (:error overlay) "Could not load sessions. Close and reopen to retry."
+                                  (str/blank? (:query overlay)) "No saved sessions."
+                                  :else "No matching sessions.")
+                            "No matching items.")
+                          {:fg :text/secondary}))
             :else
             (doseq [[i item] (map-indexed vector items)]
               (let [row (w/box renderer {:id (str "choice-" i) :width "100%" :paddingX 1 :paddingY 0
@@ -501,4 +519,3 @@
                                :hint (str "No frontend implementation is registered for " (:name request)
                                           ". The core request is not approved or executed by this UI.")
                                :items [cancel]}))))))
-

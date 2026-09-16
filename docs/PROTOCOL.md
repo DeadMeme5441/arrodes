@@ -101,6 +101,14 @@ Runtime events arrive independently:
 
 Durable events have a global sequence. `event.replay` accepts `after`, optional `session-id`, and `limit` from 1 through 500; it returns events and the resulting cursor. Transient streaming/progress output is not a second durable history.
 
+Transient `operation/phase` events carry `data.phase` and the owning operation ID;
+`compacting` indicates internal summarization, with no summary text in the reply
+stream. Clients ignore phases for superseded or settled operations and use the
+`session.view` snapshot's `state.phase` when hydrating. Durable `session/named`
+events carry `data.name` and `data.source` (`auto` or `user`) so headers and session
+lists can update independently of the active conversation. These events and title
+metadata are additive; the SQLite schema and existing history formats are unchanged.
+
 ## Atomic view and reconnect
 
 `session.view` accepts `session-id` and returns:

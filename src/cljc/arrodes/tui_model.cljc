@@ -106,6 +106,7 @@
 
 (defn empty-state []
   {:session nil
+   :phase :idle
    :entries []
    :activities {}
    :activity-order []
@@ -245,7 +246,7 @@
         model (assoc history
                      :session session :entries (active-entries session entries)
                      :queue (vec (or (:queue state) (:queues state) (:queue snapshot) []))
-                     :operation operation
+                     :operation operation :phase (or (:phase state) :idle)
                      :cursor cursor :snapshot-cursor cursor
                      :streams {:operation-id (:operation-id state) :content "" :reasoning ""})]
     (reduce apply-event (seed-recorded-activities model) (remove past? events))))
@@ -451,6 +452,8 @@
                          :interrupted :interrupted
                          nil)]
     (cond-> (assoc model :operation operation)
+      (= status :running) (assoc :phase :starting)
+      (contains? #{:completed :failed :cancelled :interrupted} status) (assoc :phase :idle)
       session-status (assoc-in [:session :status] session-status)
       (= status :running) (assoc :streams {:operation-id (:operation-id event)
                                            :content "" :reasoning ""}))))
@@ -498,6 +501,11 @@
               :tool-progress (append-progress model event)
               :provider-event (apply-provider-event model event)
 
+              :operation/phase
+              (if (and (= (:operation-id event) (get-in model [:operation :id]))
+                       (contains? #{:running :cancelling} (get-in model [:operation :status])))
+                (assoc model :phase (:phase data)) model)
+
               :operation/started (operation-state model event :running)
               :operation/cancelling (operation-state model event :cancelling)
               :operation/completed (operation-state model event :completed)
@@ -524,6 +532,8 @@
               (if-let [config (:config data)] (assoc-in model [:session :config] config) model)
               :session/updated
               (if-let [session (:session data)] (assoc model :session session) model)
+              :session/named (-> model (assoc-in [:session :name] (:name data))
+                                (assoc-in [:session :metadata :title/source] (:source data)))
 
               ;; :message/assistant intentionally cannot insert a row. Only the
               ;; canonical :entry/committed event owns durable message identity.

@@ -21,7 +21,7 @@
 (defn- bounded-pr-str [value]
   (let [{:keys [writer buffer truncated?]} (util/bounded-writer max-printed-value-characters)]
     (binding [*out* writer *print-length* 200 *print-level* 20]
-      (pr value))
+      (if (string? value) (print value) (pr value)))
     {:text (str buffer
                 (when @truncated?
                   (str "\n[value preview truncated at " max-printed-value-characters
@@ -71,7 +71,8 @@
   (util/check-cancelled! (:cancelled? (current-context)))
   (let [context (current-context)
         out-state (output-capture :stdout context)
-        err-state (output-capture :stderr context)]
+        err-state (output-capture :stderr context)
+        progress (atom {:completed-forms 0 :form-index 1 :phase :reading})]
     (try
       (let [[value form-count]
             (binding [*ns* (the-ns namespace)
@@ -83,10 +84,16 @@
               (with-open [reader (LineNumberingPushbackReader. (StringReader. source))]
                 (loop [value nil form-count 0]
                   (util/check-cancelled! (:cancelled? (current-context)))
+                  (swap! progress assoc :phase :reading :form-index (inc form-count)
+                         :line (.getLineNumber reader))
                   (let [form (read {:eof eof :read-cond :allow :features #{:clj}} reader)]
                     (if (identical? eof form)
-                      [value form-count]
-                      (let [next-value (eval form)]
+                      (do (swap! progress assoc :phase :printing :form-index nil)
+                          [value form-count])
+                      (let [_ (swap! progress assoc :phase :evaluating
+                                     :line (or (:line (meta form)) (.getLineNumber reader)))
+                            next-value (eval form)]
+                        (swap! progress assoc :completed-forms (inc form-count))
                         (set! *3 *2)
                         (set! *2 *1)
                         (set! *1 next-value)
@@ -122,7 +129,7 @@
                     :stdout (writer-text out-state "stdout")
                     :stderr (writer-text err-state "stderr")
                     :exception (.getName (class error))}
-                   (ex-data error))
+                   (ex-data error) @progress)
             error)))))))
 
 (defn- tool-name-for-var [^Var var descriptor]
@@ -155,21 +162,66 @@
                        :fn (fn [arguments] (implementation arguments))}))
     {:name name :registered? true}))
 
+(defn- workspace-value [namespace generation {:keys [offset limit query]
+                                            :or {offset 0 limit 50 query ""}}]
+  (value/check! (and (integer? offset) (<= 0 offset)
+                     (integer? limit) (<= 1 limit 100) (string? query))
+                :invalid-arguments "workspace expects offset >= 0, limit 1..100 and a string query" {})
+  (let [bindings (->> (ns-interns namespace)
+                      (remove (fn [[sym var]]
+                                (or (= 'cwd sym) (:arrodes/helper (meta var))
+                                    (:capability/name (meta var)))))
+                      (filter (fn [[sym _]] (str/includes? (str sym) query)))
+                      (sort-by (comp str key)) vec)
+        selected (take limit (drop offset bindings))
+        brief (fn [[sym ^Var var]]
+                (let [bound? (.hasRoot var)
+                      x (when bound? (.getRawRoot var))
+                      metadata (meta var)]
+                  (cond-> {:name (str sym) :bound? bound? :type (some-> x class .getName)}
+                    (string? (:doc metadata)) (assoc :doc (subs (:doc metadata) 0 (min 1000 (count (:doc metadata)))))
+                    (string? (:label metadata)) (assoc :label (subs (:label metadata) 0 (min 200 (count (:label metadata)))))
+                    (or (string? x) (instance? clojure.lang.IPersistentVector x)
+                        (instance? clojure.lang.IPersistentMap x) (instance? clojure.lang.IPersistentSet x))
+                    (assoc :count (count x)))))]
+    {:namespace (str namespace) :generation generation :bindings (mapv brief selected)
+     :total-bindings (count bindings)
+     :next-offset (when (< (+ offset limit) (count bindings)) (+ offset limit))}))
+
 (defn install!
   "Install discoverable Clojure helpers. Evaluation itself is not a capability."
-  [{:keys [namespace register! registered-implementation invoke-value!
-           registered-tools result-value artifact-value]}]
+  [{:keys [namespace generation register! registered-implementation invoke-value!
+           registered-tools result-value result-info result-page artifact-value artifact-page]}]
   (let [owner (str "repl:" namespace)
         ns-object (the-ns namespace)]
     (intern ns-object (with-meta 'result {:doc "Return a native live result or its durable reconstructed value."})
             (fn [id] (result-value id)))
-    (intern ns-object (with-meta 'artifact {:doc "Read a durable artifact by id up to the bounded REPL helper limit; page larger artifacts through artifact.read."})
+    (intern ns-object (with-meta 'artifact {:doc "Read a durable artifact by id up to the bounded REPL helper limit; page larger artifacts with artifact-page."})
             (fn [id] (artifact-value id)))
     (intern ns-object (with-meta 'registered-tools {:doc "Return the current public capability catalog."})
-            (fn [] (registered-tools)))
+            (fn
+              ([] (registered-tools))
+              ([selection]
+               (if (string? selection)
+                 (or (some #(when (= selection (:name %)) %) (registered-tools))
+                     (value/fail! :unknown-tool "No registered function with this name" {:name selection}))
+                 (do (value/check! (= {:brief? true} selection) :invalid-arguments
+                                    "Use a function name or {:brief? true}" {})
+                     (mapv #(select-keys % [:name :symbol :description]) (registered-tools)))))))
+    (intern ns-object (with-meta 'workspace {:doc "Inspect live bindings without printing values or realizing lazy sequences. Optional {:query string :offset 0 :limit 50}."})
+            (fn ([] (workspace-value namespace generation {}))
+              ([opts] (workspace-value namespace generation opts))))
+    (intern ns-object (with-meta 'result-info {:doc "Inspect a retained descriptor, including durable failure details, availability and output artifact references; does not load its value."})
+            result-info)
+    (intern ns-object (with-meta 'results {:doc "List retained result references newest first. Optional {:limit 20 :before-id n}; pass :next-before-id for the next page."})
+            (fn ([] (result-page {})) ([opts] (result-page opts))))
+    (intern ns-object (with-meta 'artifact-page {:doc "Read a bounded artifact page: (artifact-page id {:offset 1 :limit 4096}). Text offsets count characters; binary offsets count bytes."})
+            (fn ([id] (artifact-page id {:limit 4096})) ([id opts] (artifact-page id opts))))
     (intern ns-object (with-meta 'invoke-tool {:doc "Invoke a registered function through hooks, validation, cancellation, and effect locks."})
             (fn [name arguments] (invoke-value! name arguments)))
     (intern ns-object (with-meta 'register-tool! {:doc "Add discovery metadata and invocation tracing to a function Var. Ordinary functions need no registration to be called."})
             (fn [var descriptor]
               (register-var! register! registered-implementation owner var descriptor)))
+    (doseq [sym '[result artifact registered-tools workspace result-info results artifact-page invoke-tool register-tool!]]
+      (alter-meta! (ns-resolve ns-object sym) assoc :arrodes/helper true))
     nil))

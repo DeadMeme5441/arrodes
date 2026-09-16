@@ -83,7 +83,26 @@
       (spit (str directory "/src/root.clj") "root")
       (spit (str directory "/src/deep/nested.clj") "deep")
       (is (= ["src/deep/nested.clj" "src/root.clj"]
-             (:value (invoke descriptors "find" {:path "." :pattern "src/**/*.clj"})))))))
+             (mapv :relative-path (get-in (invoke descriptors "find" {:path "." :pattern "src/**/*.clj"})
+                                          [:value :entries])))))))
+
+(deftest search-completeness-and-line-clipping-are-explicit
+  (with-temp [directory]
+    (let [descriptors (tools directory nil)]
+      (spit (str directory "/a.txt") (str "needle " (apply str (repeat 600 "x")) "\nneedle again"))
+      (Files/write (u/path (str directory "/binary.dat")) (byte-array [0 1 2])
+                   (make-array java.nio.file.OpenOption 0))
+      (let [full (:value (invoke descriptors "grep" {:pattern "needle"}))
+            limited (:value (invoke descriptors "grep" {:pattern "needle" :limit 1}))]
+        (is (= 2 (count (:matches full))))
+        (is (= 1 (:skipped-files full)))
+        (is (false? (:complete? full)))
+        (is (true? (:text-truncated? (first (:matches full)))))
+        (is (:limit-reached? limited))
+        (is (false? (:complete? limited))))
+      (let [empty (:value (invoke descriptors "find" {:pattern "*.none"}))]
+        (is (= [] (:entries empty)))
+        (is (:complete? empty))))))
 
 (deftest streamed-output-decodes-split-utf8-sequences-incrementally
   (when (Files/isExecutable (u/path "/bin/bash"))

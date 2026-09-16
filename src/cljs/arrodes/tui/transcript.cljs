@@ -6,7 +6,7 @@
             [clojure.string :as str]
             [arrodes.tui.context :as c]))
 
-(declare remember-anchor! make-row! update-row! render-rows! transcript-at-bottom? follow! select-row! size-conversation!)
+(declare remember-anchor! make-row! update-row! render-rows! transcript-at-bottom? follow! select-row!)
 
 (defn remember-anchor! [view]
   (when (and (not (get-in (c/state view) [:ui :follow?] true))
@@ -179,22 +179,3 @@
       (c/ui! view assoc :selected (:id row) :inspected-row row :follow? false)
       (.scrollChildIntoView (:transcript view) (str "row:" (:id row)))
       (when (get-in (c/state view) [:ui :inspector?]) (c/action! :request-inspection! view row)))))
-
-
-(defn size-conversation! [view]
-  (when (.-visible (:body view))
-    (let [body (:body view)
-          fixed (reduce + 0 (for [child (array-seq (.getChildren (:root view)))
-                                 :when (and (.-visible child) (not (identical? body child))
-                                            (not (identical? (:spacer view) child))
-                                            (not (identical? (:modal-shade view) child)))]
-                             (.-height child)))
-          available (max 1 (- (.-terminalHeight (:renderer view)) fixed))
-          content (+ 1 (if (= :message (:kind (last (c/row-list view)))) (:section-gap w/layout) 0)
-                     (reduce max 0 (map #(- (+ (.-y %) (.-height %)) (.-y (.-content (:transcript view))))
-                                             (array-seq (.getChildren (:transcript view))))))
-          height (if (get-in (c/state view) [:ui :inspector?]) available (min available (max 1 content)))]
-      (when (not= height (.-height body))
-        (set! (.-height body) height)
-        (.requestRender (:renderer view))))))
-

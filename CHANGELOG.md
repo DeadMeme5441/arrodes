@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.1.4
+
+- Show compaction progress separately from assistant replies and recover once from explicit context-limit rejections without replaying completed REPL effects.
+- Name new conversations from the first message, then refine the title through an owned background model call; preserve manual names and keep title usage separate from conversation context.
+- Stabilize the transcript viewport during streaming, remove competing post-paint follow corrections, and add blank rows below the session title and above the composer.
+- Fix the first `/sessions` invocation during startup being dismissed by empty-chat initialization; preserve early input and show session-list loading, empty and error states.
+- Improve REPL function discovery with return contracts and focused help; return structured matches/listings with reusable paths and completeness; expose workspace docstrings, retained failure details and paged results/artifacts. Search/list and skill/prompt catalog shapes replace the former vectors without a legacy mode; existing stored results are unchanged.
+- Preserve MCP schemas and structured content in discovery/results, attach server/tool provenance, and identify uncertain remote-call outcomes. Render native string evaluations as readable text.
+- Use the latest completed provider call's reported usage for session context and automatic compaction. Include cached and cache-write input, honor totals without double-counting breakdowns, remove character-based estimates, and invalidate stale measurements after compaction. Existing session records and provider replay state remain compatible and unchanged.
+- Keep internal compaction and branch-summary streams out of assistant replies, including partial summaries from failed or cancelled calls.
+
 ## 0.1.3
 
 - Add data-only theme packs with semantic colors/text treatments, live preview/cancel, and a saved UI preference; include the silver/gold Arrodes theme and Dracula.

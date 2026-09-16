@@ -168,22 +168,30 @@
              session))))))
 
 
-(defn start-empty! [app data]
-  (swap! (:state app)
-         (fn [state]
-           (let [config (merge (get-in state [:setup :config])
-                               (:config (default-session-params app)) (:config data))]
-             (-> state
-                 (save-session-ui (client/session-id-from state))
-                 (update :navigation-generation (fnil inc 0))
-                 (assoc :empty-composer? true :first-send-unknown? false
-                        :view (assoc (model/empty-state) :session
-                                     {:name (or (:name data) (get-in app [:options :session-name]) "Untitled session") :cwd (client/workspace app) :config config})
-                        :history nil :hydrating nil :notice nil)
-                 (restore-session-ui nil)
-                 (assoc-in [:ui :overlay] nil)
-                 (assoc-in [:ui :focus] :composer)))))
-  (client/resolved (get-in @(:state app) [:view :session])))
+(defn start-empty!
+  ([app data] (start-empty! app data false))
+  ([app data initializing?]
+   (swap! (:state app)
+          (fn [state]
+            (let [config (merge (get-in state [:setup :config])
+                                (:config (default-session-params app)) (:config data))]
+              (-> state
+                  (save-session-ui (client/session-id-from state))
+                  (update :navigation-generation (fnil inc 0))
+                  (assoc :empty-composer? true :first-send-unknown? false
+                         :view (assoc (model/empty-state) :session
+                                      {:name (or (:name data) (get-in app [:options :session-name]) "Untitled session")
+                                       :metadata (when (or (:name data) (get-in app [:options :session-name]))
+                                                   {:title/source :user})
+                                       :cwd (client/workspace app) :config config})
+                         :history nil :hydrating nil :notice nil)
+                  ;; Boot may finish after the user opens a screen or types.
+                  ;; Only an explicit New action owns resetting their UI state.
+                  (cond-> (not initializing?)
+                    (restore-session-ui nil)
+                    (not initializing?) (assoc-in [:ui :overlay] nil)
+                    (not initializing?) (assoc-in [:ui :focus] :composer))))))
+   (client/resolved (get-in @(:state app) [:view :session]))))
 
 
 (defn select-start-session! [app sessions preferred]
@@ -195,7 +203,7 @@
       requested (client/rejected (client/error "session-not-found" "The requested session does not exist"
                                  {:session-id requested}))
       (:empty-composer? @(:state app)) (client/resolved (:view @(:state app)))
-      :else (start-empty! app {}))))
+      :else (start-empty! app {} true))))
 
 
 (defn switch-session! [app sid]
@@ -219,4 +227,3 @@
                (= sid (client/session-id-from state))
                (assoc-in [:view :session] session))))
     session))
-

@@ -8,6 +8,9 @@
             [clojure.test :refer [deftest is]])
   (:import (java.util.concurrent CountDownLatch TimeUnit)))
 
+(defn- create-test-session! [rt opts]
+  (runtime/create-session! rt (merge {:name "Lifecycle fixture"} opts)))
+
 (defn- answer
   ([text] (answer :openai "gpt-4o-mini" text))
   ([provider model text]
@@ -47,7 +50,7 @@
                            :data-dir (str directory "/data")
                            :settings {:close-timeout-ms 50}
                            :complete-fn provider})
-        sid (:id (runtime/create-session! rt {:config fixtures/config}))
+        sid (:id (create-test-session! rt {:config fixtures/config}))
         worker (future
                  (try
                    (runtime/run! rt sid "Block in the foreground" {})
@@ -81,7 +84,7 @@
     (let [rt (runtime/open! {:cwd directory :home home
                              :data-dir (str directory "/data") :trust true
                              :complete-fn (fn [_ _] (answer "Started after reload"))})
-          sid (:id (runtime/create-session! rt {:config fixtures/config}))]
+          sid (:id (create-test-session! rt {:config fixtures/config}))]
       (try
         (reset! close-gate {:entered entered :release release})
         (runtime/registry rt sid)
@@ -111,6 +114,108 @@
     (and (string? content)
          (str/starts-with? content "Summarize the supplied conversation faithfully"))))
 
+(deftest provider-bookkeeping-does-not-force-compaction-even-after-reopen
+  (let [directory (fixtures/temp-directory)
+        requests (atom [])
+        bookkeeping (apply str (repeat 400000 "x"))
+        provider (fn [request _]
+                   (swap! requests conj request)
+                   (assoc (answer :fixture "accounting" "Small reply")
+                          :response/provider-data
+                          {:fixture {:responses/event {:response bookkeeping}}}
+                          :response/usage {:usage/input-tokens 4000
+                                           :usage/cached-input-tokens 46000
+                                           :usage/output-tokens 200
+                                           :usage/total-tokens 50200
+                                           :usage/provider-raw {:attribution bookkeeping}}))
+        options {:cwd directory :home (str directory "/home")
+                 :data-dir (str directory "/data") :complete-fn provider
+                 :settings {:providers
+                            {:fixture {:type :profile-alias :provider :openai
+                                       :models [{:id "accounting" :context-window 100000
+                                                 :thinking-levels [:none]}]}}}}
+        config {:provider :fixture :model "accounting" :thinking :none :tools []
+                :settings {:compaction-keep-entries 1}}
+        sid (atom nil)]
+    (try
+      (doseq [reopened? [false true]]
+        (let [rt (runtime/open! options)]
+          (try
+            (when-not reopened?
+              (reset! sid (:id (create-test-session! rt {:config config})))
+              (runtime/run! rt @sid "First short prompt")
+              (runtime/run! rt @sid "Second short prompt"))
+            (runtime/run! rt @sid "Another short prompt")
+            (is (not-any? #(= :compaction (:kind %)) (runtime/entries rt @sid)))
+            (finally (runtime/close! rt)))))
+      (is (= 4 (count @requests)))
+      (is (not-any? summary-request? @requests))
+      ;; Accounting must not strip persisted metadata from actual provider requests.
+      (is (some #(= bookkeeping (get-in % [:message/provider-data :fixture
+                                           :responses/event :response]))
+                (:request/messages (last @requests))))
+      (finally (fixtures/remove-directory! directory)))))
+
+(deftest cached-context-triggers-compaction-once-and-old-usage-expires
+  (let [directory (fixtures/temp-directory)
+        requests (atom [])
+        completions (atom 0)
+        provider (fn [request _]
+                   (swap! requests conj request)
+                   (if (summary-request? request)
+                     (assoc (answer :fixture "accounting" "Short summary")
+                            :response/usage {:usage/total-tokens 95000})
+                     (cond-> (answer :fixture "accounting" "Ordinary reply")
+                       (= 2 (swap! completions inc))
+                       (assoc :response/usage {:usage/input-tokens 1000
+                                               :usage/cached-input-tokens 83000
+                                               :usage/cache-write-tokens 500
+                                               :usage/output-tokens 500}))))
+        rt (runtime/open! {:cwd directory :home (str directory "/home")
+                           :data-dir (str directory "/data") :complete-fn provider
+                           :settings {:providers
+                                      {:fixture {:type :profile-alias :provider :openai
+                                                 :models [{:id "accounting" :context-window 100000
+                                                           :thinking-levels [:none]}]}}}})
+        sid (:id (create-test-session! rt
+                   {:config {:provider :fixture :model "accounting" :thinking :none
+                             :tools [] :settings {:compaction-keep-entries 1}}}))]
+    (try
+      (runtime/run! rt sid "First prompt")
+      (runtime/run! rt sid "Second prompt")
+      (runtime/run! rt sid "Continue after compaction")
+      (is (= [:completion :completion :summary :completion]
+             (mapv #(if (summary-request? %) :summary :completion) @requests)))
+      (is (= 1 (count (filter #(= :compaction (:kind %)) (runtime/entries rt sid)))))
+      (finally
+        (runtime/close! rt)
+        (fixtures/remove-directory! directory)))))
+
+(deftest unmeasured-content-never-triggers-guessed-compaction
+  (let [directory (fixtures/temp-directory)
+        requests (atom [])
+        provider (fn [request _]
+                   (swap! requests conj request)
+                   (answer :fixture "tiny" "Reply without usage"))
+        rt (runtime/open! {:cwd directory :home (str directory "/home")
+                           :data-dir (str directory "/data") :complete-fn provider
+                           :settings {:providers
+                                      {:fixture {:type :profile-alias :provider :openai
+                                                 :models [{:id "tiny" :context-window 100
+                                                           :thinking-levels [:none]}]}}}})
+        sid (:id (create-test-session! rt
+                   {:config {:provider :fixture :model "tiny" :thinking :none
+                             :tools [] :settings {:compaction-keep-entries 1}}}))]
+    (try
+      (runtime/run! rt sid "First prompt")
+      (runtime/run! rt sid (apply str (repeat 10000 "New, unmeasured input. ")))
+      (is (= 2 (count @requests)))
+      (is (not-any? summary-request? @requests))
+      (is (not-any? #(= :compaction (:kind %)) (runtime/entries rt sid)))
+      (finally
+        (runtime/close! rt)
+        (fixtures/remove-directory! directory)))))
+
 (deftest ordinary-completed-turns-compact-before-the-next-request
   (let [directory (fixtures/temp-directory)
         requests (atom [])
@@ -118,7 +223,8 @@
                    (swap! requests conj request)
                    (if (summary-request? request)
                      (answer :fixture "tiny" "The first completed turn was summarized.")
-                     (answer :fixture "tiny" "Ordinary final answer.")))
+                     (assoc (answer :fixture "tiny" "Ordinary final answer.")
+                            :response/usage {:usage/total-tokens 60})))
         settings {:providers
                   {:fixture {:type :profile-alias
                              :provider :openai
@@ -131,7 +237,7 @@
                 :instructions ""
                 :settings {:compaction-threshold 0.5
                            :compaction-keep-entries 1}}
-        sid (:id (runtime/create-session! rt {:config config}))]
+        sid (:id (create-test-session! rt {:config config}))]
     (try
       (runtime/run! rt sid (apply str (repeat 240 "a")) {})
       (runtime/run! rt sid "Second ordinary prompt" {})
@@ -178,7 +284,7 @@
                 :instructions ""
                 :settings {:compaction-threshold 0.5
                            :compaction-keep-entries 1}}
-        sid (:id (runtime/create-session! rt {:config config}))]
+        sid (:id (create-test-session! rt {:config config}))]
     (try
       (reset! runtime* rt)
       (reset! session-id* sid)
@@ -197,7 +303,7 @@
         rt (runtime/open! {:cwd directory :home (str directory "/home")
                            :data-dir (str directory "/data")
                            :complete-fn (fn [_ _] (answer "Done"))})
-        sid (:id (runtime/create-session! rt {:config fixtures/config}))
+        sid (:id (create-test-session! rt {:config fixtures/config}))
         release-var (ns-resolve 'arrodes.runtime 'release-foreground!)
         release-foreground @release-var
         entered (promise)
@@ -240,7 +346,7 @@
         rt (runtime/open! {:cwd directory :home (str directory "/home")
                            :data-dir (str directory "/data")
                            :complete-fn (fn [_ _] (answer "Done"))})
-        sid (:id (runtime/create-session! rt {:config fixtures/config}))
+        sid (:id (create-test-session! rt {:config fixtures/config}))
         observed (promise)
         unsubscribe
         (runtime/subscribe!
@@ -273,7 +379,7 @@
         rt (runtime/open! {:cwd directory :home (str directory "/home")
                            :data-dir (str directory "/data")
                            :complete-fn provider})
-        sid (:id (runtime/create-session! rt {:config fixtures/config}))]
+        sid (:id (create-test-session! rt {:config fixtures/config}))]
     (try
       (let [operation (runtime/start! rt sid "Wait for cancellation")]
         (await-latch! entered)
@@ -296,7 +402,7 @@
         options {:cwd directory :home (str directory "/home")
                  :data-dir (str directory "/data")}
         rt (runtime/open! options)
-        sid (:id (runtime/create-session! rt {:config fixtures/config}))
+        sid (:id (create-test-session! rt {:config fixtures/config}))
         fail-once? (atom true)
         close-pool mcp/close!]
     (try
