@@ -771,13 +771,18 @@
         session-changes (cond-> {:config config}
                           (and wrapped? (contains? changes :name)) (assoc :name (:name changes))
                           (and wrapped? (contains? changes :metadata))
-                          (assoc :metadata (merge (:metadata snapshot) (:metadata changes))))]
+                          (assoc :metadata (merge (:metadata snapshot) (:metadata changes))))
+        session-changes (cond-> session-changes
+                          (and wrapped? (contains? changes :name))
+                          (assoc :metadata (assoc (merge (:metadata snapshot) (:metadata changes)) :title/source :user)))]
     (commit! store sid {:expected-revision (if (contains? changes :expected-revision)
                                              (:expected-revision changes)
                                              (:revision snapshot))
                         :entries [{:kind :config :data config}]
                         :session session-changes
-                        :events [{:type :session/configured :data {:config config}}]})))
+                        :events (cond-> [{:type :session/configured :data {:config config}}]
+                                  (contains? changes :name)
+                                  (conj {:type :session/named :data {:name (:name changes) :source :user}}))})))
 
 (declare pending-tool-calls tool-boundary-entries)
 

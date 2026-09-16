@@ -19,6 +19,9 @@ colors. Selection and errors have a non-color signal. Shared component styles be
 the widget layer. Ordinary conversation remains readable and execution remains inspectable.
 
 - The composer preserves drafts on failed requests, navigation, and reconnect.
+- Completing startup preserves screens and input already opened or entered by the
+  user. The sessions browser stays open through loading and displays loading,
+  empty, and failure states; late responses do not reopen a dismissed screen.
 - Enter sends while idle and steers while running; follow-ups are explicitly queued.
 - Escape dismisses the current interaction before requesting operation cancellation.
 - Focus is visible; every primary interaction has a keyboard path. Mouse reading does

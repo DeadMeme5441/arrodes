@@ -34,6 +34,13 @@ Support paths must stay inside the skill root, including after symbolic-link res
 
 Prompt files are Markdown templates. Use `prompt` to catalog or render them. The RPC equivalents are `skill.read`, `prompt.render`, and `prompt.run`.
 
+The REPL `skill` and `prompt` catalog actions return `{:items [...] :scope {...}
+:load-policy :fail-on-invalid-resource}`. Scope shows default global/project
+directories, project trust and effective configured paths. Repository `.agents`
+files are not automatically installed resources. An empty `:items` collection
+means no enabled resources were found in that scope; invalid resource configuration
+fails loading rather than silently appearing as an empty catalog.
+
 ## Extension entry point
 
 Each discovered `.clj` extension evaluates to an initializer function. The function receives a session-attributed API map:
@@ -69,6 +76,11 @@ The initializer may return a cleanup function or a map containing `:close`. It m
 - Lifecycle: `:on-close!`
 
 Registered functions receive one argument map. They may return a native value or a structured result with `:value`, `:content`, `:details`, and optional `:error?`. Wrappers apply argument validation, hooks, permissions, effect locking, cancellation, progress, and retention. They remain Clojure functions rather than separate provider-visible tools.
+
+Descriptors may also supply `:returns {:description "..." :example ...}` and
+`:examples [{:source "..."}]`. These are exposed through `registered-tools`;
+wrapper Vars carry the function's description and return documentation in metadata.
+Keep native values distinct from their human-readable `:content` representation.
 
 Tool replacement must be explicit: set `:replace? true` to override an existing registered function. Ordinary duplicate names fail. When an override is withdrawn, Arrodes restores the nearest previous implementation owned by another activation.
 
@@ -137,6 +149,13 @@ Connections are lazy and session-owned. Arrodes acts as the client:
 ```
 
 Other actions are `status`, `resources`, `read-resource`, `prompts`, `get-prompt`, and `reconnect`. Remote tools remain behind the `mcp` function; they do not become a provider-visible tool list. Reload and close disconnect owned clients.
+
+`describe` preserves the remote input schema, output schema when supplied, and prose
+documentation. `call` retains the decoded response, including `structuredContent`
+and typed content blocks, without guessing structure from prose. Its result descriptor
+identifies the server and tool. A tool-reported error has `:outcome :reported-error`
+and includes the remote result; a timed-out or interrupted call has an unknown remote
+outcome. Inspect retained error details before deciding whether to repeat a call.
 
 ## Packages
 

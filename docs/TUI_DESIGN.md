@@ -17,7 +17,8 @@ interactive region or expanded execution; prose stays on the base surface.
   dimmed backdrop. Slash suggestions remain inline. Inspection uses a full-width screen.
   Secret editor contents never enter draft state or a rendered unmasked field.
 - The header shows only the session name. Providers, sessions, and commands remain
-  available through slash commands and keyboard shortcuts.
+  available through slash commands and keyboard shortcuts. A blank row separates
+  the title from the main region; another separates that region from the composer.
 - The transcript uses the full available width. User turns have a gold diamond and You label; replies have a silver star and Arrodes
   label. Thin role-colored horizontal rules sit above every user and assistant turn across the
   available width. The assistant boundary precedes its first reasoning/tool/prose row;
@@ -29,6 +30,9 @@ interactive region or expanded execution; prose stays on the base surface.
   Both the chevron and heading toggle reasoning/execution blocks. Expanded activity
   shows highlighted Clojure source and output. Large output stays bounded
   and inspectable, and native values remain available through the inspector.
+  The transcript fills the available vertical space independently of streamed
+  content height. Native sticky scrolling owns following new content; post-paint
+  height and follow corrections must not create a second visible layout step.
 - The welcome screen offers recent sessions and a compact starting prompt. The same
   multiline editor stays anchored at the terminal bottom, with two quiet metadata rows directly below
   it. Opening or closing suggestions preserves its position, draft, cursor, and selection.

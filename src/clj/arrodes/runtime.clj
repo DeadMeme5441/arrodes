@@ -8,6 +8,7 @@
             [arrodes.resources :as resources]
             [arrodes.run :as run]
             [arrodes.store :as store]
+            [arrodes.titles :as titles]
             [arrodes.platform :as util]
             [arrodes.value :as value])
   (:import (java.util.concurrent ExecutorService Executors RejectedExecutionException TimeUnit)))
@@ -221,6 +222,10 @@
   (reset! (:phase slot) phase)
   phase)
 
+(defn- publish-phase! [runtime sid slot phase callback]
+  (set-phase! slot phase)
+  (transient-event! runtime sid (:operation-id slot) :operation/phase {:phase phase} callback))
+
 (defn- operation-start! [runtime sid kind]
   (locking (session-lock runtime sid)
     (let [oid (util/id)
@@ -311,7 +316,9 @@
           config)
         config))))
 
-(defn- provider-complete! [runtime sid slot config request callback]
+(defn- provider-complete!
+  [runtime sid slot config request callback
+   & [{:keys [publish-stream?] :or {publish-stream? true}}]]
   (let [max-retries (long (max 0 (min 5 (or (get-in config [:settings :provider-retries]) 2))))
         cancelled? #(or @(:cancelled slot) (.isInterrupted (Thread/currentThread)))]
     (loop [attempt 0]
@@ -319,8 +326,12 @@
       (let [visible? (atom false)
             on-event (fn [event]
                        (when (run/event-visible? event) (reset! visible? true))
-                       (transient-event! runtime sid (:operation-id slot)
-                                         :provider-event event callback))
+                       ;; Internal summaries are continuation state, not replies.
+                       ;; Gate at the runtime boundary so neither subscribers nor
+                       ;; per-operation callbacks can render their partial text.
+                       (when publish-stream?
+                         (transient-event! runtime sid (:operation-id slot)
+                                           :provider-event event callback)))
             outcome (try
                       {:response
                        (provider/complete! (provider-manager runtime sid) request
@@ -329,13 +340,15 @@
                       (catch Throwable error {:error error}))]
         (if-let [error (:error outcome)]
           (if (and (< attempt max-retries) (not @visible?)
+                   (not (run/context-overflow? error))
                    (run/retryable-error? error) (not (cancelled?)))
             (do
               (transient-event! runtime sid (:operation-id slot) :provider-retry
                                 {:attempt (inc attempt) :error (value/error-map error)} callback)
               (Thread/sleep (long (min 2000 (* 200 (bit-shift-left 1 attempt)))))
               (recur (inc attempt)))
-            (throw error))
+            (throw (ex-info (ex-message error)
+                            (assoc (ex-data error) :provider/output-started? @visible?) error)))
           (:response outcome))))))
 
 (defn- runtime-context [runtime sid registry manager config]
@@ -435,47 +448,120 @@
         (value/fail! :nothing-to-compact
                      "The session does not contain a safe compaction boundary" {:session-id sid})))
     (when plan
-      (set-phase! slot :compacting)
-      (let [hook-context {:runtime runtime :session-id sid
-                          :operation-id (:operation-id slot)
-                          :session (store/session (:store runtime) sid)
-                          :compaction? true}
-            request (-> (capabilities/apply-hooks
-                         registry :transform-request hook-context
-                         (run/summary-request config (:summary-entries plan) instructions))
-                        (session-cache sid))
-            _ (value/check! (map? request) :invalid-hook-result
-                            "transform-request hooks must return a request map" {})
-            response (provider-complete! runtime sid slot config request callback)
-            summary (run/response-text response)]
-        (value/check! (not (str/blank? summary)) :empty-compaction
-                      "Provider returned an empty compaction summary" {})
-        (value/check! (not= :length (:response/finish-reason response)) :compaction-truncated
-                      "Compaction summary was truncated by the provider" {})
-        (locking (session-lock runtime sid)
+      (let [previous-phase @(:phase slot)]
+        (publish-phase! runtime sid slot :compacting callback)
+        (try
+          (let [hook-context {:runtime runtime :session-id sid
+                              :operation-id (:operation-id slot)
+                              :session (store/session (:store runtime) sid)
+                              :compaction? true}
+                request (-> (capabilities/apply-hooks
+                             registry :transform-request hook-context
+                             (run/summary-request config (:summary-entries plan) instructions))
+                            (session-cache sid))
+                _ (value/check! (map? request) :invalid-hook-result
+                                "transform-request hooks must return a request map" {})
+                response (provider-complete! runtime sid slot config request callback
+                                             {:publish-stream? false})
+                summary (run/response-text response)]
+            (value/check! (not (str/blank? summary)) :empty-compaction
+                          "Provider returned an empty compaction summary" {})
+            (value/check! (not= :length (:response/finish-reason response)) :compaction-truncated
+                          "Compaction summary was truncated by the provider" {})
+            (locking (session-lock runtime sid)
+              (util/check-cancelled! (:cancelled slot))
+              (commit! runtime sid
+                       {:entries [{:kind :compaction
+                                   :data {:summary summary
+                                          :first-kept-entry-id (:first-kept-entry-id plan)
+                                          :usage (:response/usage response)}}]
+                        :events [{:operation-id (:operation-id slot)
+                                  :type :session/compacted
+                                  :data {:automatic? automatic?
+                                         :first-kept-entry-id (:first-kept-entry-id plan)
+                                         :usage (:response/usage response)}}]}))
+            {:summary summary :first-kept-entry-id (:first-kept-entry-id plan)
+             :usage (:response/usage response)})
+          (finally (publish-phase! runtime sid slot previous-phase callback)))))))
+
+(defn- context-recovery-error [message error]
+  (ex-info (str message " Reduce the latest message or attached/tool content, or start a new session. "
+                "Completed REPL effects have not been repeated.")
+           {:error/code "context-limit-unresolved" :provider (:provider (ex-data error))}
+           error))
+
+(defn- complete-with-context-recovery! [runtime sid slot registry manager config callback]
+  (let [request (prepare-completion-request runtime sid slot registry manager config)
+        attempt (try {:response (complete-request! runtime sid slot config request callback)}
+                     (catch Throwable error {:error error}))]
+    (if-let [error (:error attempt)]
+      (if (and (run/context-overflow? error)
+               (not (:provider/output-started? (ex-data error))))
+        (do
           (util/check-cancelled! (:cancelled slot))
-          (commit! runtime sid
-                   {:entries [{:kind :compaction
-                               :data {:summary summary
-                                      :first-kept-entry-id (:first-kept-entry-id plan)
-                                      :usage (:response/usage response)}}]
-                    :events [{:operation-id (:operation-id slot)
-                              :type :session/compacted
-                              :data {:automatic? automatic?
-                                     :first-kept-entry-id (:first-kept-entry-id plan)
-                                     :usage (:response/usage response)}}]}))
-        {:summary summary :first-kept-entry-id (:first-kept-entry-id plan)
-         :usage (:response/usage response)}))))
+          (when (= false (get-in config [:settings :auto-compact?]))
+            (throw (context-recovery-error "The provider rejected the context; automatic compaction is disabled." error)))
+          ;; Keep the latest complete user turn, including all its settled REPL
+          ;; calls. Re-enter only the provider boundary, never prepare-run!/eval.
+          (let [compacted (try
+                            (compact-current! runtime sid slot registry
+                                              (assoc-in config [:settings :compaction-keep-entries] 1)
+                                              nil callback true)
+                            (catch Throwable summary-error
+                              (util/check-cancelled! (:cancelled slot))
+                              (throw (context-recovery-error "The provider rejected the context and compaction failed." summary-error))))]
+            (when-not compacted
+              (throw (context-recovery-error "The provider rejected the context, but no earlier turn can be compacted safely." error)))
+            (util/check-cancelled! (:cancelled slot))
+            (try
+              {:response (complete-request! runtime sid slot config
+                                             (prepare-completion-request runtime sid slot registry manager config)
+                                             callback)
+               :recovered? true}
+              (catch Throwable retry-error
+                (if (run/context-overflow? retry-error)
+                  (throw (context-recovery-error "The provider still rejects the context after one compaction retry." retry-error))
+                  (throw retry-error))))))
+        (throw error))
+      attempt)))
 
 (defn- configured-model [runtime sid config]
   (provider/model (provider-manager runtime sid)
                   (:provider config)
                   (:model config)))
 
-(defn- maybe-auto-compact! [runtime sid slot registry config callback usage estimated-input-tokens]
+(defn- maybe-auto-compact! [runtime sid slot registry config callback usage]
   (when (run/auto-compact? config (configured-model runtime sid config)
-                           usage estimated-input-tokens)
+                           usage)
     (boolean (compact-current! runtime sid slot registry config nil callback true))))
+
+(defn- initial-title [runtime sid entries config]
+  (when-not (= false (get-in config [:settings :auto-title?]))
+    (when-let [message (some #(when (= :user (get-in % [:data :message/role])) (:data %)) entries)]
+      (let [snapshot (store/session (:store runtime) sid)
+            source (get-in snapshot [:metadata :title/source])]
+        (when (and (= :default source)
+                   (not-any? #(= :user (get-in % [:data :message/role])) (store/entries (:store runtime) sid)))
+          (let [content (:message/content message)
+                text (value/text-content content)
+                generation (util/id)]
+            {:name (or (run/suggested-session-name content) "Attachment discussion")
+             :generation generation
+             :text (subs text 0 (min 8000 (count text)))
+             :metadata (assoc (:metadata snapshot) :title/source :auto :title/generation generation)}))))))
+
+(defn- start-title! [runtime sid config {:keys [generation text]}]
+  (when-not (str/blank? text)
+    (titles/start! (:titles runtime) (provider-manager runtime sid) sid config text
+      (fn [name details]
+        (locking (session-lock runtime sid)
+          (when (= :open @(:lifecycle runtime))
+            (let [snapshot (store/session (:store runtime) sid)]
+              (when (and (= :auto (get-in snapshot [:metadata :title/source]))
+                         (= generation (get-in snapshot [:metadata :title/generation])))
+                (commit! runtime sid
+                         {:session {:name name :metadata (assoc (:metadata snapshot) :title/model details)}
+                          :events [{:type :session/named :data {:name name :source :auto}}]})))))))))
 
 (defn- prepare-run! [runtime sid slot prompt overrides]
   (let [registry (registry runtime sid)
@@ -497,6 +583,7 @@
                                   (run/effective-config
                                    (store/session (:store runtime) sid)
                                    (:config prepared)))
+          title (atom nil)
           initial-intents
           (locking (session-lock runtime sid)
             (util/check-cancelled! (:cancelled slot))
@@ -508,6 +595,8 @@
                             (some? prompt)
                             (conj {:kind :message
                                    :data (run/user-message (:prompt prepared))}))
+                  naming (initial-title runtime sid entries config)
+                  _ (reset! title naming)
                   events (cond-> []
                            (seq items)
                            (conj {:operation-id (:operation-id slot)
@@ -515,13 +604,16 @@
                                   :data {:ids (mapv :id items) :phase :start-boundary}})
                            (some? prompt)
                            (conj {:operation-id (:operation-id slot)
-                                  :type :message/user :data {}}))]
+                                  :type :message/user :data {}})
+                           naming (conj {:type :session/named :data {:name (:name naming) :source :auto}}))]
               (when (or (seq entries) (seq items))
                 (commit! runtime sid
-                         {:entries entries
+                         (cond-> {:entries entries
                           :queue-deliver (mapv :id items)
-                          :events events}))
+                          :events events}
+                           naming (assoc :session (select-keys naming [:name :metadata])))))
               items))]
+      (when @title (start-title! runtime sid config @title))
       {:registry registry :manager manager :config config :hook-context context
        :initial-intents initial-intents})))
 
@@ -538,16 +630,9 @@
                     {:max-steps max-steps})
       (util/check-cancelled! (:cancelled slot))
       (let [path (store/active-path (:store runtime) sid)
-            initial-request (prepare-completion-request runtime sid slot registry manager config)
             compacted? (maybe-auto-compact!
-                        runtime sid slot registry config callback
-                        (run/latest-usage path)
-                        (run/estimate-request-tokens initial-request))
-            request (if compacted?
-                      (prepare-completion-request runtime sid slot registry manager config)
-                      initial-request)
-            estimated-input-tokens (run/estimate-request-tokens request)
-            response (complete-request! runtime sid slot config request callback)
+                        runtime sid slot registry config callback (run/latest-usage path))
+            {:keys [response recovered?]} (complete-with-context-recovery! runtime sid slot registry manager config callback)
             assistant (run/validate-assistant! (run/response->assistant response))
             calls (:message/tool-calls assistant)]
         (commit-assistant! runtime sid slot assistant response)
@@ -568,10 +653,9 @@
                                                  (run/config-with-intents config intents))]
                 (recur (inc step) next-config))
               (do
-                (when-not compacted?
+                (when-not (or compacted? recovered?)
                   (maybe-auto-compact! runtime sid slot registry config callback
-                                       (:response/usage response)
-                                       estimated-input-tokens))
+                                       (:response/usage response)))
                 (let [final (capabilities/apply-hooks registry :after-run hook-context assistant)]
                   (value/check! (map? final) :invalid-hook-result
                                 "after-run hooks must return an assistant message" {})
@@ -687,6 +771,7 @@
                      :foreground (atom {}) :session-locks (atom {}) :handle-lock (Object.)
                      :close-lock (Object.) :ui (atom ui!) :command! command!
                      :executor (Executors/newFixedThreadPool (int threads))
+                     :titles (titles/create!)
                      :lifecycle (atom :open) :recovery-events recovery-events}]
         (reset! opened [])
         runtime)
@@ -702,7 +787,7 @@
   #{:temperature :top-p :max-output-tokens :stop :response-format
     :cache :provider-options :auto-compact? :compaction-threshold
     :compaction-keep-entries :compaction-max-output-tokens
-    :max-steps :provider-retries :fallback-model?})
+    :max-steps :provider-retries :fallback-model? :auto-title? :title-model :title-provider})
 
 (defn- cwd-session-defaults [runtime cwd]
   (let [manager (resources/create! {:cwd cwd :home (:home runtime)
@@ -727,7 +812,9 @@
         defaults (cwd-session-defaults runtime cwd)
         config (value/deep-merge run/default-config defaults (:config opts))]
     (store/create-session! (:store runtime)
-                           (assoc opts :cwd cwd :config config))))
+                           (assoc opts :cwd cwd :config config
+                                  :metadata (assoc (or (:metadata opts) {}) :title/source
+                                                   (if (contains? opts :name) :user :default))))))
 
 (defn list-sessions
   ([runtime] (list-sessions runtime {}))
@@ -843,7 +930,8 @@
                        (session-cache sid))
            _ (value/check! (map? request) :invalid-hook-result
                            "transform-request hooks must return a request map" {})
-           response (provider-complete! runtime sid slot config request (:on-event opts))
+           response (provider-complete! runtime sid slot config request (:on-event opts)
+                                        {:publish-stream? false})
            summary (run/response-text response)]
        (value/check! (not (str/blank? summary)) :empty-branch-summary
                      "Provider returned an empty branch summary" {})
@@ -1186,6 +1274,7 @@
             ;; Graceful shutdown prevents an operation that invoked close! from
             ;; interrupting its own caller thread. Explicit cancellation above
             ;; still interrupts every other running driver.
+          (titles/stop! (:titles runtime))
           (.shutdown ^ExecutorService (:executor runtime))
           (let [timeout-ms (long (max 0 (or (:close-timeout-ms (:initial-settings runtime))
                                             10000)))
@@ -1199,9 +1288,10 @@
                 executor-terminated?
                 (if foreground-complete?
                   (try
-                    (.awaitTermination ^ExecutorService (:executor runtime)
-                                       (remaining-close-millis deadline)
-                                       TimeUnit/MILLISECONDS)
+                    (and (.awaitTermination ^ExecutorService (:executor runtime)
+                                            (remaining-close-millis deadline)
+                                            TimeUnit/MILLISECONDS)
+                         (titles/await-closed! (:titles runtime) (remaining-close-millis deadline)))
                     (catch InterruptedException _
                       (.interrupt current)
                       false))

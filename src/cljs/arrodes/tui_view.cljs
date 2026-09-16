@@ -50,7 +50,6 @@
 
 
 (defn frame! [view]
-  (when-not @(:closed? view) (transcript/size-conversation! view))
   (when (and (not @(:closed? view)) (.-visible (:modal-sidebar view)))
     (when-let [id (:sidebar-choice @(:local view))]
       (when-let [row (.findDescendantById (:modal-sidebar view) id)]
@@ -98,17 +97,16 @@
     (let [scroll (:transcript view) renderer (:renderer view)]
       (when-some [position (:restore-scroll @(:local view))]
         (swap! (:local view) dissoc :restore-scroll)
-        (.scrollTo scroll position))
+        (.scrollTo scroll (if (get-in (c/state view) [:ui :follow?] true)
+                            (.-scrollHeight scroll) position)))
       (when (:manual-scroll? @(:local view)) (swap! (:local view) assoc :anchor nil))
       (when-let [{:keys [id offset]} (:anchor @(:local view))]
         (swap! (:local view) assoc :anchor nil)
         (when-let [record (get @(:records view) id)]
           (let [delta (- (.-screenY (:root record)) (.-screenY (.-viewport scroll)) offset)]
             (when (not (zero? delta)) (.scrollBy scroll delta)))))
-      (when (and (get-in (c/state view) [:ui :follow?] true) (not (.-hasSelection renderer)))
-        (let [target (max 0 (- (.-scrollHeight scroll) (.-height (.-viewport scroll))))]
-          (when (> (js/Math.abs (- target (.-scrollTop scroll))) 1)
-            (.scrollTo scroll target))))
+      ;; Native sticky scrolling owns following new content during layout.
+      ;; A second post-paint scroll correction introduces a visible extra step.
       ;; Wheel/scrollbar movement can reach the end without using Jump to latest.
       ;; Reconcile after native scrolling and layout, never from pre-scroll bounds.
       (when (and (not (get-in (c/state view) [:ui :follow?] true))
@@ -135,7 +133,8 @@
                                 :border false})
         session-title (w/text renderer "Untitled session" {:id "session-title" :flexGrow 1 :flexShrink 1 :height 1
                                                             :fg :text/secondary :truncate true :wrapMode "none"})
-        body (w/box renderer {:width "100%" :flexDirection "row" :height 1 :flexGrow 0 :flexShrink 1 :minHeight 1 :overflow "hidden"})
+        header-gap (w/box renderer {:id "header-gap" :width "100%" :height (:region-gap w/layout)})
+        body (w/box renderer {:width "100%" :flexDirection "row" :flexGrow 1 :flexShrink 1 :minHeight 1 :overflow "hidden"})
         conversation (w/box renderer {:flexGrow 1 :flexShrink 1 :minWidth 1 :height "100%"})
         transcript (w/scrollbox renderer {:id "conversation" :width "100%" :height "100%" :stickyScroll true :stickyStart "bottom"
                                           :contentOptions {:paddingX 1 :paddingBottom 1 :flexDirection "column"}
@@ -257,6 +256,7 @@
         project-status (w/text renderer "" {:flexGrow 1 :flexShrink 1 :height 1 :truncate true :wrapMode "none" :fg :text/secondary})
         command-menu (w/box renderer {:id "command-menu" :visible false :width "100%" :paddingX 2})
         spacer (w/box renderer {:flexGrow 1 :minHeight 0})
+        composer-gap (w/box renderer {:id "composer-gap" :width "100%" :height (:region-gap w/layout)})
         footer-keys (w/text renderer "" {:id "footer-feedback" :flexShrink 1 :height 1 :fg :text/secondary :wrapMode "none" :truncate true})
         modal-shade (w/box renderer {:id "dialog-layer" :visible false :position "absolute" :top 0 :left 0
                                      :width "100%" :height "100%" :zIndex 100 :backgroundColor :surface/base})
@@ -376,7 +376,7 @@
     (w/add! model-layout modal-content model-settings)
     (w/add! modal modal-header modal-hint modal-input-frame model-layout browser-status modal-footer)
     (w/add! modal-shade modal)
-    (w/add! root header welcome body spacer new-activity pending widget-box notice-box command-menu composer-box footer metadata modal-shade)
+    (w/add! root header header-gap welcome body spacer new-activity pending widget-box notice-box command-menu composer-gap composer-box footer metadata modal-shade)
     (.add (.-root renderer) root)
     (swap! local assoc :key-handler key-handler :frame-handler frame-handler :resize-handler resize-handler
            :pulse-timer (js/setInterval (fn [] (when (c/busy? view) (schedule! view))) 1000))

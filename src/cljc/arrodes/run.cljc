@@ -148,6 +148,49 @@
         (contains? #{:timeout :connection :rate-limit :server-error
                      :transport/timeout :transport/connection} error-type))))
 
+(defn context-overflow?
+  "Recognize an explicit input-context rejection, not a rate limit, output cap
+   or generic payload-size error. SDK should-compress hints alone are insufficient."
+  [error]
+  (let [data (ex-data error)
+        field (fn [m k] (when (map? m) (or (get m k) (get m (name k)))))
+        raw-body (or (:body data) (get-in data [:response :body]))
+        body (if (string? raw-body)
+               (try #?(:clj (json/read-str raw-body) :cljs (js->clj (js/JSON.parse raw-body)))
+                    (catch #?(:clj Throwable :cljs :default) _ raw-body)) raw-body)
+        remote (or (field body :error) body)
+        codes (map #(last (str/split (if (keyword? %) (name %) (str %)) #"/"))
+                   [(:error/code data) (:error/type data) (field remote :code) (field remote :type)])
+        status (or (:status data) (get-in data [:response :status]))
+        text (str/lower-case (str (ex-message error) " " (field remote :message) " "
+                                 (get-in data [:error :error/message])
+                                 (when (string? body) body)))]
+    (boolean
+     (and (or (nil? status) (contains? #{400 413 422} status))
+          (not (some #{"rate-limit" "rate_limit_exceeded" "quota" "auth" "cancelled"} codes))
+          (or (some #{"context_length_exceeded" "context_window_exceeded" "context-overflow"
+                      "context-length-exceeded" "prompt_too_long" "input_too_long"} codes)
+              (re-find #"maximum context length|context (?:length|window|size) (?:has been )?exceeded|(?:exceeds?|exceeded) (?:the )?(?:maximum |model.?s )?context (?:length|window)|prompt (?:is )?too long|input token(?:s| count)?.{0,50}exceeds? (?:the )?(?:maximum|limit)" text))))))
+
+(defn suggested-session-name
+  "A local title from the first user message. Never calls a model or includes
+   non-text payloads; use only the first nonblank line and at most 72 code points."
+  [content]
+  (let [text (if (string? content) content
+                (->> content (keep #(when (= :text (:part/type %)) (:text %)))
+                     (str/join "\n")))
+        clean (-> text
+                  (str/replace #"\u001b\[[0-?]*[ -/]*[@-~]" "")
+                  (str/replace #"[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]" ""))
+        line (some #(not-empty (str/trim %)) (str/split-lines clean))
+        line (some-> line (str/replace #"\s+" " "))
+        points (when line #?(:clj (vec (.toArray (.codePoints ^String line)))
+                            :cljs (vec (js/Array.from line))))]
+    (when (seq points)
+      (if (<= (count points) 72) line
+          (str #?(:clj (String. (int-array (take 71 points)) 0 71)
+                  :cljs (apply str (take 71 points))) "…")))))
+
 (defn add-usage
   ([] {})
   ([a] (or a {}))
@@ -165,52 +208,42 @@
    {}
    entries))
 
-(defn context-tokens [usage]
-  (+ (long (or (:usage/input-tokens usage) 0))
-     (long (or (:usage/output-tokens usage) 0))))
+(defn context-tokens
+  "Size of one completed model context, not cumulative session spend.
+   SDK input, cache-read and cache-write counters are disjoint. Reported totals
+   take precedence (some providers include additional reasoning tokens there);
+   reasoning and modality breakdowns must not be added again. Missing usage is nil."
+  [usage]
+  (if (number? (:usage/total-tokens usage))
+    (long (:usage/total-tokens usage))
+    (let [counters (keep #(get usage %) [:usage/input-tokens :usage/cached-input-tokens
+                                       :usage/cache-write-tokens :usage/output-tokens])]
+      (when (seq counters)
+        (reduce + 0 (map long counters))))))
 
-(defn- estimated-characters [value]
-  (cond
-    (nil? value) 4
-    (string? value) (count value)
-    (keyword? value) (count (name value))
-    (symbol? value) (count (name value))
-    (number? value) 16
-    (boolean? value) 5
-    (map? value) (reduce-kv (fn [total key child]
-                              (+ total 4
-                                 (estimated-characters key)
-                                 (estimated-characters child)))
-                            2 value)
-    (coll? value) (reduce (fn [total child]
-                            (+ total 2 (estimated-characters child)))
-                          2 value)
-    :else 16))
-
-(defn estimate-request-tokens
-  "Conservatively estimates the canonical request size without serializing or
-   copying its potentially large message and tool payloads."
-  [request]
-  (long (max 1 (quot (+ 3 (estimated-characters request)) 4))))
-
-(defn latest-usage [entries]
-  (some (fn [entry]
-          (when (= :message (:kind entry))
-            (get-in entry [:data :message/provider-data :response/usage])))
-        (rseq (vec entries))))
+(defn latest-usage
+  "Usage from the latest completion in the current context. Missing usage stays
+   unknown; compaction invalidates all preceding context measurements."
+  [entries]
+  (some->> (rseq (vec entries))
+           (take-while #(not= :compaction (:kind %)))
+           (filter #(and (= :message (:kind %))
+                         (= :assistant (get-in % [:data :message/role]))))
+           first
+           :data
+           :message/provider-data
+           :response/usage))
 
 (defn auto-compact?
-  ([config model usage]
-   (auto-compact? config model usage nil))
-  ([config model usage estimated-input-tokens]
-   (let [settings (:settings config)
-         enabled? (not= false (:auto-compact? settings))
-         window (or (:context-window model) (:model/context-length model))
-         threshold (double (or (:compaction-threshold settings) 0.85))
-         observed (max (context-tokens usage)
-                       (long (or estimated-input-tokens 0)))]
-     (and enabled? (number? window) (pos? window)
-          (<= (* (double window) threshold) (double observed))))))
+  "Decide from the latest provider measurement only; never estimate new content."
+  [config model usage]
+  (let [settings (:settings config)
+        enabled? (not= false (:auto-compact? settings))
+        window (or (:context-window model) (:model/context-length model))
+        threshold (double (or (:compaction-threshold settings) 0.85))
+        observed (context-tokens usage)]
+    (and enabled? (number? window) (pos? window) (number? observed)
+         (<= (* (double window) threshold) (double observed)))))
 
 (defn- message-entry? [entry]
   (= :message (:kind entry)))

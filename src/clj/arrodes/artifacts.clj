@@ -448,6 +448,22 @@
             (query connection "SELECT descriptor FROM results WHERE session_id=? ORDER BY id"
                    [sid] #(.getString ^ResultSet % "descriptor"))))))
 
+(defn result-page
+  "Page descriptors newest first with a stable before-id cursor."
+  [store sid {:keys [before-id limit] :or {before-id Long/MAX_VALUE limit 20}}]
+  (value/check! (and (integer? before-id) (pos? before-id)
+                     (integer? limit) (<= 1 limit 100))
+                :invalid-arguments "results expects a positive before-id and limit 1..100" {})
+  (store/store-read store
+    (fn [connection]
+      (authorize-session! connection sid)
+      (let [rows (mapv #(with-actual-result-availability store connection (decode %))
+                       (query connection
+                              "SELECT descriptor FROM results WHERE session_id=? AND id<? ORDER BY id DESC LIMIT ?"
+                              [sid before-id (inc limit)] #(.getString ^ResultSet % "descriptor")))
+            items (vec (take limit rows))]
+        {:items items :next-before-id (when (> (count rows) limit) (:id (peek items)))}))))
+
 (defn release-live-results!
   "Marks a session's live-only result descriptors unavailable when its live registry closes."
   [store sid]

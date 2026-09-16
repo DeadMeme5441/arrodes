@@ -31,7 +31,13 @@
       (refresh-project! app))
     (swap! (:state app)
            (fn [state]
-             (let [{:keys [session-id] :as hydrating} (:hydrating state)
+             (let [state (if (= :session/named (:type event))
+                           (update state :sessions
+                                   #(mapv (fn [session]
+                                            (if (= (:session-id event) (:id session))
+                                              (assoc session :name (get-in event [:data :name])) session)) %))
+                           state)
+                   {:keys [session-id] :as hydrating} (:hydrating state)
                    active-sid (client/session-id-from state)]
                (cond
                  (and hydrating (client/same-session? event session-id))
@@ -377,7 +383,8 @@
 
       :rename-session
       (if (and (nil? sid) (nil? (:id data)))
-        (do (swap! (:state app) assoc-in [:view :session :name] (:name data))
+        (do (swap! (:state app) #(-> % (assoc-in [:view :session :name] (:name data))
+                                     (assoc-in [:view :session :metadata :title/source] :user)))
             (client/resolved (get-in @(:state app) [:view :session])))
       (let [target (or (:id data) sid)]
         (-> (client/mutation! app "session.name" {:session-id target :name (:name data)})

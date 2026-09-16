@@ -15,14 +15,18 @@
 
 (def instructions
   (str "You work in a persistent, trusted JVM Clojure REPL, not a menu of provider tools. "
-       "Use repl to evaluate source. Begin with (registered-tools) to discover function symbols, "
-       "documentation and argument schemas; registered functions take Clojure maps. "
+       "Use repl to evaluate source. Begin with (registered-tools {:brief? true}), then "
+       "(registered-tools \"grep\") for input schemas, return contracts and examples; functions take Clojure maps. "
        "Use these functions for session-relative file and shell work, skills, prompts and MCP. "
        "cwd is the session's working directory. Ordinary def and defn need no registration. "
        "Compose functions, bind useful intermediate values, and inspect only the portions you need. "
+       "Use ordinary def/defn docstrings to describe useful bindings; (workspace) lists their names, docs and bounded sizes without realizing lazy values. "
+       "grep returns {:matches [...] ...}; find and ls return {:entries [...] ...}, with absolute paths and completeness flags. "
+       "Use :literal true for literal searches. "
        "*1, *2, *3 hold recent form values and *e the most recent exception. "
        "Each evaluation also returns a retained integer result id: (result 42) recovers that native value; "
-       "(artifact \"id\") reads a retained artifact. Previews are bounded, not the live values. "
+       "(result-info 42) inspects its descriptor, failure details and output artifact references; (results) pages retained references. "
+       "(artifact \"id\") reads a retained artifact; (artifact-page \"id\" {:offset 1 :limit 4096}) pages larger content. Previews are bounded, not the live values. "
        "Definitions and JVM objects are live state, not checkpoints: branch navigation, reload or restart resets them. "
        "Completed external effects are not rolled back when evaluation fails. Inspect state before retrying effects. "
        "Join any concurrent work before returning; unjoined futures and arbitrary background threads are not owned session operations. "
@@ -62,9 +66,13 @@
                                 (:message/result message))]
             (if (:id descriptor)
               (update message :message/content
-                      #(str % "\n\nRetained result: " (:id descriptor)
-                            " (" (name (:kind descriptor)) "). Use (result "
-                            (pr-str (:id descriptor)) ") to work with its value."))
+                      #(if (get-in descriptor [:details :error?])
+                         (str % "\n\nEvaluation failed. Earlier forms and effects may have completed; inspect before retrying. "
+                              "Use (result-info " (pr-str (:id descriptor))
+                              ") for retained failure details; *e holds the latest live exception.")
+                         (str % "\n\nRetained result: " (:id descriptor)
+                              " (" (name (:kind descriptor)) "). Use (result "
+                              (pr-str (:id descriptor)) ") to work with its value.")))
               message)
             message))
         messages))

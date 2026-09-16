@@ -45,7 +45,7 @@
                "Capability registry is closed" {:session-id (:session-id registry)}))
 (defn- public-descriptor [descriptor]
   (cond-> (select-keys descriptor
-                       [:name :description :parameters :execution :permission :owner])
+                       [:name :description :parameters :returns :examples :execution :permission :owner])
     (fn? (:permission descriptor)) (assoc :permission :custom)))
 
 (defn- schema-get [schema key]
@@ -178,7 +178,9 @@
                    ([arguments] (invoke-value! registry name arguments)))]
     (when (ns-resolve ns-object symbol) (ns-unmap ns-object symbol))
     (intern ns-object
-            (with-meta symbol {:doc (str "Invoke registered capability " name " through the shared pipeline.")
+            (with-meta symbol {:doc (:description (get @(:capabilities registry) name))
+                               :arglists '([arguments])
+                               :returns (:returns (get @(:capabilities registry) name))
                                :capability/name name
                                :capability/wrapper-function function})
             function)
@@ -896,12 +898,20 @@
                     :evaluation-lock (ReentrantLock. true) :repl-history (atom {})
                     :resources (atom []) :closed? (atom false)})
         current-context (fn [] (or *invocation-context* {}))
-        callbacks {:namespace namespace :current-context current-context
+        callbacks {:namespace namespace :generation (:generation registry) :current-context current-context
                    :register! #(register! registry %)
                    :registered-implementation #(some-> (get @(:capabilities registry) %) :fn)
                    :invoke-value! #(invoke-value! registry %1 %2)
                    :registered-tools #(selected-catalog registry)
                    :result-value #(result-value registry %)
+                   :result-info #(dissoc (artifacts/result store session-id %) :value)
+                   :result-page (fn [opts]
+                                  (update (artifacts/result-page store session-id opts) :items
+                                          (fn [items]
+                                            (mapv (fn [item]
+                                                    (merge (select-keys item [:id :kind :available? :artifact-id])
+                                                           (select-keys (:details item) [:call-id :error?]))) items))))
+                   :artifact-page #(artifacts/read! store session-id %1 %2)
                    :artifact-value #(artifact-value registry %)}]
     (try
       (intern ns-object 'cwd (:cwd registry))

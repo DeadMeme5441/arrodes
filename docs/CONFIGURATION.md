@@ -93,6 +93,14 @@ Supported session-default fields are:
 
 `provider-retries` is bounded to five retries at runtime. A false `:fallback-model?` prevents silent model substitution.
 
+Automatic session naming is enabled by default. Set `:auto-title? false` to disable
+both the initial local name and background title generation. `:title-model` selects
+the exact model ID for naming; `:title-provider` optionally selects another
+configured provider. Without overrides, naming uses the session's provider/model
+in a separate tool-free request with a 1,024-output-token cap and no requested
+reasoning. Only an excerpt of the first message is sent. These settings are also
+accepted under a session configuration's `:settings` map.
+
 The older nested maps `:session-defaults`, `:session`, and `:session-config` are still read when opening existing configuration. Setup writes canonical top-level defaults and removes overlapping values from those nested maps.
 
 ### Updating settings over RPC

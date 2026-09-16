@@ -326,13 +326,29 @@ process.stdin.on('data', chunk => {
     (answer-initialization! fresh)
     (answer-initialization! resumed)
     (-> (app/close! previous)
-        (.then (fn [_] (app/start! fresh)))
         (.then (fn [_]
+                 (let [startup (app/start! fresh)]
+                   ;; /sessions opens its screen immediately, while its RPC waits
+                   ;; for startup. Finishing boot must not dismiss that screen.
+                   (swap! (:state fresh) update :ui assoc
+                          :overlay {:kind :sessions :token "early-sessions" :query ""}
+                          :draft "Typed while starting")
+                   (js/Promise.all #js [startup (app/command! fresh :sessions)]))))
+        (.then (fn [_]
+                 (check! (= "early-sessions" (get-in @(:state fresh) [:ui :overlay :token]))
+                         "Finishing startup must preserve the first sessions screen")
+                 (check! (= "Typed while starting" (get-in @(:state fresh) [:ui :draft]))
+                         "Finishing startup must preserve input already entered")
                  (reset! fresh-id (get-in @(:state fresh) [:view :session :id]))
                  (check! (nil? @fresh-id) "Normal startup must not create a session")
                  (check! (some #(= old-id (:id %)) (:sessions @(:state fresh))) "Fresh startup must retain older sessions")
                  (let [before (count (:sessions @(:state fresh)))]
                    (-> (app/command! fresh :new-session {})
+                       (.then (fn [_]
+                                (check! (nil? (get-in @(:state fresh) [:ui :overlay]))
+                                        "Explicit New must still dismiss the previous screen")
+                                (check! (= "" (get-in @(:state fresh) [:ui :draft]))
+                                        "Explicit New must still start an empty composer")))
                        (.then (fn [_] (app/command! fresh :sessions)))
                        (.then (fn [sessions]
                                 (check! (= before (count sessions)) "New must not persist an empty session")

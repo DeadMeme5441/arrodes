@@ -8,7 +8,7 @@
 ;; before entering the compiler's CommonJS output.
 (def core (or (aget js/globalThis "ARRODES_OPENTUI")
               (throw (js/Error. "Launch Arrodes through scripts/tui.ts to initialize OpenTUI"))))
-(def layout {:gutter 2 :section-gap 1 :sidebar-width 28})
+(def layout {:gutter 2 :section-gap 1 :region-gap 1 :sidebar-width 28})
 
 (def color palette/color)
 (def paint! palette/paint!)

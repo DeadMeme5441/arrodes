@@ -344,7 +344,7 @@
     (try
       (let [mcp-client
             (client/make-client
-             {:info (entity-support/make-info "Arrodes" "0.1.3" "Arrodes headless runtime")
+             {:info (entity-support/make-info "Arrodes" "0.1.4" "Arrodes headless runtime")
               :client-transport transport
               :traffic-logger traffic/nop-traffic-logger
               :print-banner? false
@@ -404,7 +404,8 @@
           (client/cancel-sent-request mcp-client request-id :reason "Arrodes timeout")
           (fail! :mcp/timeout "MCP request timed out"
                  {:server (:name state) :operation operation
-                  :request-id request-id :timeout-ms timeout-ms}))
+                  :request-id request-id :timeout-ms timeout-ms
+                  :outcome (when (= operation "call-tool") :unknown)}))
         (check-cancelled!)
         (client-support/response->result-or-throw! response operation))
       (catch InterruptedException error
@@ -412,7 +413,8 @@
         (.interrupt (Thread/currentThread))
         (fail! :cancelled "MCP request was cancelled"
                {:server (:name state) :operation operation
-                :request-id request-id :cause (ex-message error)}))
+                :request-id request-id :cause (ex-message error)
+                :outcome (when (= operation "call-tool") :unknown)}))
       (catch Throwable error
         (if (u/cancelled? (:cancelled? (current-context)))
           (do
@@ -421,7 +423,7 @@
                  (catch Throwable _ nil))
             (fail! :cancelled "MCP request was cancelled"
                    {:server (:name state) :operation operation
-                    :request-id request-id}))
+                    :request-id request-id :outcome (when (= operation "call-tool") :unknown)}))
           (if (:error/code (ex-data error))
             (throw error)
             (throw (ex-info (str "MCP " operation " failed: "
@@ -430,7 +432,8 @@
                                    {:error/code "mcp/protocol-error"
                                     :server (:name state)
                                     :operation operation
-                                    :request-id request-id})
+                                    :request-id request-id
+                                    :outcome (when (= operation "call-tool") :unknown)})
                             error))))))))
 
 (defn- page-request [kind cursor]
@@ -677,9 +680,14 @@
                 :available (mapv :name (:tools state))}))
       (progress! {:type :mcp/request :server (:name state)
                   :operation :call :name tool-name :status :started})
-      (let [result (request! state "call-tool"
-                             (entity/make-call-tool-request tool-name arguments)
-                             (get-in (:configs pool) [(:name state) :timeout-ms]))]
+      (let [result (try
+                     (request! state "call-tool"
+                               (entity/make-call-tool-request tool-name arguments)
+                               (get-in (:configs pool) [(:name state) :timeout-ms]))
+                     (catch Throwable error
+                       (throw (ex-info (ex-message error)
+                                       (assoc (ex-data error) :server (:name state) :tool tool-name)
+                                       error))))]
         (when (true? (:isError result))
           (let [remote-message (some #(when (= "text" (:type %)) (:text %))
                                      (:content result))]
@@ -687,7 +695,7 @@
                    (str "MCP tool returned an error"
                         (when-not (str/blank? remote-message)
                           (str ": " (bounded-text remote-message))))
-                   {:server (:name state) :tool tool-name :result result})))
+                   {:server (:name state) :tool tool-name :result result :outcome :reported-error})))
         (progress! {:type :mcp/request :server (:name state)
                     :operation :call :name tool-name :status :completed})
         result))))
@@ -744,6 +752,11 @@
   [pool owner]
   {:name "mcp"
    :owner owner
+   :returns
+   {:description "Native decoded MCP data; no parsing of prose. describe returns the server's full tool descriptor, including inputSchema and outputSchema when supplied. call returns the response map with structuredContent and typed content blocks intact. Tool errors throw with the remote result and :outcome :reported-error; transport uncertainty is :outcome :unknown. Inspect result-info for server/tool provenance."
+    :example {:structuredContent {:count 2} :content [{:type "text" :text "2 results"}]}}
+   :examples [{:source "(:outputSchema (mcp {:action \"describe\" :server \"server\" :name \"tool\"}))"}
+              {:source "(:structuredContent (mcp {:action \"call\" :server \"server\" :name \"tool\" :arguments {}}))"}]
    :description
    (str "Discover and use configured Model Context Protocol servers as native Clojure data. "
         "Start with {:action \"catalog\"}; use describe for a tool's complete input schema, "
@@ -780,7 +793,8 @@
          (let [value (invoke! pool arguments)]
            {:value value
             :content (gateway-content action value)
-            :details {:gateway :mcp :action action}}))})
+            :details (merge {:gateway :mcp :action action}
+                            (select-keys arguments [:server :name :uri]))}))})
 
 (defn close!
   "Disconnects all session-owned clients and rejects subsequent operations.

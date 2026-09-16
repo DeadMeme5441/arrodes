@@ -112,7 +112,11 @@
       (throw (client/error "no-session" "Send a first message before evaluating or queueing work." {})))
     (prompt-parts text attachments)
     (swap! (:state app) assoc :first-submit? true)
-    (-> (sessions/create-session! app (select-keys session [:name :config]))
+    (-> (sessions/create-session! app
+          (cond-> (select-keys session [:config])
+            (or (= :user (get-in session [:metadata :title/source]))
+                (not= "Untitled session" (:name session)))
+            (assoc :name (:name session))))
         (.then (fn [session]
                  (reset! created (:id session))
                  (sessions/hydrate-session! app (:id session) false)))
@@ -208,4 +212,3 @@
              (swap! (:state app) update-in [:view :queue]
                     #(filterv (fn [item] (not= id (client/value-field item :id))) %))
              removed))))))
-
