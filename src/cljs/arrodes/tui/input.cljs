@@ -7,6 +7,7 @@
             [arrodes.tui.commands :as commands]
             [arrodes.tui.context :as c]
             [arrodes.tui.inspection :as inspection]
+            [arrodes.tui.jobs :as jobs]
             [arrodes.tui.models :as models]
             [arrodes.tui.screens :as screens]
             [arrodes.tui.transcript :as transcript]))
@@ -135,6 +136,14 @@
                          (str/starts-with? (or (:catalog-operation s) "") "Connecting provider"))
                   (c/fire! view :provider-cancel {})
                   (escape! view)) true)
+            (and (= focus :inspector) (= name "end") (= :output (get-in s [:ui :inspect-tab]))
+                 (:job-id (c/selected-row view)))
+            (do (inspection/latest-job-output! view) true)
+            (and (= :jobs (:kind overlay)) (= name "f5")) (do (jobs/open! view) true)
+            (and (= focus :inspector) (= name "f5") (:job-id (c/selected-row view)))
+            (do (inspection/request-inspection! view (c/selected-row view)) true)
+            (and (= focus :inspector) ctrl (= name "k") (:job-id (c/selected-row view)))
+            (do (inspection/cancel-job! view) true)
             (= name "f1") (do ((:choose (some #(when (= "Keyboard help" (:label %)) %) (commands/commands view)))) true)
             (= name "f2") (do (screens/open-sessions! view) true)
             (or (= name "f3") (and ctrl (= name "p")))

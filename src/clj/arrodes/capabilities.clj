@@ -678,7 +678,7 @@
   (let [event {:session-id (:session-id registry) :operation-id (:operation-id context)
                :type type :time (util/now) :durable? true
                :data (merge {:call-id (:call-id context)
-                             :parent-call-id (:parent-call-id context)}
+                             :parent-call-id (:parent-call-id context) :job-id (:job-id context)}
                             data)}
         committed (or ((:emit! registry) event) event)]
     (when-let [callback (:on-event context)]
@@ -697,6 +697,16 @@
         descriptor (result-descriptor! registry call-id (:value complete) (:content complete)
                                        (:details complete) (:error? complete))]
     (assoc complete :result descriptor)))
+
+(defn retain-job-result!
+  "Retain a background function's native value through the ordinary result contract."
+  [registry id native-value error]
+  (ensure-open! registry)
+  (when (instance? AutoCloseable native-value)
+    (swap! (:resources registry) conj {:owner "arrodes.jobs" :value native-value}))
+  (:result (retain! registry id nil
+             {:value native-value :content (if error (or (ex-message error) "Job failed") "Background job result")
+              :error? (boolean error) :details (if error (value/error-map error) {})})))
 
 (defn evaluate!
   "Evaluate source as a session operation, not as a registered capability.
@@ -871,7 +881,7 @@
 
 (defn create!
   "Create a session's functions, evaluation state, and result/artifact helpers."
-  [{:keys [session-id cwd store config emit! get-session]}]
+  [{:keys [session-id cwd store config emit! get-session job-manager]}]
   (value/check! (and (string? session-id) (not (str/blank? session-id))) :invalid-session-id
                "Capability registry requires a session id" {})
   (value/check! (and (string? cwd) (not (str/blank? cwd))) :invalid-cwd
@@ -886,7 +896,7 @@
         _ (binding [*ns* ns-object] (clojure.core/refer 'clojure.core))
         registry (map->Registry
                    {:session-id session-id :cwd (util/canonical-path cwd) :store store
-                    :config (or config {})
+                    :config (or config {}) :job-manager job-manager
                     :emit! (if emit! (bound-fn [event] (emit! event)) identity)
                     :get-session (or get-session (fn [] nil)) :namespace namespace :namespace-object ns-object
                     :generation (util/id)

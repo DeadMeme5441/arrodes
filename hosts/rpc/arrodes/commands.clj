@@ -7,6 +7,7 @@
             [arrodes.provider :as provider]
             [arrodes.resources :as resources]
             [arrodes.runtime :as runtime]
+            [arrodes.jobs :as jobs]
             [arrodes.setup :as setup]
             [arrodes.platform :as u]
             [arrodes.value :as value]
@@ -16,7 +17,7 @@
             [clojure.string :as str])
   (:import (java.util.concurrent TimeUnit)))
 
-(def version "0.1.4")
+(def version "0.1.5")
 (def protocol-version 1)
 (def methods
   ["runtime.inspect" "session.list" "session.create" "session.inspect" "session.state"
@@ -26,6 +27,7 @@
    "session.follow-up" "session.cancel" "session.queue" "session.queue.update"
    "session.queue.drop" "session.reload" "session.evaluate" "session.invoke"
    "session.command" "session.export" "session.import" "session.share"
+   "job.list" "job.inspect" "job.wait" "job.cancel" "job.output"
    "operation.list" "operation.inspect"
    "operation.wait" "operation.cancel" "operation.steer" "operation.follow-up"
    "capability.list" "capability.set" "capability.attach" "capability.detach"
@@ -263,6 +265,13 @@
                        (let [text (if (:path params) (import-file (:path params)) (:content params))]
                          (runtime/import! rt (import-content text) (select-keys params [:cwd :name]))))
     "session.share" (share! rt params)
+    "job.list" (jobs/snapshot (:jobs rt) (sid params) (select-keys params [:limit :before]))
+    "job.inspect" (jobs/inspect-job (:jobs rt) (sid params) (required-string params :job-id))
+    "job.wait" (jobs/await-job (:jobs rt) (sid params) (required-string params :job-id)
+                              (positive-int (:timeout-ms params) :timeout-ms 1000 300000))
+    "job.cancel" (jobs/cancel-job! (:jobs rt) (sid params) (required-string params :job-id))
+    "job.output" (jobs/output-job (:jobs rt) (sid params) (required-string params :job-id)
+                                 (select-keys params [:offset :limit :after :tail?]))
     "operation.list" {:operations (runtime/operations rt params)}
     "operation.inspect" (runtime/operation rt (oid params))
     "operation.wait" (runtime/wait! rt (oid params) (positive-int (:timeout-ms params) :timeout-ms 30000 300000))

@@ -11,6 +11,7 @@
             [arrodes.tui.inspection :as inspection]
             [arrodes.tui.models :as models]
             [arrodes.tui.screens :as screens]
+            [arrodes.tui.jobs :as jobs]
             [arrodes.tui.transcript :as transcript]
             [arrodes.tui.themes :as themes]
             [arrodes.tui.theme-picker :as theme-picker]
@@ -26,6 +27,9 @@
         (swap! (:local view) assoc :rendered-session session-id :anchor nil :inspector-signature nil
                :restore-scroll (get-in (c/state view) [:ui :scroll-top] 0)))
       (theme-picker/sync! view)
+      ;; Re-enable follow intent at the old bottom before Markdown grows. Otherwise
+      ;; remembering a paused anchor can undo native sticky scrolling this frame.
+      (when-not switching? (transcript/resume-follow! view))
       (chrome/render-chrome! view)
       (transcript/render-rows! view)
       (chrome/render-welcome! view)
@@ -50,6 +54,7 @@
 
 
 (defn frame! [view]
+  (inspection/frame! view)
   (when (and (not @(:closed? view)) (.-visible (:modal-sidebar view)))
     (when-let [id (:sidebar-choice @(:local view))]
       (when-let [row (.findDescendantById (:modal-sidebar view) id)]
@@ -94,7 +99,7 @@
   (when (and (not @(:closed? view)) (.-visible (:conversation view))
              (= (get-in (c/state view) [:view :session :id])
                 (:rendered-session @(:local view))))
-    (let [scroll (:transcript view) renderer (:renderer view)]
+    (let [scroll (:transcript view)]
       (when-some [position (:restore-scroll @(:local view))]
         (swap! (:local view) dissoc :restore-scroll)
         (.scrollTo scroll (if (get-in (c/state view) [:ui :follow?] true)
@@ -105,15 +110,8 @@
         (when-let [record (get @(:records view) id)]
           (let [delta (- (.-screenY (:root record)) (.-screenY (.-viewport scroll)) offset)]
             (when (not (zero? delta)) (.scrollBy scroll delta)))))
-      ;; Native sticky scrolling owns following new content during layout.
-      ;; A second post-paint scroll correction introduces a visible extra step.
-      ;; Wheel/scrollbar movement can reach the end without using Jump to latest.
-      ;; Reconcile after native scrolling and layout, never from pre-scroll bounds.
-      (when (and (not (get-in (c/state view) [:ui :follow?] true))
-                 (transcript/transcript-at-bottom? view) (not (.-hasSelection renderer)))
-        (swap! (:local view) assoc :anchor nil)
-        (set! (.-stickyScroll scroll) true)
-        (c/ui! view assoc :follow? true))
+      ;; Native scrolling/layout may reach the bottom without an app refresh.
+      (transcript/resume-follow! view)
       (swap! (:local view) dissoc :manual-scroll?)
       (let [position (.-scrollTop scroll)]
         (when (not= position (get-in (c/state view) [:ui :scroll-top]))
@@ -143,7 +141,6 @@
                                           :onMouseScroll (fn [_]
                                                            (when-let [view @view-ref]
                                                              (swap! (:local view) assoc :anchor nil :manual-scroll? true)
-                                                             (set! (.-stickyScroll (:transcript view)) false)
                                                              (c/ui! view assoc :follow? false)))})
         welcome (w/box renderer {:id "welcome" :width "100%" :paddingX 2 :paddingTop 1})
         welcome-title (w/text renderer "ARRODES" {:height 1 :fg :ui/accent})
@@ -170,20 +167,11 @@
         inspector-output (w/text renderer "" {:width "100%"})
         inspector-actions (w/box renderer {:width "100%" :flexDirection "row" :height 2 :marginTop 1})
         inspector-copy (w/button renderer "[Copy]" (fn [] (c/copy! @view-ref (or (:inspector-text @local) ""))) {:width 8})
-        inspector-prev (w/button renderer "[Prev]"
-                                 (fn []
-                                   (let [s (c/state @view-ref)]
-                                     (inspection/load-artifact-page! @view-ref
-                                                          (get-in s [:ui :inspection :descriptor :artifact-id])
-                                                          (max 1 (- (get-in s [:ui :inspection :page :offset] 1) 12000)))))
-                                 {:width 8 :visible false})
-        inspector-next (w/button renderer "[Next page]"
-                                 (fn []
-                                   (let [s (c/state @view-ref)]
-                                     (inspection/load-artifact-page! @view-ref
-                                                          (get-in s [:ui :inspection :descriptor :artifact-id])
-                                                          (get-in s [:ui :inspection :page :next-offset]))))
-                                 {:width 13 :visible false})
+        inspector-prev (w/button renderer "[Prev]" #(inspection/page! @view-ref :prev) {:width 8 :visible false})
+        inspector-next (w/button renderer "[Next page]" #(inspection/page! @view-ref :next) {:width 13 :visible false})
+        inspector-job-cancel (w/button renderer "[Cancel job]" #(inspection/cancel-job! @view-ref) {:width 14 :visible false})
+        inspector-job-latest (w/button renderer "[Latest]" #(inspection/latest-job-output! @view-ref) {:width 10 :visible false})
+        inspector-job-refresh (w/button renderer "[Refresh]" #(inspection/request-inspection! @view-ref (c/selected-row @view-ref)) {:width 11 :visible false})
         inspector-branch (w/button renderer "[Branch]" (fn [] (when-let [row (c/selected-row @view-ref)] (inspection/branch! @view-ref row)))
                                    {:width 9 :visible false})
         inspector-lifetime (w/text renderer "" {:fg :text/dim :width "100%" :maxHeight 3 :marginBottom 1})
@@ -322,6 +310,7 @@
                         :inspect! inspection/inspect!
                         :open-files! screens/open-files!
                         :open-history! screens/open-history!
+                        :open-jobs! jobs/open!
                         :open-models! models/open-models!
                         :open-overlay! screens/open-overlay!
                         :open-providers! models/open-providers!
@@ -339,7 +328,7 @@
               :metadata metadata :project-status project-status :command-menu command-menu :spacer spacer
               :inspector inspector :inspector-title inspector-title :inspector-tabs inspector-tabs
               :inspector-scroll inspector-scroll :inspector-output inspector-output :inspector-next inspector-next
-              :inspector-prev inspector-prev
+              :inspector-prev inspector-prev :inspector-job-cancel inspector-job-cancel :inspector-job-refresh inspector-job-refresh :inspector-job-latest inspector-job-latest
               :inspector-branch inspector-branch :inspector-lifetime inspector-lifetime
               :pending pending :pending-items pending-items :pending-more pending-more :new-activity new-activity
               :widget-box widget-box :widget-items widget-items
@@ -360,7 +349,7 @@
     (w/add! inspector-header inspector-title inspector-close)
     (doseq [tab [:summary :output :value :code]] (.add inspector-tab-row (get inspector-tabs tab)))
     (w/add! inspector-scroll inspector-output)
-    (w/add! inspector-actions inspector-copy inspector-prev inspector-next inspector-branch)
+    (w/add! inspector-actions inspector-copy inspector-prev inspector-next inspector-branch inspector-job-refresh inspector-job-latest inspector-job-cancel)
     (w/add! inspector inspector-header inspector-tab-row inspector-scroll inspector-actions inspector-lifetime)
     (w/add! body conversation inspector)
     (w/add! pending pending-title pending-items pending-more)

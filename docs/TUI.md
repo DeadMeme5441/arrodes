@@ -38,3 +38,17 @@ the widget layer. Ordinary conversation remains readable and execution remains i
 
 The current visual system is documented in [TUI design](TUI_DESIGN.md). The
 [TUI skill](../.agents/skills/arrodes-tui/SKILL.md) describes the implementation workflow.
+
+## Jobs
+
+`/jobs` uses the full-terminal browser to list session-owned background work.
+Enter opens the existing full-width execution inspector directly. F5 refreshes; an
+older-page entry supports paging. Output
+uses the inspector's page controls; native values use the usual Value tab. Job events
+update status independently of foreground work, and the idle footer counts active jobs.
+Escape closes job inspection before foreground cancellation. Cancelling a job preserves
+the composer draft. Completed jobs and retained results remain inspectable after reconnect.
+
+Jobs appear inline with other execution artifacts; neither launch nor completion
+opens a popup. The inspector supplies F5 refresh, End/Latest for the retained output tail, and
+Ctrl+K cancellation. Refresh preserves the current page or tail view.

@@ -112,6 +112,7 @@
    :activity-order []
    :presentations []
    :streams {:operation-id nil :content "" :reasoning ""}
+   :jobs []
    :queue []
    :operation nil
    :cursor 0})
@@ -210,6 +211,26 @@
            model)))
      model entries)))
 
+(defn job-row
+  "Project a job using the same execution row and inspector as other activity."
+  [job]
+  {:kind :activity :id (str "activity:" (:id job)) :job-id (:id job)
+   :activity {:id (:id job) :kind :job :name (:name job) :status (:status job)
+              :parent-id (or (:parent-job-id job) (get-in job [:origin :evaluation-id]))
+              :started-at (:created-at job) :details (:error job)
+              :result (or (:result job) (when-let [id (:result-id job)] {:id id}))
+              :content (or (get-in job [:error :message]) "")}})
+
+(defn- upsert-job [model job event]
+  (let [prior (get-in model [:activities (:id job)])
+        activity (merge prior (:activity (job-row job)))
+        activity (cond-> activity
+                   prior (assoc :content (if (:error job) (get-in job [:error :message]) (:content prior)))
+                   (nil? prior) (assoc :start-seq (:seq event)))]
+    (-> model
+        (update :jobs replace-by-id job)
+        (put-activity activity))))
+
 (defn hydrate
   "Combine an atomic branch snapshot with its historical activity ledger.
   Past entry/queue/operation mutations cannot overwrite the snapshot; later
@@ -222,7 +243,7 @@
         cursor (or (:cursor snapshot) (:event-seq state) (:event-seq snapshot) 0)
         events (mapv decode-wire (or events []))
         past? #(and (number? (:seq %)) (<= (:seq %) cursor))
-        ledger-types #{:evaluation/started :evaluation/completed
+        ledger-types #{:job/changed :evaluation/started :evaluation/completed
                        :capability/started :capability/completed
                        :operation/started :operation/cancelling :operation/completed
                        :operation/failed :operation/cancelled :operation/interrupted
@@ -245,11 +266,14 @@
                       prior-operation))
         model (assoc history
                      :session session :entries (active-entries session entries)
+                     :jobs (vec (or (:jobs state) []))
                      :queue (vec (or (:queue state) (:queues state) (:queue snapshot) []))
                      :operation operation :phase (or (:phase state) :idle)
                      :cursor cursor :snapshot-cursor cursor
                      :streams {:operation-id (:operation-id state) :content "" :reasoning ""})]
-    (reduce apply-event (seed-recorded-activities model) (remove past? events))))
+    (reduce apply-event
+            (reduce #(upsert-job %1 %2 {}) (seed-recorded-activities model) (:jobs state))
+            (remove past? events))))
 
 (defn- put-activity [model activity]
   (let [id (:id activity)
@@ -494,6 +518,8 @@
               :entry/committed
               (if-let [entry (:entry data)] (insert-entry model entry) model)
 
+              :job/changed (upsert-job model (:job data) event)
+              :job/output (append-progress model (assoc event :data {:call-id (:job-id data) :content (:content data)}))
               :evaluation/started (start-activity model event :evaluation)
               :evaluation/completed (complete-activity model event :evaluation)
               :capability/started (start-activity model event :capability)
@@ -549,9 +575,10 @@
         path (field arguments :path)
         name (:name activity)]
     (safe-text
-     (if (= :evaluation (:kind activity))
-       "Execution"
-       (case name
+     (cond
+       (= :evaluation (:kind activity)) "Execution"
+       (= :job (:kind activity)) (str "Job · " name)
+       :else (case name
          "read" (str "Read " path)
          "write" (str "Write " path)
          "edit" (str "Edit " path)
@@ -608,9 +635,11 @@
                         {:rows (into rows (:rows child-result))
                          :seen (:seen child-result)}))
                     {:rows [] :seen seen} children)
-            row {:kind :activity :id (str "activity:" id) :activity activity}
+            row (cond-> {:kind :activity :id (str "activity:" id) :activity activity}
+                  (= :job (:kind activity)) (assoc :job-id id))
             evaluation-wrapper? (and (= :evaluation (:kind activity)) (seq children))
             output-rows (cond
+                          (= :job (:kind activity)) [row]
                           (and evaluation-wrapper? (= :completed (:status activity)))
                           (:rows projected)
 
@@ -639,7 +668,8 @@
   (let [data (:data entry)]
     (case (:kind entry)
       :message (message-rows entry data)
-      :custom-context (message-rows entry (or (:message data) data))
+      :custom-context (message-rows entry (cond-> (or (:message data) data)
+                                           (:message/job-id data) (assoc :message/role :tool)))
       :evaluation
       (if-let [content (get-in data [:result :content])]
         [{:kind :message :id (str "message:" (:id entry)) :role :tool
@@ -658,7 +688,8 @@
         tool-result-id (when (and (= :message (:kind entry))
                                   (= :tool (:message/role data)))
                          (:message/tool-call-id data))
-        base-rows (if (or (and tool-result-id (contains? (:activities model) tool-result-id))
+        base-rows (if (or (and (:message/job-id data) (contains? (:activities model) (:message/job-id data)))
+                          (and tool-result-id (contains? (:activities model) tool-result-id))
                           (and (contains? #{:evaluation :custom} (:kind entry))
                                (some #(contains? (:activities model) %) activity-ids)))
                     []

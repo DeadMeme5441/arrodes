@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.5
+
+- Add session-owned background Clojure jobs with independent cancellation/output, owned child cleanup, retained native results, paged logs, and once-only completion delivery at model boundaries. Restart records interrupted work without replaying effects.
+- Render jobs inline with existing execution artifacts, use the full-terminal `/jobs` browser and existing inspector, and add `job.*` RPC controls. Jobs survive foreground turns; evaluator teardown cancels and awaits them.
+- Return compact REPL job statuses by default, with `:detailed? true` for full provenance and diagnostics; native job result values remain unchanged.
+- Classify requested job cancellation consistently as cancelled and retain the original interruption as a diagnostic cause.
+- Add independent, reusable job-output cursors and retained-tail reads, including after restart. The existing inspector supports End/Latest and preserves its page or tail on refresh.
+- Resume automatic following when scrolling back to the bottom during a streamed reply, including when new text arrives before the next frame.
+- Require current SQLite schema 3 and current home layout. Fresh stores initialize directly; incompatible stores/layouts are rejected without migration, conversion, or deletion. Remove older job-record fallbacks. Job ownership is not copied by fork/import.
+
 ## 0.1.4
 
 - Show compaction progress separately from assistant replies and recover once from explicit context-limit rejections without replaying completed REPL effects.

@@ -2,6 +2,7 @@
   "TUI regression entry point: real RPC lifecycle followed by native screen rendering."
   (:require [arrodes.tui-app :as app]
             [arrodes.tui-app-test :as app-test]
+            [arrodes.jobs-ui-test :as jobs-ui]
             [arrodes.catalog-flow-test :as catalog-flow]
             [arrodes.tui-model :as model]
             [arrodes.tui-view :as view]
@@ -631,6 +632,51 @@
                          "Non-scrollable content must not leave follow mode")))
         (.then (fn [_] (println "Wheel following passed: pause, incoming activity, manual bottom return, repeated wheel and short content."))))))
 
+(defn- streaming-follow-resume! [application mounted terminal]
+  (let [scroll (node terminal "conversation")
+        bottom #(max 0 (- (.-scrollHeight scroll) (.-height (.-viewport scroll))))
+        at-bottom? #(<= (js/Math.abs (- (.-scrollTop scroll) (bottom))) 0.5)
+        append! (fn [text]
+                  (swap! (:state application) update-in [:view :streams :content] str text)
+                  (view/refresh! mounted))]
+    (.resize terminal 100 28)
+    (swap! (:state application)
+           #(-> %
+                (assoc :notice nil :widgets-by-session {}
+                       :view (assoc (model/empty-state)
+                                    :session {:id "stream-follow" :cwd "/project"}
+                                    :operation {:id "stream-follow-op" :status :running}
+                                    :streams {:operation-id "stream-follow-op" :reasoning ""
+                                              :content (str/join "\n\n" (map (fn [n] (str "Streaming paragraph " n)) (range 60)))}))
+                (update :ui assoc :overlay nil :inspector? false :follow? true :draft "")))
+    (view/refresh! mounted)
+    (-> (until! terminal #(and (at-bottom?) (> (.-scrollHeight scroll) 40)) "Streaming reply must initially follow")
+        (.then (fn [_]
+                 (.scroll (.-mockMouse terminal) (+ 8 (.-screenX scroll)) (+ 3 (.-screenY scroll)) "up" #js {:delayMs 10})))
+        (.then (fn [_]
+                 (until! terminal #(and (not (at-bottom?)) (not (get-in @(:state application) [:ui :follow?])))
+                         "Scrolling up during a reply must pause following")))
+        (.then (fn [_]
+                 (append! "\n\nContent arriving while reading earlier paragraphs.")
+                 (until! terminal #(and (not (at-bottom?)) (.-visible (node terminal "jump-to-latest")))
+                         "Streaming must preserve the reader's position")))
+        (.then (fn [_]
+                 ;; Returning the native scrollbar to its end and a model delta can
+                 ;; happen before the next frame reconciles application follow state.
+                 (.scrollTo scroll (bottom))
+                 (append! "\n\nFIRST DELTA AFTER RETURN\n\nA second newly wrapped paragraph.")))
+        (.then (fn [_]
+                 (until! terminal #(and (at-bottom?) (get-in @(:state application) [:ui :follow?])
+                                        (str/includes? (.captureCharFrame terminal) "FIRST DELTA AFTER RETURN"))
+                         "Returning to latest must follow a delta arriving in the same frame")))
+        (.then (fn [_]
+                 (append! "\n\nSECOND DELTA AFTER RETURN\n\nAnd more streaming content.")))
+        (.then (fn [_]
+                 (until! terminal #(and (at-bottom?) (not (.-visible (node terminal "jump-to-latest")))
+                                        (str/includes? (.captureCharFrame terminal) "SECOND DELTA AFTER RETURN"))
+                         "Following must stay enabled for subsequent deltas")))
+        (.then (fn [_] (println "Streaming follow passed: scroll-away holds position; same-frame bottom return resumes and keeps following."))))))
+
 (defn- footer-and-feedback! [application terminal]
   (let [pause #(js/Promise. (fn [resolve] (js/setTimeout resolve 3650)))
         routine {:kind :info :message "Model applied here and saved as default."}]
@@ -934,6 +980,7 @@
         (.then (fn [_] (composer-interactions! application terminal)))
         (.then (fn [_] (footer-and-feedback! application terminal)))
         (.then (fn [_] (wheel-follow! application terminal)))
+        (.then (fn [_] (streaming-follow-resume! application mounted terminal)))
         (.then (fn [_] (compaction-and-titles! application terminal)))
         (.then (fn [_] (streaming-layout! application mounted terminal)))
         (.then (fn [_] (sessions-loading! application mounted terminal)))
@@ -949,7 +996,9 @@
   (aset js/globalThis "ARRODES_TUI_TEST_DONE"
         (-> (if (aget (.-env js/process) "ARRODES_TUI_VISUAL_ONLY")
               (js/Promise.resolve nil)
-              (-> (catalog-flow/exercise!) (.then (fn [] (app-test/exercise!)))))
+              (-> (catalog-flow/exercise!)
+                  (.then (fn [] (app-test/exercise!)))
+                  (.then (fn [] (jobs-ui/exercise!)))))
             (.then (fn []
                      ((aget js/globalThis "ARRODES_CREATE_TEST_RENDERER")
                       #js {:width 120 :height 40 :kittyKeyboard true :consoleMode "disabled"})))

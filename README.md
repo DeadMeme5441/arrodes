@@ -141,6 +141,7 @@ Arrodes keeps one live evaluator per session. Function calls appear compactly in
 | `/sessions` | Switch sessions |
 | `/history` | Inspect history and create a branch |
 | `/refresh` | Reconcile recorded session state without repeating a mutation |
+| `/jobs` | Inspect and cancel background function jobs; read output and native results |
 | `/pending` | Edit or drop queued input |
 | `/attach`, `/attachments` | Add or remove project-file context |
 | `/providers`, `/setup`, `/login` | Manage provider connections and sign-in |
@@ -215,7 +216,7 @@ Trust allows project instructions and executable resources to load; it is not an
 
 Nothing is shared automatically. The RPC `session.share` method explicitly creates an **unlisted GitHub gist**; anyone with its URL can read it.
 
-See [Configuration and project state](docs/CONFIGURATION.md) and [Troubleshooting](docs/TROUBLESHOOTING.md) for migration, ownership, and recovery details.
+See [Configuration and project state](docs/CONFIGURATION.md) and [Troubleshooting](docs/TROUBLESHOOTING.md) for current-format storage, ownership, and recovery details.
 
 ## Documentation
 

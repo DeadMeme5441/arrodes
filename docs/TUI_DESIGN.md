@@ -31,7 +31,9 @@ interactive region or expanded execution; prose stays on the base surface.
   shows highlighted Clojure source and output. Large output stays bounded
   and inspectable, and native values remain available through the inspector.
   The transcript fills the available vertical space independently of streamed
-  content height. Native sticky scrolling owns following new content; post-paint
+  content height. Returning to the bottom restores follow intent before new text
+  changes the layout; native sticky mode stays enabled to track manual scrolling.
+  Native sticky scrolling owns following new content; post-paint
   height and follow corrections must not create a second visible layout step.
 - The welcome screen offers recent sessions and a compact starting prompt. The same
   multiline editor stays anchored at the terminal bottom, with two quiet metadata rows directly below
@@ -58,3 +60,10 @@ interactive region or expanded execution; prose stays on the base surface.
   separate muted row. Idle status and permanent keyboard hints do not crowd the footer.
 - Routine confirmations appear briefly in the footer and expire after 3.5 seconds.
   Errors and unknown outcomes remain visible; Details appears only for diagnostic data.
+
+- Background jobs use the same inline execution artifacts as other activity, anchored
+  to their launching evaluation and updated in place. They never open popups on start
+  or completion. `/jobs` uses the full-terminal browser pattern; Enter goes directly
+  to the existing full-width inspector without an intermediate action-selection view.
+  Cancellation lives in that inspector (Ctrl+K), with F5 refresh and the normal tabs. End/Latest reads the retained output tail in
+  the same inspector; refreshing preserves that view.

@@ -162,6 +162,18 @@
     (<= (- bottom (.-scrollTop scroll)) 0.5)))
 
 
+(defn resume-follow!
+  "Reconcile manual return to the end before new content changes the scroll bounds.
+  Native sticky scrolling owns the actual movement during layout."
+  [view]
+  (when (and (.-visible (:conversation view))
+             (not (contains? @(:local view) :restore-scroll))
+             (not (get-in (c/state view) [:ui :follow?] true))
+             (transcript-at-bottom? view)
+             (not (.-hasSelection (:renderer view))))
+    (swap! (:local view) assoc :anchor nil)
+    (c/ui! view assoc :follow? true)))
+
 (defn follow! [view]
   (swap! (:local view) assoc :anchor nil)
   (c/ui! view assoc :follow? true)

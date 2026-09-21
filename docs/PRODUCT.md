@@ -7,6 +7,7 @@ be able to work conversationally and inspect execution when useful.
 
 ## Contracts
 
+- Session-owned function jobs outlive their launching turn and retain inspectable outcomes.
 - One live evaluator per session; native values and definitions survive normal turns.
 - Durable history, operations, queues and retained results survive process restart.
 - Recovery records interrupted work and never automatically repeats external effects.
@@ -18,7 +19,7 @@ be able to work conversationally and inspect execution when useful.
 ## Deliberate boundaries
 
 The current [scope](../resources/arrodes/scope.edn) excludes generalized workspaces,
-subagents, planning/todo management, background-job management, distributed execution,
+subagents, planning/todo management, process daemons, distributed execution,
 OS sandboxing and JVM checkpointing. Treat changes to these as product decisions,
 not incidental additions to another feature.
 

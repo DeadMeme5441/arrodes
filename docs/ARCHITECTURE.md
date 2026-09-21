@@ -15,6 +15,7 @@ results. The UI combines a consistent snapshot, durable events and transient out
 | --- | --- |
 | Runtime | Store, executor, session handles and foreground-operation admission |
 | Session handle | Evaluator namespace, function registry, provider manager and resource activation |
+| Job service | Session-owned function workers, independent cancellation/output, child cleanup, durable outcomes |
 | Operation | Cancellation, worker lifetime, usage and queued-input delivery boundaries |
 | Registry | Evaluation lock, native results, function wrappers and owned closeable resources |
 | Resource activation | Attributed extension contributions, cleanup and lazy MCP clients |
@@ -55,3 +56,18 @@ Use pure CLJC tests for projections; runtime/store tests for ownership and trans
 RPC process tests for framing, cancellation and reverse host requests; native OpenTUI
 checks for actual rendered behavior. Distributable executables are built at release time;
 try the resulting candidate before publishing it.
+
+## Background work
+
+`jobs.clj` owns admitted function jobs independently of foreground operation admission.
+The job table stores identity, origin, status and retained result/output references;
+worker threads, functions and native objects stay live. Each job receives a fresh
+invocation context and keeps the registry that launched it. Durable changes/events
+publish under the session boundary so hydration cursors remain consistent. Evaluator
+replacement gates foreground admission, blocks new jobs, and waits outside the session
+lock for job cleanup; incomplete cleanup preserves the old registry and store.
+
+Model-step boundaries append completion context and acknowledge those records in one
+transaction. These entries use structured retained descriptors so fork/import can remap
+result IDs. UI inspection does not consume model notifications. No idle model wakeup or
+subagent execution is introduced.

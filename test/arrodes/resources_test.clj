@@ -344,36 +344,14 @@
       (is (not (.exists (io/file outer ".arrodes"))))
       (finally (fixtures/remove-directory! directory)))))
 
-(deftest legacy-home-migration-is-explicit-and-conflict-safe
-  (let [directory (fixtures/temp-directory)
-        home (str directory "/home")
-        cwd (str directory "/project")
-        legacy-settings (str home "/settings.edn")
-        current-settings (str home "/config/settings.edn")]
+(deftest unsupported-home-layout-is-rejected-without-moving-files
+  (let [directory (fixtures/temp-directory) home (str directory "/home")]
     (try
-      (u/ensure-dir! cwd)
-      (u/write-edn! legacy-settings {:legacy true})
-      (u/write-edn! (str home "/trust.edn") {:version 1 :projects {}})
-      (u/write-edn! (str home "/keybindings.edn") {:submit ["enter"]})
-      (spit (doto (io/file home "data" "artifacts" "kept.txt") io/make-parents)
-            "preserved")
-      (u/write-edn! current-settings {:current true})
-      (let [blocked (u/migrate-legacy-home! home cwd)]
-        (is (= :blocked (:status blocked)))
-        (is (= {:legacy true} (u/read-edn legacy-settings)))
-        (is (= {:current true} (u/read-edn current-settings)))
-        (is (= "preserved" (slurp (str home "/data/artifacts/kept.txt")))))
-      (Files/deleteIfExists (u/path current-settings))
-      (let [migrated (u/migrate-legacy-home! home cwd)
-            project-data (str (u/project-dir home cwd) "/data")]
-        (is (= :migrated (:status migrated)))
-        (is (= {:legacy true} (u/read-edn current-settings)))
-        (is (not (.exists (io/file legacy-settings))))
-        (is (= "preserved" (slurp (str home "/data/artifacts/kept.txt"))))
-        (is (not (.exists (io/file project-data))))
-        (let [data-migration (u/migrate-legacy-home! home cwd {:kinds #{:data}})]
-          (is (= :blocked (:status data-migration)))
-          (is (= :explicit-data-dir-required
-                 (:status (first (:conflicts data-migration)))))
-          (is (= "preserved" (slurp (str home "/data/artifacts/kept.txt"))))))
+      (u/write-edn! (str home "/settings.edn") {:old true})
+      (u/write-edn! (str home "/config/settings.edn") {:current true})
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Unsupported application home"
+                           (u/ensure-current-home! home nil)))
+      (is (= {:old true} (u/read-edn (str home "/settings.edn"))))
+      (is (= {:current true} (u/read-edn (str home "/config/settings.edn"))))
+      (is (not (.exists (io/file home "config/migration.edn"))))
       (finally (fixtures/remove-directory! directory)))))

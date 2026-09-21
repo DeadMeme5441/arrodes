@@ -3,6 +3,8 @@
   (:refer-clojure :exclude [run!])
   (:require [clojure.string :as str]
             [arrodes.capabilities :as capabilities]
+            [arrodes.jobs :as jobs]
+            [arrodes.artifacts :as artifacts]
             [arrodes.provider :as provider]
             [arrodes.provider-repl :as repl-wire]
             [arrodes.resources :as resources]
@@ -12,6 +14,8 @@
             [arrodes.platform :as util]
             [arrodes.value :as value])
   (:import (java.util.concurrent ExecutorService Executors RejectedExecutionException TimeUnit)))
+
+(def ^:dynamic *resetting-session* nil)
 
 (defn- ensure-open! [runtime]
   (value/check! (= :open @(:lifecycle runtime)) :runtime-closed
@@ -122,6 +126,7 @@
         (try
           (let [registry (capabilities/create! {:session-id sid :cwd cwd
                                                 :store (:store runtime)
+                                                :job-manager (:jobs runtime)
                                                 :config (:config snapshot)
                                                 :emit! (fn [event]
                                                          (if (:durable? event)
@@ -133,6 +138,7 @@
               (let [activation (resources/activate!
                                 manager registry
                                 (handle-context runtime sid cwd provider-manager))]
+                (binding [*ns* (the-ns (:namespace registry))] (alias 'jobs 'arrodes.jobs))
                 (capabilities/set-tools! registry (get-in snapshot [:config :tools]))
                 {:registry registry :resources manager :provider provider-manager
                  :activation activation :cwd cwd})
@@ -194,6 +200,11 @@
   (get @(:foreground runtime) sid))
 
 (defn- ensure-idle! [runtime sid]
+  ;; Release the session monitor while teardown waits for background workers.
+  ;; Admission resumes only after the old evaluator is closed or retained intact.
+  (while (and (not= sid *resetting-session*) (contains? @(:resetting runtime) sid))
+    (.wait ^Object (session-lock runtime sid) 50)
+    (ensure-open! runtime))
   (when-let [slot (foreground runtime sid)]
     (value/fail! :session-busy "Session already has a foreground operation"
                  {:session-id sid :operation-id (:operation-id slot)})))
@@ -201,10 +212,10 @@
 (defn- acquire-foreground! [runtime sid kind oid]
   (locking (session-lock runtime sid)
     (store/session (:store runtime) sid)
+    (ensure-idle! runtime sid)
     (locking (:foreground runtime)
       ;; close! changes lifecycle and snapshots foreground under this same gate.
       (ensure-open! runtime)
-      (ensure-idle! runtime sid)
       (let [slot {:operation-id oid :kind kind :phase (atom :starting)
                   :cancelled (atom false) :cancellable? (atom true)
                   :accepting-input? (atom true) :thread (atom nil)
@@ -617,6 +628,28 @@
       {:registry registry :manager manager :config config :hook-context context
        :initial-intents initial-intents})))
 
+(defn- deliver-job-results! [runtime sid]
+  (locking (session-lock runtime sid)
+    (store/store-read (:store runtime)
+      (fn [_]
+        (let [records (store/pending-job-results (:store runtime) sid)
+              path-ids (set (map :id (store/active-path (:store runtime) sid)))
+              applicable (filter #(or (nil? (get-in % [:origin :head]))
+                                      (contains? path-ids (get-in % [:origin :head]))) records)
+              entries (mapv
+                        (fn [record]
+                          {:kind :custom-context
+                           :data (cond-> {:message/role :user :message/job-id (:id record)
+                                          :message/content (str "Background job " (pr-str (:name record))
+                                                                " is " (name (:status record)) "."
+                                                                (when-let [error (when (not= :cancelled (:status record)) (:error record))]
+                                                                  (str " " (:message error))))}
+                                   (:result-id record)
+                                   (assoc :message/result (artifacts/result (:store runtime) sid (:result-id record))))})
+                        applicable)]
+          (when (seq records)
+            (commit! runtime sid {:entries entries :job-deliver (mapv :id records)})))))))
+
 (defn- run-loop! [runtime sid slot prompt opts]
   (let [{:keys [registry manager config hook-context initial-intents]}
         (prepare-run! runtime sid slot prompt (:config opts))
@@ -629,6 +662,7 @@
                     "Agent exceeded its configured continuation step budget"
                     {:max-steps max-steps})
       (util/check-cancelled! (:cancelled slot))
+      (deliver-job-results! runtime sid)
       (let [path (store/active-path (:store runtime) sid)
             compacted? (maybe-auto-compact!
                         runtime sid slot registry config callback (run/latest-usage path))
@@ -726,22 +760,7 @@
     :or {cwd "." settings {}}}]
   (let [cwd (util/real-path cwd)
         home (util/home-dir {:home home})
-        migration (util/migrate-legacy-home! home cwd)
-        _ (when (= :blocked (:status migration))
-            (value/fail! :migration/blocked
-                         "Legacy Arrodes config requires manual conflict resolution"
-                         {:conflicts (:conflicts migration)}))
-        project-info (util/project-info home cwd)
-        legacy-data (some #(when (= :data (:kind %)) %) (:entries migration))
-        _ (when (and legacy-data (nil? data-dir) (not memory?))
-            (value/fail!
-             :migration/legacy-data
-             (str "Legacy session history remains at " (:source legacy-data)
-                  ". Restart with --data-dir " (:source legacy-data)
-                  " to access it; Arrodes did not move or hide that history.")
-             {:path (:source legacy-data)
-              :data-dir-option (:source legacy-data)
-              :project-data-dir (util/resolve-path (:directory project-info) "data")}))
+        _ (util/ensure-current-home! home data-dir)
         project (util/open-project! home cwd)
         data-dir (util/canonical-path
                   (or data-dir (util/resolve-path (:directory project) "data")))
@@ -764,17 +783,18 @@
                                              (.availableProcessors (Runtime/getRuntime))))))
             runtime {:store store :provider provider :resources root-resources
                      :cwd cwd :home home :data-dir data-dir :project project
-                     :home-migration migration
                      :trust trust :initial-settings settings
                      :settings (atom (resources/settings root-resources))
                      :handles (atom {}) :operations (atom {}) :listeners (atom {})
-                     :foreground (atom {}) :session-locks (atom {}) :handle-lock (Object.)
+                     :foreground (atom {}) :resetting (atom #{}) :session-locks (atom {}) :handle-lock (Object.)
                      :close-lock (Object.) :ui (atom ui!) :command! command!
                      :executor (Executors/newFixedThreadPool (int threads))
                      :titles (titles/create!)
                      :lifecycle (atom :open) :recovery-events recovery-events}]
-        (reset! opened [])
-        runtime)
+        (let [manager (jobs/create! store (bound-fn [event] (notify-listeners! runtime event))
+                                    (fn [sid work] (locking (session-lock runtime sid) (work))) settings)]
+          (reset! opened [])
+          (assoc runtime :jobs manager)))
       (catch Throwable error
         (doseq [cleanup (reverse @opened)]
           (try (cleanup) (catch Throwable _ nil)))
@@ -844,24 +864,29 @@
 
 (defn state [runtime sid]
   (locking (session-lock runtime sid)
-    (let [snapshot (store/session (:store runtime) sid)
-          slot (foreground runtime sid)
-          operation (when slot
-                      (store/operation (:store runtime) (:operation-id slot)))
-          event-seq (latest-event-seq runtime sid)
-          registry (get-in @(:handles runtime) [sid :registry])
-          selection (get-in snapshot [:config :tools])]
-      {:session snapshot
-       :phase (if slot @(:phase slot) :idle)
-       :operation-id (:operation-id slot)
-       :operation operation
-       :queues (store/pending (:store runtime) sid)
-       :usage (usage runtime sid)
-       :event-seq event-seq
-       :repl (when registry
-               {:namespace (str (:namespace registry)) :generation (:generation registry)})
-       :tools {:selection selection
-               :capabilities (if registry (capabilities/catalog registry) [])}})))
+    (store/store-read (:store runtime)
+      (fn [_]
+        (let [snapshot (store/session (:store runtime) sid)
+              slot (foreground runtime sid)
+              operation (when slot
+                          (store/operation (:store runtime) (:operation-id slot)))
+              event-seq (latest-event-seq runtime sid)
+              registry (get-in @(:handles runtime) [sid :registry])
+              selection (get-in snapshot [:config :tools])]
+          {:session snapshot
+           :phase (if slot @(:phase slot) :idle)
+           :operation-id (:operation-id slot)
+           :operation operation
+           :queues (store/pending (:store runtime) sid)
+           :jobs (vec (vals (into {} (map (juxt :id identity))
+                                  (concat (jobs/list-jobs (:jobs runtime) sid {})
+                                          (store/active-jobs (:store runtime) sid)))))
+           :usage (usage runtime sid)
+           :event-seq event-seq
+           :repl (when registry
+                   {:namespace (str (:namespace registry)) :generation (:generation registry)})
+           :tools {:selection selection
+                   :capabilities (if registry (capabilities/catalog registry) [])}})))))
 
 (defn session-view
   "Returns the durable session projection, authoritative foreground operation,
@@ -956,7 +981,26 @@
            (close-handle! runtime sid)))
        {:summary summary :usage (:response/usage response)}))))
 
-(defn branch! [runtime sid leaf opts]
+(defn- with-session-reset! [runtime sid work]
+  (locking (session-lock runtime sid)
+    (ensure-open! runtime)
+    (ensure-idle! runtime sid)
+    (swap! (:resetting runtime) conj sid))
+  (jobs/block-session! (:jobs runtime) sid)
+  (try
+    (jobs/cancel-session! (:jobs runtime) sid)
+    (value/check! (jobs/await-session! (:jobs runtime) sid
+                                     (long (or (:close-timeout-ms (:initial-settings runtime)) 10000)))
+                  :jobs-still-running "Background execution has not exited; evaluator retained. Retry after jobs settle."
+                  {:session-id sid})
+    (binding [*resetting-session* sid] (work))
+    (finally
+      (jobs/unblock-session! (:jobs runtime) sid)
+      (locking (session-lock runtime sid)
+        (swap! (:resetting runtime) disj sid)
+        (.notifyAll ^Object (session-lock runtime sid))))))
+
+(defn- branch-session! [runtime sid leaf opts]
   (ensure-open! runtime)
   (let [{:keys [source abandoned slot events]}
         (locking (session-lock runtime sid)
@@ -986,6 +1030,12 @@
       (emit-events! runtime events))
     (store/session (:store runtime) sid)))
 
+(defn branch! [runtime sid leaf opts]
+  (with-session-reset! runtime sid
+    #(let [result (branch-session! runtime sid leaf opts)]
+       (store/acknowledge-all-jobs! (:store runtime) sid)
+       result)))
+
 (defn fork! [runtime sid opts]
   (ensure-open! runtime)
   (locking (session-lock runtime sid)
@@ -997,12 +1047,10 @@
     (store/clone! (:store runtime) sid opts)))
 
 (defn delete! [runtime sid]
-  (ensure-open! runtime)
-  (locking (session-lock runtime sid)
-    (ensure-idle! runtime sid)
-    (let [result (store/delete-session! (:store runtime) sid)]
-      (close-handle! runtime sid)
-      result)))
+  (with-session-reset! runtime sid
+    #(locking (session-lock runtime sid)
+       (close-handle! runtime sid)
+       (store/delete-session! (:store runtime) sid))))
 
 (defn import! [runtime packet opts]
   (ensure-open! runtime)
@@ -1013,12 +1061,11 @@
   (store/export-session (:store runtime) sid))
 
 (defn reload! [runtime sid]
-  (ensure-open! runtime)
-  (locking (session-lock runtime sid)
-    (ensure-idle! runtime sid)
-    (close-handle! runtime sid)
-    (registry runtime sid)
-    {:session-id sid :status :reloaded}))
+  (with-session-reset! runtime sid
+    #(locking (session-lock runtime sid)
+       (close-handle! runtime sid)
+       (registry runtime sid)
+       {:session-id sid :status :reloaded})))
 
 (defn- begin-blocking! [runtime sid kind work]
   (let [{:keys [slot]} (operation-start! runtime sid kind)]
@@ -1274,6 +1321,7 @@
             ;; Graceful shutdown prevents an operation that invoked close! from
             ;; interrupting its own caller thread. Explicit cancellation above
             ;; still interrupts every other running driver.
+          (jobs/stop! (:jobs runtime))
           (titles/stop! (:titles runtime))
           (.shutdown ^ExecutorService (:executor runtime))
           (let [timeout-ms (long (max 0 (or (:close-timeout-ms (:initial-settings runtime))
@@ -1283,6 +1331,7 @@
                 _ (doseq [slot slots
                           :when (not (some #(identical? slot %) self-slots))]
                     (await-operation! slot deadline))
+                jobs-complete? (jobs/await-session! (:jobs runtime) nil (remaining-close-millis deadline))
                 incomplete (filterv #(not (realized? (:finished %))) slots)
                 foreground-complete? (empty? incomplete)
                 executor-terminated?
@@ -1296,15 +1345,18 @@
                       (.interrupt current)
                       false))
                   (.isTerminated ^ExecutorService (:executor runtime)))]
-            (if-not (and foreground-complete? executor-terminated?)
+            (if-not (and foreground-complete? executor-terminated? jobs-complete?)
               {:status :closing :already-closed? false
                :foreground-complete? foreground-complete?
                :active-operation-ids (mapv :operation-id incomplete)
+               :jobs-complete? jobs-complete?
                :executor-terminated? executor-terminated?
                :store-closed? false :handles-closed? false
                :errors
                (into @cancellation-errors
                      (cond-> []
+                       (not jobs-complete?)
+                       (conj {:code "jobs-timeout" :message "Background jobs have not exited; live state retained"})
                        (not foreground-complete?)
                        (conj {:code "foreground-timeout"
                               :message "Foreground execution did not finish before the close deadline"})

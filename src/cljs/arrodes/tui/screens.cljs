@@ -7,6 +7,7 @@
             [arrodes.tui-widgets :as w]
             [clojure.string :as str]
             [arrodes.tui.commands :as commands]
+            [arrodes.tui.jobs :as jobs]
             [arrodes.tui.context :as c]
             [arrodes.tui.inspection :as inspection]
             [arrodes.tui.models :as models]
@@ -82,6 +83,7 @@
         (case (:kind overlay)
           :commands (remove :alias? (commands/commands view))
           :themes (theme-picker/items view)
+          :jobs (jobs/items view)
           :sessions
           (mapv (fn [session]
                   {:label (or (:name session) "Untitled session")
