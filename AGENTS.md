@@ -8,6 +8,7 @@ documents relevant to the change.
 ## Source map
 
 - `src/clj/arrodes/runtime.clj`: operation ownership, model loop, queues, and recovery.
+- `src/clj/arrodes/jobs.clj`: background function ownership, cancellation, output, and retained outcomes.
 - `src/clj/arrodes/repl.clj`, `capabilities.clj`: evaluation, function wrappers, native results.
 - `src/clj/arrodes/store.clj`, `artifacts.clj`: transactional records and retained content.
 - `src/clj/arrodes/provider*.clj`, `auth.clj`: provider boundary and credentials.

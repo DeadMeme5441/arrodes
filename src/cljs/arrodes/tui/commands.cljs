@@ -16,6 +16,8 @@
                (c/action! :open-providers! view)
                (do (c/action! :close-overlay! view) (c/fire! view :new-session {})))}
    {:label "Sessions" :command "sessions" :icon "↶" :description "/sessions  Resume a previous conversation" :choose #(c/action! :open-sessions! view)}
+   {:label "Background jobs" :command "jobs" :description "/jobs  Inspect results, output, and cancel background work"
+    :choose #(c/action! :open-jobs! view)}
    {:label "History and branches" :description "/history" :choose #(c/action! :open-history! view)}
    {:label "Refresh session state" :description "/refresh  Read-only reconciliation; keeps live definitions"
     :choose #(do (c/action! :close-overlay! view) (c/fire! view :refresh {}))}

@@ -178,13 +178,92 @@ RPC clients can use:
 
 For inline native values, `result.inspect` includes bounded `value-edn` and `value-truncated?` fields. Prefer `value-edn` when keyword keys, ratios, symbols, or other Clojure types matter; JSON `value` is only a projection.
 
+## Background jobs
+
+Use ordinary Clojure functions in the session REPL:
+
+```clojure
+(def build
+  (jobs/start! {:name "Run tests"}
+    #(bash {:command "bun test"})))
+
+(jobs/inspect build)
+(jobs/list {:limit 20})
+(jobs/output build {:offset 0 :limit 4096})
+(jobs/wait build {:timeout-ms 1000})
+(jobs/result build)
+(jobs/cancel! build)
+```
+
+`start!` accepts a zero-argument function and optional `:name` (1–200 characters),
+and returns `{:id ... :session-id ...}` immediately. Other functions accept that
+handle or a job ID in the current session. `list` is newest-first, with a maximum
+page size of 500; pass the last ID as `:before` for older jobs.
+
+Jobs have their own worker, cancellation token and captured output. They do not
+hold the foreground evaluation lock. The default runtime limit is 32 admitted jobs
+(configurable through runtime `:settings {:job-limit n}`, bounded to 1–128); capacity rejection does not run
+the supplied function. The function shares its session's live values and registered
+functions: normal Clojure concurrency rules apply to atoms and Vars. Registered
+calls retain their effect locks. Join any unmanaged futures before a job returns.
+
+A function return completes a job; an exception fails it. `bash` and `powershell`
+return nonzero `:exit-code` values normally, so check the exit code or throw in your
+function when that should fail the job. A job is not a transaction: earlier file,
+network, or shell effects survive later failure and cancellation.
+
+`result` never blocks and returns only a successfully completed job's native value.
+Use `inspect` for failures, availability and the retained result descriptor; supported
+values survive restart, arbitrary JVM objects do not. `wait` returns the current
+record after at most `:timeout-ms` (default 1000, range 0–300000). Waiting does not
+cancel execution. Waiting for oneself or an ancestor is rejected.
+
+Output merges printed stdout/stderr and registered shell progress into a bounded
+capture. `output` uses **zero-based character offsets**, unlike the one-based artifact
+API. It returns `:text`, `:next-offset`, `:more?`, `:eof?`, and `:truncated?`. Each job
+retains at most 1,048,576 characters; text beyond that cap is discarded. Live output
+is transient; settlement saves the capture as an immutable artifact. A crash can
+lose the live capture, and an interrupted job reports it unavailable.
+
+Lifecycle: queued → running → completed/failed; cancellation of queued work prevents
+execution, while running work stays `:cancelling` until its worker and owned children
+exit. Arbitrary Clojure code may ignore interruption, so cancellation can remain
+pending. Children started inside a job are owned by that job; parents await children
+before settling and cancel them on failure/cancellation. These are functions, not
+subagents.
+
+The foreground turn does not own accepted background jobs. Ending or cancelling it
+leaves them running. Switching sessions, changing models, and compaction preserve
+jobs. Reload, branch movement, deletion, and runtime shutdown cancel affected jobs
+and wait for actual exit before closing their resources. If cleanup times out, the
+runtime retains the evaluator/store and reports incomplete cleanup; retry after the
+work exits. Restart marks unfinished jobs `:interrupted` and never replays them.
+
+Completed outcomes are delivered once into model context at the next provider-step
+boundary on the originating history path. Reading `jobs/result` acknowledges that
+outcome. Idle sessions notify the UI without automatically starting a model call;
+use `/continue` or send another message when desired. Branch movement prevents old
+outcomes from being injected into the newly selected context. Job records remain
+inspectable within the originating session; forks/imports do not recreate jobs.
+
+`/jobs` uses the existing full-terminal browser and opens the execution inspector
+directly. Jobs also appear as live execution rows in the conversation; they never
+open a popup automatically. The inspector provides Output/Value/Code tabs, paging,
+F5 refresh, and Ctrl+K cancellation. The footer counts active background jobs. RPC clients use `job.list`,
+`job.inspect`, `job.wait`, `job.cancel`, and `job.output`; start work through
+`session.evaluate` using `jobs/start!`. `session.view` includes the newest job records,
+and durable `job/changed` events reconcile status after reconnect.
+
+This does not provide subagents, scheduled jobs, process-daemon supervision, automatic
+retry, or JVM stack checkpointing.
+
 ## What survives restart
 
 Durable:
 
 - session identity, name, configuration, and active branch;
 - conversation entries and compaction records;
-- operation records and durable events;
+- operation/job records and durable events;
 - queue state;
 - supported inline results and artifact-backed results;
 - exported files you explicitly write.

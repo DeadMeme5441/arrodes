@@ -24,7 +24,18 @@ migration checklist.
 - RPC additive fields do not break existing clients; incompatible envelopes need an
   explicit protocol decision and tests.
 
-Arrodes currently uses SQLite schema version 1. There is no automatic migration of the
+Arrodes currently uses SQLite schema version 2. Opening a schema-1 store creates the
+jobs table transactionally and preserves its existing sessions, entries, and result IDs.
+Older executables (including v0.1.4) reject schema 2. Before upgrading, close Arrodes
+and back up the project data directory (database plus artifacts); restore that whole
+backup to return to an older executable. Do not edit `user_version` to downgrade.
+
+RPC protocol 1 gains additive `job.*` methods and `session.view.state.jobs`. The session
+export format remains version 1: exports contain history/results/artifacts, including
+job completion entries already delivered to context, but do not transfer job ownership
+or executable functions. Forks/clones/imports never launch jobs or copy live job handles;
+completion-entry result references are remapped through the existing retention contract.
+ There is no automatic migration of the
 legacy shared store into a project's store. Do not describe that safeguard as a completed
 upgrade experience; changes to it need a dedicated migration design and fixtures.
 

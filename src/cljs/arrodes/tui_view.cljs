@@ -11,6 +11,7 @@
             [arrodes.tui.inspection :as inspection]
             [arrodes.tui.models :as models]
             [arrodes.tui.screens :as screens]
+            [arrodes.tui.jobs :as jobs]
             [arrodes.tui.transcript :as transcript]
             [arrodes.tui.themes :as themes]
             [arrodes.tui.theme-picker :as theme-picker]
@@ -170,20 +171,10 @@
         inspector-output (w/text renderer "" {:width "100%"})
         inspector-actions (w/box renderer {:width "100%" :flexDirection "row" :height 2 :marginTop 1})
         inspector-copy (w/button renderer "[Copy]" (fn [] (c/copy! @view-ref (or (:inspector-text @local) ""))) {:width 8})
-        inspector-prev (w/button renderer "[Prev]"
-                                 (fn []
-                                   (let [s (c/state @view-ref)]
-                                     (inspection/load-artifact-page! @view-ref
-                                                          (get-in s [:ui :inspection :descriptor :artifact-id])
-                                                          (max 1 (- (get-in s [:ui :inspection :page :offset] 1) 12000)))))
-                                 {:width 8 :visible false})
-        inspector-next (w/button renderer "[Next page]"
-                                 (fn []
-                                   (let [s (c/state @view-ref)]
-                                     (inspection/load-artifact-page! @view-ref
-                                                          (get-in s [:ui :inspection :descriptor :artifact-id])
-                                                          (get-in s [:ui :inspection :page :next-offset]))))
-                                 {:width 13 :visible false})
+        inspector-prev (w/button renderer "[Prev]" #(inspection/page! @view-ref :prev) {:width 8 :visible false})
+        inspector-next (w/button renderer "[Next page]" #(inspection/page! @view-ref :next) {:width 13 :visible false})
+        inspector-job-cancel (w/button renderer "[Cancel job]" #(inspection/cancel-job! @view-ref) {:width 14 :visible false})
+        inspector-job-refresh (w/button renderer "[Refresh]" #(inspection/request-inspection! @view-ref (c/selected-row @view-ref)) {:width 11 :visible false})
         inspector-branch (w/button renderer "[Branch]" (fn [] (when-let [row (c/selected-row @view-ref)] (inspection/branch! @view-ref row)))
                                    {:width 9 :visible false})
         inspector-lifetime (w/text renderer "" {:fg :text/dim :width "100%" :maxHeight 3 :marginBottom 1})
@@ -322,6 +313,7 @@
                         :inspect! inspection/inspect!
                         :open-files! screens/open-files!
                         :open-history! screens/open-history!
+                        :open-jobs! jobs/open!
                         :open-models! models/open-models!
                         :open-overlay! screens/open-overlay!
                         :open-providers! models/open-providers!
@@ -339,7 +331,7 @@
               :metadata metadata :project-status project-status :command-menu command-menu :spacer spacer
               :inspector inspector :inspector-title inspector-title :inspector-tabs inspector-tabs
               :inspector-scroll inspector-scroll :inspector-output inspector-output :inspector-next inspector-next
-              :inspector-prev inspector-prev
+              :inspector-prev inspector-prev :inspector-job-cancel inspector-job-cancel :inspector-job-refresh inspector-job-refresh
               :inspector-branch inspector-branch :inspector-lifetime inspector-lifetime
               :pending pending :pending-items pending-items :pending-more pending-more :new-activity new-activity
               :widget-box widget-box :widget-items widget-items
@@ -360,7 +352,7 @@
     (w/add! inspector-header inspector-title inspector-close)
     (doseq [tab [:summary :output :value :code]] (.add inspector-tab-row (get inspector-tabs tab)))
     (w/add! inspector-scroll inspector-output)
-    (w/add! inspector-actions inspector-copy inspector-prev inspector-next inspector-branch)
+    (w/add! inspector-actions inspector-copy inspector-prev inspector-next inspector-branch inspector-job-refresh inspector-job-cancel)
     (w/add! inspector inspector-header inspector-tab-row inspector-scroll inspector-actions inspector-lifetime)
     (w/add! body conversation inspector)
     (w/add! pending pending-title pending-items pending-more)

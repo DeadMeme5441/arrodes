@@ -19,6 +19,7 @@ Tests use fixtures by default and must not require real accounts or paid model c
 Optional diagnostics remain available for focused investigation:
 
 - `python3 scripts/verify-rpc.py`
+- `python3 scripts/verify-jobs.py` (real RPC, abrupt JVM exit, and job recovery without replay)
 - `python3 scripts/verify-install.py`
 - `python3 scripts/verify-release.py PATH`
 

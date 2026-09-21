@@ -38,10 +38,39 @@
                     (c/ui! view assoc-in [:inspection :loading?] false)))))))
 
 
+(defn load-job-output! [view row offset]
+  (let [selection (:id row)]
+    (-> (c/invoke! view :job-output {:id (:job-id row) :offset offset})
+        (.then (fn [page]
+                 (when (= selection (get-in (c/state view) [:ui :selected]))
+                   (c/ui! view assoc-in [:inspection :job-output] page))))
+        (.catch (fn [_] nil)))))
+
+(defn cancel-job! [view]
+  (when-let [id (:job-id (c/selected-row view))]
+    (-> (c/invoke! view :job-cancel {:id id})
+        (.catch (fn [_] nil)))))
+
+(defn current-page [view]
+  (let [s (c/state view)]
+    (if (and (:job-id (c/selected-row view)) (= :output (get-in s [:ui :inspect-tab])))
+      (get-in s [:ui :inspection :job-output])
+      (get-in s [:ui :inspection :page]))))
+
+(defn page! [view direction]
+  (let [s (c/state view) row (c/selected-row view) page (current-page view)
+        job? (and (:job-id row) (= :output (get-in s [:ui :inspect-tab])))
+        offset (if (= direction :next) (:next-offset page)
+                   (max (if job? 0 1) (- (or (:offset page) (if job? 0 1)) 12000)))]
+    (when offset
+      (if job? (load-job-output! view row offset)
+          (load-artifact-page! view (get-in s [:ui :inspection :descriptor :artifact-id]) offset)))))
+
 (defn request-inspection! [view row]
   (let [selection (:id row)
         id (model/field (:result (present/activity row)) :id)]
     (c/ui! view assoc :inspection (when id {:selection-id selection :result-id id :loading? true}))
+    (when (:job-id row) (load-job-output! view row 0))
     (when id
       (-> (c/invoke! view :result {:result-id id})
           (.then (fn [descriptor]
@@ -84,12 +113,21 @@
             data (present/inspection (:view s) row tab (get-in s [:ui :inspection]))
             signature [row tab (get-in s [:ui :inspection])]]
         (w/content! (:inspector-title view) (:title data))
-        (w/content! (:inspector-lifetime view) (:lifetime data))
+        (w/content! (:inspector-lifetime view)
+                    (str (:lifetime data)
+                         (when (:job-id row) "\nF5 refresh · Ctrl+K cancel job · Esc back")))
         (set! (.-visible (:inspector-branch view)) (boolean (:entry-id row)))
+        (set! (.-visible (:inspector-job-cancel view))
+              (boolean (and (:job-id row) (contains? #{:queued :running :cancelling} (get-in row [:activity :status])))))
+        (set! (.-visible (:inspector-job-refresh view)) (boolean (and (:job-id row) (>= (.-terminalWidth (:renderer view)) 70))))
+        (w/content! (:inspector-job-cancel view) (if (< (.-terminalWidth (:renderer view)) 70) "[Stop]" "[Cancel job]"))
+        (set! (.-width (:inspector-job-cancel view)) (if (< (.-terminalWidth (:renderer view)) 70) 8 14))
         (set! (.-visible (:inspector-next view))
-              (boolean (get-in s [:ui :inspection :page :truncated?])))
+              (boolean (if (and (:job-id row) (= tab :output))
+                         (:more? (current-page view))
+                         (:truncated? (current-page view)))))
         (set! (.-visible (:inspector-prev view))
-              (> (or (get-in s [:ui :inspection :page :offset]) 1) 1))
+              (> (or (:offset (current-page view)) 0) (if (and (:job-id row) (= :output tab)) 0 1)))
         (doseq [[key button] (:inspector-tabs view)]
           (w/paint! button :fg (if (= key tab) :ui/accent :text/dim)))
         (when (not= signature (:inspector-signature @(:local view)))

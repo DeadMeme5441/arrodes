@@ -238,3 +238,22 @@
     (is (= [:activity] (mapv :kind projected)))
     (is (= :evaluation (get-in projected [0 :activity :kind])))
     (is (not-any? #(= :capability (get-in % [:activity :kind])) projected))))
+
+(deftest background-jobs-stay-inline-and-outlive-foreground-cancellation
+  (let [evaluation {:id "eval" :kind :evaluation :source "(jobs/start! f)" :status :completed}
+        record {:id "job" :name "Build" :status :running :created-at 1
+                :origin {:evaluation-id "eval"}}
+        initial (assoc (model/empty-state)
+                       :entries [{:id "entry" :kind :evaluation :data {:result {:id "eval"}}}]
+                       :activities {"eval" evaluation} :activity-order ["eval"])
+        started (model/apply-event initial {:seq 1 :type :job/changed :data {:job record}})
+        output (model/apply-event started {:type :job/output :data {:job-id "job" :content "compiling"}})
+        cancelled (model/apply-event output {:seq 2 :type :operation/cancelled :operation-id "foreground" :data {}})
+        row (first (model/rows cancelled))
+        completed (model/apply-event cancelled {:seq 3 :type :job/changed :data {:job (assoc record :status :completed :result-id 7)}})]
+    (is (= "job" (:job-id row)))
+    (is (= :running (get-in row [:activity :status])))
+    (is (= "compiling" (get-in row [:activity :content])))
+    (is (= "(jobs/start! f)" (get-in cancelled [:activities "eval" :source])))
+    (is (= :completed (get-in (first (model/rows completed)) [:activity :status])))
+    (is (= 7 (get-in (first (model/rows completed)) [:activity :result :id])))))

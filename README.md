@@ -141,6 +141,7 @@ Arrodes keeps one live evaluator per session. Function calls appear compactly in
 | `/sessions` | Switch sessions |
 | `/history` | Inspect history and create a branch |
 | `/refresh` | Reconcile recorded session state without repeating a mutation |
+| `/jobs` | Inspect and cancel background function jobs; read output and native results |
 | `/pending` | Edit or drop queued input |
 | `/attach`, `/attachments` | Add or remove project-file context |
 | `/providers`, `/setup`, `/login` | Manage provider connections and sign-in |

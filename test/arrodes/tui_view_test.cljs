@@ -2,6 +2,7 @@
   "TUI regression entry point: real RPC lifecycle followed by native screen rendering."
   (:require [arrodes.tui-app :as app]
             [arrodes.tui-app-test :as app-test]
+            [arrodes.jobs-ui-test :as jobs-ui]
             [arrodes.catalog-flow-test :as catalog-flow]
             [arrodes.tui-model :as model]
             [arrodes.tui-view :as view]
@@ -949,7 +950,9 @@
   (aset js/globalThis "ARRODES_TUI_TEST_DONE"
         (-> (if (aget (.-env js/process) "ARRODES_TUI_VISUAL_ONLY")
               (js/Promise.resolve nil)
-              (-> (catalog-flow/exercise!) (.then (fn [] (app-test/exercise!)))))
+              (-> (catalog-flow/exercise!)
+                  (.then (fn [] (app-test/exercise!)))
+                  (.then (fn [] (jobs-ui/exercise!)))))
             (.then (fn []
                      ((aget js/globalThis "ARRODES_CREATE_TEST_RENDERER")
                       #js {:width 120 :height 40 :kittyKeyboard true :consoleMode "disabled"})))

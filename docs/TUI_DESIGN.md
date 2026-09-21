@@ -58,3 +58,9 @@ interactive region or expanded execution; prose stays on the base surface.
   separate muted row. Idle status and permanent keyboard hints do not crowd the footer.
 - Routine confirmations appear briefly in the footer and expire after 3.5 seconds.
   Errors and unknown outcomes remain visible; Details appears only for diagnostic data.
+
+- Background jobs use the same inline execution artifacts as other activity, anchored
+  to their launching evaluation and updated in place. They never open popups on start
+  or completion. `/jobs` uses the full-terminal browser pattern; Enter goes directly
+  to the existing full-width inspector without an intermediate action-selection view.
+  Cancellation lives in that inspector (Ctrl+K), with F5 refresh and the normal tabs.

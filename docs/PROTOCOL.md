@@ -192,3 +192,24 @@ Shutdown and end-of-file cancel reverse waits, settle connection work, detach co
 
 `session.list` includes `last-message-at` (epoch milliseconds, or null when no message
 exists), derived from recorded message entries rather than the session update time.
+
+## Background jobs (additive protocol-1 methods)
+
+Start trusted Clojure functions through `session.evaluate`, for example
+`(jobs/start! {:name "Build"} #(bash {:command "bun test"}))`. The retained evaluation
+value is a session-scoped job handle. Every job method requires `session-id`.
+
+| Method | Parameters and result |
+| --- | --- |
+| `job.list` | Optional `limit` (1–500, default 100), `before` job ID; returns `{jobs: [...], active-jobs: [...], next-before: ...}`; jobs are newest first |
+| `job.inspect` | `job-id`; returns status, origin, error, result descriptor and output artifact reference |
+| `job.wait` | `job-id`, optional `timeout-ms` (1–300000, default 1000); returns current record without cancelling on timeout |
+| `job.cancel` | `job-id`; requests cancellation of the job and its owned children |
+| `job.output` | `job-id`, optional zero-based `offset` (default 0), `limit` (1–32768, default 4096); returns a text page |
+
+Use `result.inspect` with a completed job's `result-id` for bounded native EDN, or
+`jobs/result` in the REPL for its native value. `session.view.state.jobs` contains the
+newest 100 records plus every active job. `job/changed` carries `{job: record}` durably; `job/output` carries
+`{job-id, content}` transiently. Completed output is artifact-backed. Job cancellation
+can return `cancelling`; terminal state means execution/owned-child cleanup has settled.
+Cross-session controls fail with `job-not-found`. No request automatically replays work.

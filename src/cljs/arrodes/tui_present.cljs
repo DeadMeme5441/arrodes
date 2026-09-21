@@ -38,6 +38,7 @@
 
 (defn status-label [a]
   (cond
+    (= :job (:kind a)) (name (:status a))
     (contains? #{:running :started} (:status a)) "running"
     (contains? #{:interrupted :cancelled} (:status a)) "interrupted"
     (some? (exit-code a)) (str "exit " (exit-code a))
@@ -125,6 +126,7 @@
     (cond (recorded-diff a) :summary
           (contains? #{"bash" "powershell"} (:name a)) :output
           (= :evaluation (:kind a)) :value
+          (= :job (:kind a)) :output
           :else :summary)))
 
 (defn lifetime [descriptor]
@@ -146,7 +148,12 @@
         content
         (case tab
           :code (or (:source root) (:source a) "No Clojure source is associated with this entry.")
-          :output (if a (output-text a) (:text row))
+          :output (if (:job-id row)
+                    (let [out (:job-output inspection-state)]
+                      (str (or (:text out) "Loading output…")
+                           (when (:truncated? out) "\n[Output reached its retention cap.]")
+                           (when (:unavailable? out) "\n[Live output was lost when execution was interrupted.]")))
+                    (if a (output-text a) (:text row)))
           :value
           (cond
             (false? (model/field descriptor :available?)) (lifetime descriptor)
@@ -165,6 +172,11 @@
           (cond
             (= :read-group (:kind row))
             (str/join "\n\n" (map #(str (model/activity-title %) "\n" (status-label %) "\n" (output-text %)) (:activities row)))
+            (= :job (:kind a))
+            (str "Job · " (:name a) "\n" (status-label a)
+                 "\n\n2 Output · 3 Value · 4 Code · F5 refresh"
+                 (when (contains? #{:queued :running :cancelling} (:status a)) "\nCtrl+K requests cancellation; completed effects remain.")
+                 (when (failed? a) (str "\n\n" (:content a))))
             a (str (status-label a) "\n\n"
                    (or (recorded-diff a)
                        (when (:arguments a) (str "ARGUMENTS\n" (pretty (:arguments a)) "\n\n")))

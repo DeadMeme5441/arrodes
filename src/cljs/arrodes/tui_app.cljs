@@ -48,6 +48,10 @@
                              (update :view model/apply-event event)
                              (cond-> (= :operation/started (:type event)) (assoc :notice nil))
                              client/operation-notice)
+                   (and (= :job/changed (:type event))
+                        (contains? #{:completed :failed :cancelled :interrupted} (get-in event [:data :job :status])))
+                   (assoc :notice {:kind :info :message (str "Job " (get-in event [:data :job :name]) " "
+                                                           (name (get-in event [:data :job :status])) ". /jobs to inspect.")})
                    (= :operation-error (:type event))
                    (assoc :notice {:kind :error :message (or (get-in event [:data :error :message]) "Operation error")
                                    :data (:data event)}))
@@ -371,6 +375,33 @@
         (-> (client/mutation! app "operation.cancel" {:operation-id oid}) (.then client/decode))
         (client/resolved {:session-id sid :operation-id nil :status :idle}))
 
+      :jobs
+      (if sid
+        (-> (client/call! app "job.list" (client/non-nil-map {:session-id sid :limit 100 :before (:before data)}))
+            (.then client/decode)
+            (.then (fn [result]
+                     (when (and (= sid (client/session-id-from @(:state app)))
+                                (= navigation (:navigation-generation @(:state app))))
+                       (swap! (:state app)
+                              (fn [current]
+                                (let [prior (into {} (map (juxt :id identity)) (get-in current [:view :jobs]))
+                                      incoming (concat (:active-jobs result) (:jobs result))
+                                      merged (reduce (fn [items item]
+                                                       (let [old (get prior (:id item))]
+                                                         (assoc items (:id item)
+                                                                (if (> (or (:revision old) 0) (or (:revision item) 0)) old item))))
+                                                     (into {} (filter (fn [[_ job]] (contains? #{:queued :running :cancelling} (:status job))) prior))
+                                                     incoming)]
+                                  (-> current
+                                      (assoc-in [:view :jobs] (vec (vals merged)))
+                                      (assoc-in [:view :jobs-next-before] (:next-before result)))))))
+                     result)))
+        (client/resolved {:jobs []}))
+      :job-cancel
+      (-> (client/mutation! app "job.cancel" {:session-id sid :job-id (:id data)}) (.then client/decode))
+      :job-output
+      (-> (client/call! app "job.output" (merge {:session-id sid :job-id (:id data) :limit 12000}
+                                               (select-keys data [:offset :limit]))) (.then client/decode))
       :refresh (if sid (sessions/hydrate-session! app sid false) (client/resolved (:view state)))
       :sessions (sessions/load-sessions! app)
       :switch-session (sessions/switch-session! app (:id data))

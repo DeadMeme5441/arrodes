@@ -17,7 +17,7 @@
 (defrecord Store [^Connection connection ^ReentrantLock lock closed? path artifact-dir memory? opened-at
                   ^FileChannel owner-channel ^FileLock owner-lock owner-path])
 
-(def ^:private schema-version 1)
+(def ^:private schema-version 2)
 (def ^:private entry-kinds
   #{:message :config :compaction :branch-summary :custom :custom-context :label :evaluation})
 (def ^:private statuses #{:idle :running :failed :interrupted})
@@ -321,6 +321,19 @@
             (throw error))
           (finally (.setAutoCommit connection old-auto)))))))
 
+(defn- migrate-jobs! [^Connection connection]
+  (when (< (long (scalar connection "PRAGMA user_version" [])) 2)
+    (let [old-auto (.getAutoCommit connection)]
+      (try
+        (.setAutoCommit connection false)
+        (execute-script! connection
+          ["CREATE TABLE jobs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, status TEXT NOT NULL, created_at INTEGER NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, record TEXT NOT NULL)"
+           "CREATE INDEX jobs_session_created ON jobs(session_id, created_at DESC, id)"])
+        (execute-command! connection "PRAGMA user_version = 2")
+        (.commit connection)
+        (catch Throwable error (.rollback connection) (throw error))
+        (finally (.setAutoCommit connection old-auto))))))
+
 (defn- expire-live-results! [^Connection connection]
   (doseq [{:keys [session-id id descriptor]}
           (query-sql connection
@@ -369,6 +382,7 @@
                 (execute-command! connection "PRAGMA synchronous = FULL")))
           (tighten-store-files! store)
           (migrate! connection)
+          (migrate-jobs! connection)
           (transact! store expire-live-results!)
           (tighten-store-files! store)
           (when db-path (util/private-file! db-path))
@@ -648,6 +662,89 @@
      :data data
      :time time}))
 
+(def job-terminal-statuses #{:completed :failed :cancelled :interrupted})
+
+(defn- job-row [^ResultSet rs]
+  (assoc (decode (.getString rs "record")) :delivered? (pos? (.getInt rs "delivered"))))
+
+(defn job [store sid id]
+  (store-read store
+    (fn [connection]
+      (require-session connection sid)
+      (require-uuid! id :job-id)
+      (or (first (query-sql connection "SELECT * FROM jobs WHERE session_id=? AND id=?" [sid id] job-row))
+          (value/fail! :job-not-found "Job does not exist in this session" {:job-id id :session-id sid})))))
+
+(defn jobs
+  ([store sid] (jobs store sid {}))
+  ([store sid {:keys [limit before] :or {limit 100}}]
+   (value/check! (and (integer? limit) (<= 1 limit 500)) :invalid-limit "Job limit must be 1..500" {})
+   (store-read store
+     (fn [connection]
+       (require-session connection sid)
+       (if before
+         (let [cursor (job store sid before)]
+           (query-sql connection
+             "SELECT * FROM jobs WHERE session_id=? AND (created_at<? OR (created_at=? AND id>?)) ORDER BY created_at DESC,id LIMIT ?"
+             [sid (:created-at cursor) (:created-at cursor) before limit] job-row))
+         (query-sql connection "SELECT * FROM jobs WHERE session_id=? ORDER BY created_at DESC,id LIMIT ?"
+                    [sid limit] job-row))))))
+
+(defn active-jobs [store sid]
+  (store-read store
+    (fn [connection]
+      (require-session connection sid)
+      (query-sql connection "SELECT * FROM jobs WHERE session_id=? AND status IN ('queued','running','cancelling') ORDER BY created_at DESC,id"
+                 [sid] job-row))))
+
+(defn create-job! [store record]
+  (transact! store
+    (fn [connection]
+      (require-session connection (:session-id record))
+      (require-uuid! (:id record) :job-id)
+      (value/check! (= :queued (:status record)) :invalid-job "New jobs must be queued" {})
+      (execute-sql! connection "INSERT INTO jobs(id,session_id,status,created_at,record) VALUES(?,?,?,?,?)"
+                    [(:id record) (:session-id record) "queued" (:created-at record) (encode record)])
+      {:job record :events [(insert-event! connection (:session-id record)
+                             {:type :job/changed :data {:job record}})]})))
+
+(defn transition-job! [store sid id expected changes]
+  (transact! store
+    (fn [connection]
+      (let [prior (job store sid id)]
+        (if-not (contains? expected (:status prior))
+          {:job prior :events []}
+          (let [next-status (:status changes)
+                allowed (case (:status prior)
+                          :queued #{:running :cancelled :failed :interrupted}
+                          :running #{:cancelling :completed :failed :interrupted}
+                          :cancelling #{:cancelled :completed :failed :interrupted}
+                          #{})
+                _ (value/check! (contains? allowed next-status) :invalid-job-transition
+                                "Invalid job transition" {:from (:status prior) :to next-status})
+                next (assoc (merge prior changes) :revision (inc (or (:revision prior) 0)))]
+            (execute-sql! connection "UPDATE jobs SET status=?,record=? WHERE session_id=? AND id=?"
+                          [(name next-status) (encode next) sid id])
+            {:job next :events [(insert-event! connection sid {:type :job/changed :data {:job next}})]}))))))
+
+(defn pending-job-results [store sid]
+  (store-read store
+    #(query-sql % "SELECT * FROM jobs WHERE session_id=? AND delivered=0 AND status IN ('completed','failed','cancelled','interrupted') ORDER BY created_at,id LIMIT 20"
+                [sid] job-row)))
+
+(defn acknowledge-jobs! [store sid ids]
+  (transact! store
+    (fn [connection]
+      (doseq [id ids]
+        (job store sid id)
+        (execute-sql! connection "UPDATE jobs SET delivered=1 WHERE session_id=? AND id=?" [sid id])))))
+
+(defn acknowledge-all-jobs! [store sid]
+  (transact! store
+    (fn [connection]
+      (require-session connection sid)
+      (execute-sql! connection "UPDATE jobs SET delivered=1 WHERE session_id=?" [sid]))))
+
 (defn- update-session! [^Connection connection snapshot]
   (execute-sql! connection
                 "UPDATE sessions SET name=?,cwd=?,head=?,revision=?,config=?,status=?,updated_at=?,metadata=?,labels=? WHERE id=?"
@@ -744,6 +841,8 @@
                                   "INSERT INTO queue(id,session_id,seq,kind,content,options,created_at) VALUES(?,?,?,?,?,?,?)"
                                   [(:id item) sid @queue-seq (name (:kind item)) (encode (:content item))
                                    (encode (or (:options item) {})) (:created-at item)])))
+              _ (doseq [id (:job-deliver command)]
+                  (execute-sql! connection "UPDATE jobs SET delivered=1 WHERE session_id=? AND id=?" [sid id]))
               operation (when-let [raw (:operation command)]
                           (let [prior (when-let [oid (:id raw)] (find-operation connection oid))]
                             (upsert-operation! connection (normalize-operation sid prior raw))))
@@ -835,6 +934,7 @@
 (defn- canonical-result-descriptor [{:keys [kind data]}]
   (case kind
     :message (:message/result data)
+    :custom-context (:message/result data)
     :evaluation (get-in data [:result :result])
     :custom (get-in data [:result :result])
     nil))
@@ -855,6 +955,7 @@
       entry
       (case (:kind entry)
         :message (assoc-in entry [:data :message/result] replacement)
+        :custom-context (assoc-in entry [:data :message/result] replacement)
         :evaluation (assoc-in entry [:data :result :result] replacement)
         :custom (assoc-in entry [:data :result :result] replacement)
         entry))))
@@ -1277,6 +1378,12 @@
             by-session (group-by :session-id active)
             now (util/now)
             events (volatile! (transient []))]
+        (doseq [record (query-sql connection "SELECT * FROM jobs WHERE status IN ('queued','running','cancelling')" [] job-row)]
+          (let [record (assoc record :status :interrupted :finished-at now :revision (inc (or (:revision record) 0))
+                                    :error {:code "interrupted" :message "Runtime stopped before execution settled. Effects were not replayed."})]
+            (execute-sql! connection "UPDATE jobs SET status='interrupted',record=? WHERE id=?" [(encode record) (:id record)])
+            (vswap! events conj! (insert-event! connection (:session-id record)
+                                  {:type :job/changed :data {:job record}}))))
         (doseq [[sid ops] by-session]
           (let [snapshot (require-session connection sid)
                 all (all-entries connection sid)

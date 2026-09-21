@@ -29,7 +29,13 @@
        "(artifact \"id\") reads a retained artifact; (artifact-page \"id\" {:offset 1 :limit 4096}) pages larger content. Previews are bounded, not the live values. "
        "Definitions and JVM objects are live state, not checkpoints: branch navigation, reload or restart resets them. "
        "Completed external effects are not rolled back when evaluation fails. Inspect state before retrying effects. "
-       "Join any concurrent work before returning; unjoined futures and arbitrary background threads are not owned session operations. "
+       "For managed background work use (def j (jobs/start! {:name \"Build\"} #(bash {:command \"bun test\"}))). "
+       "jobs/inspect, jobs/list, jobs/output, jobs/wait, jobs/result and jobs/cancel! operate on job handles or ids. "
+       "jobs/wait accepts {:timeout-ms 1000}; jobs/output accepts {:offset 0 :limit 4096}. jobs/result returns the native value without blocking, only after successful completion. "
+       "Function jobs preserve ordinary return semantics: a bash nonzero exit is a value, so inspect :exit-code or throw to mark the job failed. "
+       "Jobs outlive their launching turn. Reload/branch replacement cancels jobs and waits for them before discarding definitions. "
+       "Job completions are delivered at model boundaries; idle sessions do not automatically call the model. "
+       "Join unmanaged futures before returning; use jobs/start! for owned background functions. "
        "Finish by replying to the user normally, using what you actually observed."))
 
 (defn request [request]
@@ -61,6 +67,12 @@
   "Render result references at the provider boundary, after fork/import remapping."
   [messages]
   (mapv (fn [message]
+          (if (:message/job-id message)
+            (cond-> message
+              (get-in message [:message/result :id])
+              (update :message/content str " Retained result " (get-in message [:message/result :id])
+                      "; inspect with (result-info " (get-in message [:message/result :id]) ") or (result "
+                      (get-in message [:message/result :id]) ")."))
           (if-let [descriptor (when (and (= :tool (:message/role message))
                                          (= "repl" (:message/name message)))
                                 (:message/result message))]
@@ -74,5 +86,5 @@
                               " (" (name (:kind descriptor)) "). Use (result "
                               (pr-str (:id descriptor)) ") to work with its value.")))
               message)
-            message))
+            message)))
         messages))

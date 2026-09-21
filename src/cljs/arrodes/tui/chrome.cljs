@@ -113,6 +113,9 @@
                         (not (:unknown-outcome? notice)))
           status (cond routine? notice-text
                        (not= phase "Idle") phase
+                       (seq (filter #(contains? #{:queued :running :cancelling} (:status %)) (get-in s [:view :jobs])))
+                       (str (count (filter #(contains? #{:queued :running :cancelling} (:status %)) (get-in s [:view :jobs])))
+                            " background jobs · /jobs")
                        (seq status-widgets) (str/join " · " status-widgets)
                        :else "")]
       ;; Routine feedback occupies the quiet footer briefly, never an alert row.
