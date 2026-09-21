@@ -4,8 +4,7 @@
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str])
-  (:import (java.nio.channels FileChannel)
-           (java.nio.file AtomicMoveNotSupportedException Files LinkOption OpenOption Path Paths
+  (:import (java.nio.file AtomicMoveNotSupportedException Files LinkOption OpenOption Path Paths
                           StandardCopyOption StandardOpenOption)
            (java.nio.file.attribute FileAttribute PosixFilePermissions)
            (java.security MessageDigest)
@@ -163,116 +162,14 @@
 (defn- exists-no-follow? [value]
   (Files/exists (path value) (into-array LinkOption [LinkOption/NOFOLLOW_LINKS])))
 
-(defn- legacy-entry [kind source destination directory?]
-  (when (exists-no-follow? source)
-    {:kind kind
-     :source source
-     :destination destination
-     :status (cond
-               (Files/isSymbolicLink (path source)) :unsafe-source
-               (if directory?
-                 (not (Files/isDirectory (path source)
-                                         (into-array LinkOption [LinkOption/NOFOLLOW_LINKS])))
-                 (not (Files/isRegularFile (path source)
-                                           (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))))
-               :unsafe-source
-               (exists-no-follow? destination) :destination-exists
-               :else :ready)}))
-
-(defn legacy-home-status
-  "Reports root-level v0 storage that can be explicitly migrated. Does not write."
-  [home cwd]
-  (let [home (canonical-path home)
-        config (resolve-path home "config")
-        project-data (resolve-path (project-dir home cwd) "data")
-        entries (->> [[:settings (resolve-path home "settings.edn")
-                       (resolve-path config "settings.edn") false]
-                      [:keybindings (resolve-path home "keybindings.edn")
-                       (resolve-path config "keybindings.edn") false]
-                      [:trust (resolve-path home "trust.edn")
-                       (resolve-path config "trust.edn") false]
-                      [:data (resolve-path home "data") project-data true]]
-                     (keep #(apply legacy-entry %))
-                     (mapv #(if (= :data (:kind %))
-                              (assoc % :status :explicit-data-dir-required)
-                              %)))
-        ledger (read-edn (resolve-path config "migration.edn") nil)]
-    {:required? (boolean (seq entries))
-     :entries entries
-     :last-migration (peek (:runs ledger))
-     :migration-history (vec (:runs ledger))}))
-
-(def ^:private migration-locks (atom {}))
-
-(defn- migration-lock [home]
-  (get (swap! migration-locks
-              #(if (contains? % home) % (assoc % home (Object.))))
-       home))
-
-(defn- with-migration-lock [home f]
-  (let [config (resolve-path home "config")]
-    (ensure-dir! config)
-    (locking (migration-lock (real-path config))
-      (let [owner (path (resolve-path config ".migration.lock"))]
-        (when (Files/isSymbolicLink owner)
-          (value/fail! :migration/insecure-lock "Migration lock cannot be a symbolic link"
-                       {:path (str owner)}))
-        (with-open [channel (FileChannel/open
-                             owner
-                             (into-array OpenOption [StandardOpenOption/CREATE
-                                                     StandardOpenOption/WRITE
-                                                     LinkOption/NOFOLLOW_LINKS]))]
-          (let [lock (.lock channel)]
-            (try
-              (f)
-              (finally (.release lock)))))))))
-
-(defn- move-path! [source destination]
-  (ensure-dir! (str (.getParent (path destination))))
-  (try
-    (Files/move (path source) (path destination)
-                (into-array StandardCopyOption [StandardCopyOption/ATOMIC_MOVE]))
-    (catch AtomicMoveNotSupportedException _
-      (Files/move (path source) (path destination)
-                  (make-array StandardCopyOption 0))))
-  destination)
-
-(defn migrate-legacy-home!
-  "Moves legacy global config under HOME/config. Legacy databases must be opened explicitly."
-  ([home cwd] (migrate-legacy-home! home cwd {}))
-  ([home cwd {:keys [kinds] :or {kinds #{:settings :keybindings :trust}}}]
-   (let [home (canonical-path home)]
-     (with-migration-lock
-       home
-       (fn []
-         (let [{all-entries :entries :as before} (legacy-home-status home cwd)
-               entries (filterv #(contains? kinds (:kind %)) all-entries)
-               blocked (filterv #(not= :ready (:status %)) entries)]
-           (cond
-             (empty? entries) (assoc before :status (if (seq all-entries) :deferred :not-needed)
-                                     :migrated [])
-             (seq blocked) {:status :blocked :required? true :entries all-entries
-                            :conflicts blocked :migrated []}
-             :else
-             (let [moved (atom [])]
-               (try
-                 (doseq [{:keys [source destination] :as entry} entries]
-                   (move-path! source destination)
-                   (swap! moved conj entry))
-                 (let [config (resolve-path home "config")
-                       record-path (resolve-path config "migration.edn")
-                       previous (read-edn record-path {:version 1 :runs []})
-                       run {:migrated-at (now)
-                            :project-root (project-root cwd)
-                            :entries (mapv #(select-keys % [:kind :source :destination]) entries)}
-                       record {:version 1 :runs (conj (vec (:runs previous)) run)}
-                       after (legacy-home-status home cwd)]
-                   (write-edn! record-path record)
-                   (assoc after :status :migrated :migrated (:entries run)
-                          :last-migration run :migration-history (:runs record)))
-                 (catch Throwable error
-                   (doseq [{:keys [source destination]} (reverse @moved)]
-                     (when (and (exists-no-follow? destination)
-                                (not (exists-no-follow? source)))
-                       (try (move-path! destination source) (catch Throwable _ nil))))
-                   (throw error)))))))))))
+(defn ensure-current-home!
+  "Reject unsupported home layouts; never move or adapt their contents."
+  [home data-dir]
+  (let [unsupported (cond-> (filterv exists-no-follow?
+                                    (map #(resolve-path home %) ["settings.edn" "keybindings.edn" "trust.edn"]))
+                      (and (nil? data-dir) (exists-no-follow? (resolve-path home "data")))
+                      (conj (resolve-path home "data")))]
+    (value/check! (empty? unsupported) :unsupported-home-layout
+                  "Unsupported application home layout. Select a current-format home; existing files were not moved."
+                  {:paths unsupported})
+    home))

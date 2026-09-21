@@ -161,36 +161,41 @@
       (is (= :closed (:status (runtime/close! rt))))
       (finally (reset! release true) (runtime/close! rt) (session-fixtures/remove-directory! directory)))))
 
-(deftest restart-upgrades-v1-preserves-values-and-interrupts-unfinished-jobs
-  (let [directory (session-fixtures/temp-directory)
-        options {:cwd directory :home (str directory "/home") :data-dir (str directory "/data")
-                 :complete-fn (fn [_ _] (fixtures/answer "Done"))}
-        rt (runtime/open! options)
-        sid (:id (fixtures/create-session rt))
-        value-id (get-in (runtime/evaluate! rt sid "{:prior-version 2/3}") [:result :id])]
-    (runtime/close! rt)
-    ;; A synthetic schema-1 fixture: prior tables/history, no jobs table.
-    (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" directory "/data/sessions.sqlite"))
-                statement (.createStatement connection)]
-      (.execute statement "DROP TABLE jobs")
-      (.execute statement "PRAGMA user_version=1"))
-    (let [upgraded (runtime/open! options)
-          handle (eval! upgraded sid "(jobs/start! #(hash-map :native 3/7))")
-          _ (await! upgraded sid handle)
+(deftest current-format-restart-preserves-values-and-interrupts-unfinished-jobs
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))
+          handle (eval! rt sid "(jobs/start! #(hash-map :native 3/7))")
+          _ (await! rt sid handle)
           unfinished {:id (str (java.util.UUID/randomUUID)) :session-id sid :name "Interrupted fixture"
-                      :kind :clojure :status :queued :created-at 1 :origin {}}]
+                      :kind :clojure :status :queued :created-at 1 :origin {}}
+          options {:cwd (:cwd rt) :home (:home rt) :data-dir (:data-dir rt)}]
+      (store/create-job! (:store rt) unfinished)
+      (runtime/close! rt)
+      (let [reopened (runtime/open! options)]
+        (try
+          (is (= :interrupted (:status (jobs/inspect-job (:jobs reopened) sid (:id unfinished)))))
+          (is (= :completed (:status (jobs/inspect-job (:jobs reopened) sid (:id handle)))))
+          (is (= {:native 3/7} (eval! reopened sid (str "(jobs/result " (pr-str (:id handle)) ")"))))
+          (is (= 2 (count (store/jobs (:store reopened) sid))))
+          (finally (runtime/close! reopened)))))))
+
+(deftest noncurrent-store-formats-are-rejected-without-changing-the-database
+  (doseq [version [0 1 2 4]]
+    (let [directory (session-fixtures/temp-directory)
+          path (str directory "/sessions.sqlite")
+          storage (store/open! {:path path})]
+      (store/close! storage)
       (try
-        (is (= {:prior-version 2/3} (eval! upgraded sid (str "(result " value-id ")"))))
-        (store/create-job! (:store upgraded) unfinished)
-        (runtime/close! upgraded)
-        (let [reopened (runtime/open! options)]
-          (try
-            (is (= :interrupted (:status (jobs/inspect-job (:jobs reopened) sid (:id unfinished)))))
-            (is (= :completed (:status (jobs/inspect-job (:jobs reopened) sid (:id handle)))))
-            (is (= {:native 3/7} (eval! reopened sid (str "(jobs/result " (pr-str (:id handle)) ")"))))
-            (is (= 2 (count (store/jobs (:store reopened) sid))))
-            (finally (runtime/close! reopened))))
-        (finally (runtime/close! upgraded) (session-fixtures/remove-directory! directory))))))
+        (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
+                    statement (.createStatement connection)]
+          (.execute statement (str "PRAGMA user_version=" version)))
+        (let [before (java.nio.file.Files/readAllBytes (java.nio.file.Path/of path (make-array String 0)))
+              error (try (store/open! {:path path}) nil (catch clojure.lang.ExceptionInfo error error))
+              after (java.nio.file.Files/readAllBytes (java.nio.file.Path/of path (make-array String 0)))]
+          (is (= "unsupported-store-format" (:error/code (ex-data error))))
+          (is (= version (:found (ex-data error))))
+          (is (java.util.Arrays/equals before after)))
+        (finally (session-fixtures/remove-directory! directory))))))
 
 (deftest capacity-rejection-does-not-run-the-function
   (let [directory (session-fixtures/temp-directory)

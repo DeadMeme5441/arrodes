@@ -50,16 +50,14 @@
         (is (= :failed (:status record)))
         (is (= "job-failed" (get-in record [:error :code])))))))
 
-(deftest cancelled-records-from-the-earlier-writer-keep-their-original-diagnostics
+(deftest malformed-cancellation-records-are-rejected-not-adapted
   (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
     (let [sid (:id (fixtures/create-session rt)) id (str (java.util.UUID/randomUUID))
           original {:code "job-failed" :message "sleep interrupted"}]
-      (store/create-job! (:store rt) {:id id :session-id sid :status :queued :name "Older cancellation" :created-at 1})
+      (store/create-job! (:store rt) {:id id :session-id sid :status :queued :name "Invalid cancellation" :created-at 1})
       (store/transition-job! (:store rt) sid id #{:queued} {:status :cancelled :error original :finished-at 2})
-      (let [record (jobs/inspect-job (:jobs rt) sid id)]
-        (is (= "cancelled" (get-in record [:error :code])))
-        (is (= original (get-in record [:error :cause])))
-        (is (= original (:error (store/job (:store rt) sid id))))))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"current format" (jobs/inspect-job (:jobs rt) sid id)))
+      (is (= original (:error (store/job (:store rt) sid id)))))))
 
 (deftest incremental-output-has-independent-cursors-and-preserves-unicode-across-settlement
   (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
@@ -132,25 +130,18 @@
         (is (true? (get-in compact [:error :truncated?])))
         (is (= 5000 (count (get-in detailed [:error :message]))))))))
 
-(deftest tail-falls-back-to-exact-character-length-for-earlier-schema-two-records
+(deftest missing-output-character-count-is-rejected-not-reconstructed
   (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
     (let [sid (:id (fixtures/create-session rt))
           handle (eval! rt sid "(jobs/start! #(print \"αβγ終\\n\"))")
           record (await! rt sid handle)
-          prior-record (dissoc (store/job (:store rt) sid (:id handle)) :output-characters)
-          serialized (pr-str prior-record)]
-      ;; Same schema-2 format, before the optional exact character count was added.
+          invalid (dissoc (store/job (:store rt) sid (:id handle)) :output-characters)]
       (store/transact! (:store rt)
         (fn [connection]
           (with-open [statement (.prepareStatement connection "UPDATE jobs SET record=? WHERE id=?")]
-            (.setString statement 1 serialized)
+            (.setString statement 1 (pr-str invalid))
             (.setString statement 2 (:id handle))
             (.executeUpdate statement))))
-      (let [page (commands/dispatch! rt "job.output" {:session-id sid :job-id (:id handle) :tail? true :limit 2})
-            next-page (commands/dispatch! rt "job.output" {:session-id sid :job-id (:id handle) :after (:cursor page)})]
-        (is (= "終\n" (:text page)))
-        (is (= 3 (:offset page)))
-        (is (= 5 (get-in page [:cursor :offset])))
-        (is (= "" (:text next-page)))
-        (is (:eof? next-page))
-        (is (= prior-record (store/job (:store rt) sid (:id handle))))))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"character count"
+                           (jobs/output-job (:jobs rt) sid (:id handle) {:tail? true :limit 2})))
+      (is (= invalid (store/job (:store rt) sid (:id handle)))))))

@@ -1,5 +1,5 @@
 {:product "Arrodes"
- :version "0.1.4"
+ :version "0.1.5"
  :repository "https://github.com/DeadMeme5441/arrodes"
  :runtime :jvm-clojure
  :baseline {:repository "https://github.com/earendil-works/pi"

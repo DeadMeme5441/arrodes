@@ -210,7 +210,7 @@
         (runtime/close! rt)
         (fixtures/remove-directory! directory)))))
 
-(deftest legacy-global-history-requires-an-explicit-data-directory
+(deftest custom-store-location-is-never-silently-selected-from-home-data
   (let [directory (fixtures/temp-directory)
         home (str directory "/home")
         legacy-data (str home "/data")
@@ -224,8 +224,8 @@
                     (runtime/open! (dissoc options :data-dir))
                     nil
                     (catch clojure.lang.ExceptionInfo error error))]
-        (is (= "legacy-data" (:error/code (ex-data error))))
-        (is (= (u/canonical-path legacy-data) (:path (ex-data error)))))
+        (is (= "unsupported-home-layout" (:error/code (ex-data error))))
+        (is (= [(u/canonical-path legacy-data)] (:paths (ex-data error)))))
       (let [reopened (runtime/open! options)]
         (try
           (is (= 1 (count (runtime/list-sessions reopened {}))))

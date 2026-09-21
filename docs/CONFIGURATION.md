@@ -1,6 +1,6 @@
 # Configuration and project state
 
-Arrodes keeps user and project state outside working repositories. This guide covers application home selection, settings precedence, project resources, trust, and migration.
+Arrodes keeps user and project state outside working repositories. This guide covers application home selection, settings precedence, project resources, trust, and current-format storage.
 
 ## Application home
 
@@ -167,14 +167,13 @@ Project context may include `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLA
 
 Anthropic uses Console API-key or supported cloud-provider credentials, not Claude.ai subscription OAuth. Copilot's previous first-party login is not offered. Codex ChatGPT sign-in remains supported. Provider compatibility does not imply affiliation or endorsement, and the provider's account terms apply.
 
-## Existing home migration
+## Current home layout
 
-On startup, Arrodes safely moves root-level `settings.edn`, `keybindings.edn`, and `trust.edn` into `HOME/config/` only when the destination is free. A conflict fails without overwriting either copy.
+Only the current layout is supported. Settings, keybindings, and trust files belong
+under `HOME/config/`. Root-level copies are rejected with `unsupported-home-layout`;
+Arrodes never moves, merges, or overwrites them. Choose a current-format application
+home explicitly when necessary.
 
-A legacy `HOME/data` directory is deliberately left unchanged. Without `--data-dir`, startup reports `legacy-data` instead of assigning that history to the first project opened. Access it explicitly:
-
-```sh
-arrodes --data-dir ~/.arrodes/data
-```
-
-Only one live runtime may own that directory. New project sessions use their project-specific `PROJECT_STATE/data/` by default.
+An implicit `HOME/data` directory is not selected as project history. An explicit
+`--data-dir PATH` may point to any current-format store or a fresh directory. Older
+SQLite schemas are rejected, not converted. No existing files are deleted.

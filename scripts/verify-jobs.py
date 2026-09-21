@@ -1,8 +1,9 @@
-"""Exercise jobs over real RPC, including abrupt JVM exit and restart. No provider calls."""
+"""Exercise jobs over real RPC, including abrupt JVM exit and restart. No provider calls. Optional argv selects a packaged command, e.g. /path/arrodes --rpc."""
 import asyncio
 import json
 from pathlib import Path
 import tempfile
+import sys
 
 
 class Core:
@@ -14,7 +15,7 @@ class Core:
 
     async def start(self):
         self.process = await asyncio.create_subprocess_exec(
-            "clojure", "-Srepro", "-M:host", stdin=asyncio.subprocess.PIPE,
+            *(sys.argv[1:] or ["clojure", "-Srepro", "-M:host"]), stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         self.stderr_task = asyncio.create_task(self.stderr())
         assert (await self.packet())["type"] == "hello"

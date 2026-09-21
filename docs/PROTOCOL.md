@@ -218,7 +218,7 @@ Job output cursors do not acknowledge or consume output. Reusing the same cursor
 returns the same retained range; separate readers are independent. A cursor from a
 different job or beyond the capture fails with `invalid-output-cursor`. `tail?` is
 bounded by `limit` and reports capture truncation; it cannot recover discarded text.
-New records include optional `output-characters` for exact tail offsets. Cancellation
+Job records require `output-characters` for exact tail offsets. Cancellation
 records use `error.code = "cancelled"`, with original interruption details under
 `error.cause` when present. Completed/failed records and all RPC metadata remain rich;
 compact defaults apply to the REPL status helpers, with `detailed?` for full records.

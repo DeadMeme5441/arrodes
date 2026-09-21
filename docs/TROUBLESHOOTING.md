@@ -62,19 +62,12 @@ Another live runtime owns the same data directory. Close the other Arrodes proce
 
 If you deliberately need another store, pass a distinct `--data-dir PATH`. This creates a separate history; it is not a shared-runtime mode.
 
-### Legacy session history found
+### Unsupported store format or home layout
 
-Arrodes found session history at legacy `HOME/data` and refused to assign it to the current project. The directory is unchanged. Open it explicitly:
-
-```sh
-arrodes --data-dir ~/.arrodes/data
-```
-
-Close any process already using that store. New sessions should normally use the project-specific default under `HOME/projects/.../data`.
-
-### Global configuration migration conflict
-
-Root-level `settings.edn`, `keybindings.edn`, and `trust.edn` move to `HOME/config/` only when the destination is free. If both copies exist, Arrodes preserves both and stops. Compare them, keep the intended map in `HOME/config/`, and archive the other copy outside the application home before retrying.
+Arrodes reads only its current SQLite schema (3) and home layout. It does not migrate
+older stores or root-level configuration. An incompatible store remains untouched;
+use a fresh `--data-dir PATH` for a new history. If the home layout is unsupported,
+select a current-format `--home PATH`. Current settings belong in `HOME/config/`.
 
 ### Where is this project's state?
 

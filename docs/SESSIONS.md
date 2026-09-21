@@ -238,8 +238,8 @@ output. An empty page while running keeps the same cursor and has `:eof? false`.
 Cursors continue to work across settlement/restart when output was retained. Choose
 only one of `:offset`, `:after`, or `:tail? true`; mismatched/out-of-range cursors are
 rejected. `:tail? true` reads the last `:limit` characters of the **retained** capture,
-not discarded output beyond its cap. Earlier schema-2 captures without a saved
-character count are measured exactly when read; byte counts are not substituted.
+not discarded output beyond its cap. Retained captures require their exact recorded
+character count; missing metadata is rejected, and byte counts are not substituted.
 
 Each job
 retains at most 1,048,576 characters; text beyond that cap is discarded. Live output

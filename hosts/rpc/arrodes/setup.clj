@@ -58,8 +58,7 @@
      :config config
      :providers providers
      :project project
-     :project-trust project-trust
-     :home-migration (:home-migration rt)}))
+     :project-trust project-trust}))
 
 (defn- choose! [rt title message items]
   (runtime/ui! rt {:kind :select :title title :message message :items items}))

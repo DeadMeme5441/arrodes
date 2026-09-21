@@ -26,16 +26,11 @@
   ((:with-session manager) sid
     #(publish! manager (store/transition-job! (:store manager) sid id expected changes))))
 
-(defn normalize-record
-  "Present cancellation consistently, preserving older recorded causes without rewriting history."
-  [record]
-  (if (and (= :cancelled (:status record)) (not= "cancelled" (get-in record [:error :code])))
-    (assoc record :error (cond-> {:code "cancelled" :message "Job was cancelled"}
-                          (:error record) (assoc :cause (:error record))))
-    record))
-
 (defn inspect-job [manager sid id]
-  (let [record (normalize-record (store/job (:store manager) sid id))]
+  (let [record (store/job (:store manager) sid id)]
+    (when (= :cancelled (:status record))
+      (value/check! (= "cancelled" (get-in record [:error :code])) :invalid-job-record
+                    "Cancelled job record does not match the current format" {:job-id id}))
     (if-let [rid (:result-id record)]
       (assoc record :result (dissoc (artifacts/result (:store manager) sid rid) :value))
       record)))
@@ -276,18 +271,17 @@
               live (get @(:slots manager) id)
               captured (when live @(:output live))
               artifact-id (:output-artifact-id record)
-              ;; Earlier schema-2 records have no character count. A bounded read
-              ;; obtains the exact length; UTF-8 byte counts cannot stand in for it.
-              older-text (when (and (nil? captured) artifact-id (nil? (:output-characters record)))
-                           (:content (artifacts/read! (:store manager) sid artifact-id {:offset 1 :limit output-limit})))
-              length (or (some-> captured :text count) (:output-characters record) (some-> older-text count))
+              _ (when artifact-id
+                  (value/check! (and (integer? (:output-characters record))
+                                     (<= 0 (:output-characters record) output-limit))
+                                :invalid-job-record "Job output requires its recorded character count" {:job-id id}))
+              length (or (some-> captured :text count) (:output-characters record))
               _ (when (and after? length)
                   (value/check! (<= offset length) :invalid-output-cursor "Cursor is beyond the retained output" {}))
               start (if length (if tail? (max 0 (- length limit)) (min offset length)) offset)
               end (if length (+ start (min limit (- length start))) start)
               text (cond
                      captured (subs (:text captured) start end)
-                     older-text (subs older-text start end)
                      artifact-id (:content (artifacts/read! (:store manager) sid artifact-id {:offset (inc start) :limit limit}))
                      :else "")]
           (cond-> {:text text :offset start :next-offset end
@@ -355,7 +349,7 @@
   "Request cancellation of this job and owned children; return compact status. Inspect details separately."
   [handle]
   (let [[manager registry] (environment)]
-    (summary (normalize-record (cancel-job! manager (:session-id registry) (job-id registry handle))))))
+    (summary (cancel-job! manager (:session-id registry) (job-id registry handle)))))
 (defn wait
   "Wait up to :timeout-ms (default 1000, max 300000). Returns compact status; :detailed? opts into the full record."
   ([handle] (wait handle {}))

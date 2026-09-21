@@ -17,7 +17,7 @@
 (defrecord Store [^Connection connection ^ReentrantLock lock closed? path artifact-dir memory? opened-at
                   ^FileChannel owner-channel ^FileLock owner-lock owner-path])
 
-(def ^:private schema-version 2)
+(def ^:private schema-version 3)
 (def ^:private entry-kinds
   #{:message :config :compaction :branch-summary :custom :custom-context :label :evaluation})
 (def ^:private statuses #{:idle :running :failed :interrupted})
@@ -291,45 +291,36 @@
   (with-open [statement (.createStatement connection)]
     (doseq [sql statements] (.executeUpdate statement sql))))
 
-(defn- migrate! [^Connection connection]
-  (let [current (long (or (scalar connection "PRAGMA user_version" []) 0))]
-    (value/check! (<= current schema-version) :schema-too-new
-                 "Store schema was created by a newer Arrodes version"
-                 {:found current :supported schema-version})
-    (when (< current 1)
-      (let [old-auto (.getAutoCommit connection)]
-        (try
-          (.setAutoCommit connection false)
-          (execute-script!
-           connection
-           ["CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, name TEXT NOT NULL, cwd TEXT NOT NULL, head TEXT, revision INTEGER NOT NULL, base_config TEXT NOT NULL, config TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, metadata TEXT NOT NULL, labels TEXT NOT NULL, parent_id TEXT, fork_entry TEXT)"
-            "CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, parent_id TEXT, seq INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(session_id, seq), FOREIGN KEY(parent_id) REFERENCES entries(id))"
-            "CREATE INDEX IF NOT EXISTS entries_session_parent ON entries(session_id, parent_id)"
-            "CREATE TABLE IF NOT EXISTS queue (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, seq INTEGER NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, options TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(session_id, seq))"
-            "CREATE INDEX IF NOT EXISTS queue_session_seq ON queue(session_id, seq)"
-            "CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, kind TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, finished_at INTEGER, result TEXT, error TEXT)"
-            "CREATE INDEX IF NOT EXISTS operations_session_created ON operations(session_id, created_at)"
-            "CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, session_id TEXT, operation_id TEXT, type TEXT NOT NULL, data TEXT NOT NULL, time INTEGER NOT NULL)"
-            "CREATE INDEX IF NOT EXISTS events_session_seq ON events(session_id, seq)"
-            "CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL, kind TEXT NOT NULL, available INTEGER NOT NULL, created_at INTEGER NOT NULL, name TEXT, content BLOB, UNIQUE(session_id, id))"
-            "CREATE INDEX IF NOT EXISTS artifacts_session_created ON artifacts(session_id, created_at)"
-            "CREATE TABLE IF NOT EXISTS results (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, id INTEGER NOT NULL, kind TEXT NOT NULL, descriptor TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(session_id, id))"])
-          (execute-command! connection "PRAGMA user_version = 1")
-          (.commit connection)
-          (catch Throwable error
-            (try (.rollback connection) (catch Throwable _))
-            (throw error))
-          (finally (.setAutoCommit connection old-auto)))))))
+(defn- check-schema! [^Connection connection]
+  (let [current (long (or (scalar connection "PRAGMA user_version" []) 0))
+        fresh? (and (zero? current)
+                    (zero? (long (scalar connection "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'" []))))]
+    (value/check! (or fresh? (= current schema-version)) :unsupported-store-format
+                  "Unsupported store format. This version requires a current-format store; select a fresh --data-dir. Existing data was not migrated."
+                  {:found current :required schema-version})
+    fresh?))
 
-(defn- migrate-jobs! [^Connection connection]
-  (when (< (long (scalar connection "PRAGMA user_version" [])) 2)
+(defn- initialize-schema! [^Connection connection]
+  (when (check-schema! connection)
     (let [old-auto (.getAutoCommit connection)]
       (try
         (.setAutoCommit connection false)
         (execute-script! connection
-          ["CREATE TABLE jobs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, status TEXT NOT NULL, created_at INTEGER NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, record TEXT NOT NULL)"
-           "CREATE INDEX jobs_session_created ON jobs(session_id, created_at DESC, id)"])
-        (execute-command! connection "PRAGMA user_version = 2")
+          ["CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT NOT NULL, cwd TEXT NOT NULL, head TEXT, revision INTEGER NOT NULL, base_config TEXT NOT NULL, config TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, metadata TEXT NOT NULL, labels TEXT NOT NULL, parent_id TEXT, fork_entry TEXT)"
+            "CREATE TABLE entries (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, parent_id TEXT, seq INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(session_id, seq), FOREIGN KEY(parent_id) REFERENCES entries(id))"
+            "CREATE INDEX entries_session_parent ON entries(session_id, parent_id)"
+            "CREATE TABLE queue (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, seq INTEGER NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, options TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(session_id, seq))"
+            "CREATE INDEX queue_session_seq ON queue(session_id, seq)"
+            "CREATE TABLE operations (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, kind TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, finished_at INTEGER, result TEXT, error TEXT)"
+            "CREATE INDEX operations_session_created ON operations(session_id, created_at)"
+            "CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, session_id TEXT, operation_id TEXT, type TEXT NOT NULL, data TEXT NOT NULL, time INTEGER NOT NULL)"
+            "CREATE INDEX events_session_seq ON events(session_id, seq)"
+            "CREATE TABLE artifacts (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL, kind TEXT NOT NULL, available INTEGER NOT NULL, created_at INTEGER NOT NULL, name TEXT, content BLOB, UNIQUE(session_id, id))"
+            "CREATE INDEX artifacts_session_created ON artifacts(session_id, created_at)"
+            "CREATE TABLE results (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, id INTEGER NOT NULL, kind TEXT NOT NULL, descriptor TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(session_id, id))"
+            "CREATE TABLE jobs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, status TEXT NOT NULL, created_at INTEGER NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, record TEXT NOT NULL)"
+            "CREATE INDEX jobs_session_created ON jobs(session_id, created_at DESC, id)"])
+        (execute-command! connection "PRAGMA user_version = 3")
         (.commit connection)
         (catch Throwable error (.rollback connection) (throw error))
         (finally (.setAutoCommit connection old-auto))))))
@@ -374,6 +365,7 @@
                            :opened-at (util/now)}
                           owner))]
         (try
+          (check-schema! connection)
           (execute-command! connection "PRAGMA foreign_keys = ON")
           (execute-command! connection "PRAGMA busy_timeout = 5000")
           (if memory?
@@ -381,8 +373,7 @@
             (do (execute-command! connection "PRAGMA journal_mode = WAL")
                 (execute-command! connection "PRAGMA synchronous = FULL")))
           (tighten-store-files! store)
-          (migrate! connection)
-          (migrate-jobs! connection)
+          (initialize-schema! connection)
           (transact! store expire-live-results!)
           (tighten-store-files! store)
           (when db-path (util/private-file! db-path))

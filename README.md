@@ -216,7 +216,7 @@ Trust allows project instructions and executable resources to load; it is not an
 
 Nothing is shared automatically. The RPC `session.share` method explicitly creates an **unlisted GitHub gist**; anyone with its URL can read it.
 
-See [Configuration and project state](docs/CONFIGURATION.md) and [Troubleshooting](docs/TROUBLESHOOTING.md) for migration, ownership, and recovery details.
+See [Configuration and project state](docs/CONFIGURATION.md) and [Troubleshooting](docs/TROUBLESHOOTING.md) for current-format storage, ownership, and recovery details.
 
 ## Documentation
 

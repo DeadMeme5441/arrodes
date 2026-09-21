@@ -760,22 +760,7 @@
     :or {cwd "." settings {}}}]
   (let [cwd (util/real-path cwd)
         home (util/home-dir {:home home})
-        migration (util/migrate-legacy-home! home cwd)
-        _ (when (= :blocked (:status migration))
-            (value/fail! :migration/blocked
-                         "Legacy Arrodes config requires manual conflict resolution"
-                         {:conflicts (:conflicts migration)}))
-        project-info (util/project-info home cwd)
-        legacy-data (some #(when (= :data (:kind %)) %) (:entries migration))
-        _ (when (and legacy-data (nil? data-dir) (not memory?))
-            (value/fail!
-             :migration/legacy-data
-             (str "Legacy session history remains at " (:source legacy-data)
-                  ". Restart with --data-dir " (:source legacy-data)
-                  " to access it; Arrodes did not move or hide that history.")
-             {:path (:source legacy-data)
-              :data-dir-option (:source legacy-data)
-              :project-data-dir (util/resolve-path (:directory project-info) "data")}))
+        _ (util/ensure-current-home! home data-dir)
         project (util/open-project! home cwd)
         data-dir (util/canonical-path
                   (or data-dir (util/resolve-path (:directory project) "data")))
@@ -798,7 +783,6 @@
                                              (.availableProcessors (Runtime/getRuntime))))))
             runtime {:store store :provider provider :resources root-resources
                      :cwd cwd :home home :data-dir data-dir :project project
-                     :home-migration migration
                      :trust trust :initial-settings settings
                      :settings (atom (resources/settings root-resources))
                      :handles (atom {}) :operations (atom {}) :listeners (atom {})
