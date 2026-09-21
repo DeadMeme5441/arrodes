@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Resume automatic following when scrolling back to the bottom during a streamed reply, including when new text arrives before the next frame.
+
 - Add session-owned background Clojure jobs with independent cancellation/output, owned child cleanup, retained native results, paged logs, and once-only completion delivery at model boundaries. Restart records interrupted work without replaying effects.
 - Render jobs inline with existing execution artifacts, use the full-terminal `/jobs` browser and existing inspector, and add `job.*` RPC controls; preserve jobs across turns and cancel/await them before evaluator teardown.
 - Upgrade SQLite stores from schema 1 to 2 transactionally. Existing history/results are preserved; older executables reject upgraded stores, so downgrading requires restoring a pre-upgrade data-directory backup. Job ownership is not copied by fork/import.

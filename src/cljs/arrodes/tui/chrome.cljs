@@ -140,8 +140,7 @@
              (finally (swap! (:local view) assoc :syncing-editor? false)))))
     (set! (.-height (:composer view))
           (max 1 (min (if (< height 18) 2 7) (max 2 (.-virtualLineCount (:composer view))))))
-    (w/paint! (:composer-box view) :borderColor (if (= :composer (get-in s [:ui :focus])) :ui/accent :border/default))
-    (set! (.-stickyScroll (:transcript view)) (boolean (get-in s [:ui :follow?] true)))))
+    (w/paint! (:composer-box view) :borderColor (if (= :composer (get-in s [:ui :focus])) :ui/accent :border/default))))
 
 
 (defn render-welcome! [view]

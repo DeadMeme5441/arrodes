@@ -31,7 +31,9 @@ interactive region or expanded execution; prose stays on the base surface.
   shows highlighted Clojure source and output. Large output stays bounded
   and inspectable, and native values remain available through the inspector.
   The transcript fills the available vertical space independently of streamed
-  content height. Native sticky scrolling owns following new content; post-paint
+  content height. Returning to the bottom restores follow intent before new text
+  changes the layout; native sticky mode stays enabled to track manual scrolling.
+  Native sticky scrolling owns following new content; post-paint
   height and follow corrections must not create a second visible layout step.
 - The welcome screen offers recent sessions and a compact starting prompt. The same
   multiline editor stays anchored at the terminal bottom, with two quiet metadata rows directly below

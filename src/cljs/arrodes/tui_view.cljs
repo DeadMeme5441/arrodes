@@ -27,6 +27,9 @@
         (swap! (:local view) assoc :rendered-session session-id :anchor nil :inspector-signature nil
                :restore-scroll (get-in (c/state view) [:ui :scroll-top] 0)))
       (theme-picker/sync! view)
+      ;; Re-enable follow intent at the old bottom before Markdown grows. Otherwise
+      ;; remembering a paused anchor can undo native sticky scrolling this frame.
+      (when-not switching? (transcript/resume-follow! view))
       (chrome/render-chrome! view)
       (transcript/render-rows! view)
       (chrome/render-welcome! view)
@@ -95,7 +98,7 @@
   (when (and (not @(:closed? view)) (.-visible (:conversation view))
              (= (get-in (c/state view) [:view :session :id])
                 (:rendered-session @(:local view))))
-    (let [scroll (:transcript view) renderer (:renderer view)]
+    (let [scroll (:transcript view)]
       (when-some [position (:restore-scroll @(:local view))]
         (swap! (:local view) dissoc :restore-scroll)
         (.scrollTo scroll (if (get-in (c/state view) [:ui :follow?] true)
@@ -106,15 +109,8 @@
         (when-let [record (get @(:records view) id)]
           (let [delta (- (.-screenY (:root record)) (.-screenY (.-viewport scroll)) offset)]
             (when (not (zero? delta)) (.scrollBy scroll delta)))))
-      ;; Native sticky scrolling owns following new content during layout.
-      ;; A second post-paint scroll correction introduces a visible extra step.
-      ;; Wheel/scrollbar movement can reach the end without using Jump to latest.
-      ;; Reconcile after native scrolling and layout, never from pre-scroll bounds.
-      (when (and (not (get-in (c/state view) [:ui :follow?] true))
-                 (transcript/transcript-at-bottom? view) (not (.-hasSelection renderer)))
-        (swap! (:local view) assoc :anchor nil)
-        (set! (.-stickyScroll scroll) true)
-        (c/ui! view assoc :follow? true))
+      ;; Native scrolling/layout may reach the bottom without an app refresh.
+      (transcript/resume-follow! view)
       (swap! (:local view) dissoc :manual-scroll?)
       (let [position (.-scrollTop scroll)]
         (when (not= position (get-in (c/state view) [:ui :scroll-top]))
@@ -144,7 +140,6 @@
                                           :onMouseScroll (fn [_]
                                                            (when-let [view @view-ref]
                                                              (swap! (:local view) assoc :anchor nil :manual-scroll? true)
-                                                             (set! (.-stickyScroll (:transcript view)) false)
                                                              (c/ui! view assoc :follow? false)))})
         welcome (w/box renderer {:id "welcome" :width "100%" :paddingX 2 :paddingTop 1})
         welcome-title (w/text renderer "ARRODES" {:height 1 :fg :ui/accent})
