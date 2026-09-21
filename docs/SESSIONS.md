@@ -187,9 +187,12 @@ Use ordinary Clojure functions in the session REPL:
   (jobs/start! {:name "Run tests"}
     #(bash {:command "bun test"})))
 
-(jobs/inspect build)
+(jobs/inspect build)                    ; compact status
+(jobs/inspect build {:detailed? true})   ; provenance and diagnostics
 (jobs/list {:limit 20})
-(jobs/output build {:offset 0 :limit 4096})
+(def page (jobs/output build {:limit 4096}))
+(jobs/output build {:after (:cursor page)}) ; only text after that page
+(jobs/output build {:tail? true :limit 4096}) ; latest retained characters
 (jobs/wait build {:timeout-ms 1000})
 (jobs/result build)
 (jobs/cancel! build)
@@ -197,8 +200,15 @@ Use ordinary Clojure functions in the session REPL:
 
 `start!` accepts a zero-argument function and optional `:name` (1–200 characters),
 and returns `{:id ... :session-id ...}` immediately. Other functions accept that
-handle or a job ID in the current session. `list` is newest-first, with a maximum
-page size of 500; pass the last ID as `:before` for older jobs.
+handle, compact status map, or a job ID in the current session. `inspect`, `list`,
+`wait`, and `cancel!` return compact native maps: ID, name, status, elapsed duration,
+result ID/availability when present, and a short failure reason (240 characters,
+with `:truncated? true` when clipped). Provenance, timestamps, full diagnostics, and
+result descriptors stay available through `inspect`/`list`/`wait` with
+`{:detailed? true}`. The value returned by `jobs/result` is unchanged.
+
+`list` is newest-first, with a maximum page size of 500; pass the last ID as `:before`
+for older jobs. RPC job records and the UI continue to receive full metadata.
 
 Jobs have their own worker, cancellation token and captured output. They do not
 hold the foreground evaluation lock. The default runtime limit is 32 admitted jobs
@@ -213,14 +223,25 @@ function when that should fail the job. A job is not a transaction: earlier file
 network, or shell effects survive later failure and cancellation.
 
 `result` never blocks and returns only a successfully completed job's native value.
-Use `inspect` for failures, availability and the retained result descriptor; supported
+Use `inspect` for failures and availability, and detailed inspection for the retained
+result descriptor; supported
 values survive restart, arbitrary JVM objects do not. `wait` returns the current
 record after at most `:timeout-ms` (default 1000, range 0–300000). Waiting does not
 cancel execution. Waiting for oneself or an ancestor is rejected.
 
 Output merges printed stdout/stderr and registered shell progress into a bounded
 capture. `output` uses **zero-based character offsets**, unlike the one-based artifact
-API. It returns `:text`, `:next-offset`, `:more?`, `:eof?`, and `:truncated?`. Each job
+API. It returns `:text`, `:offset`, `:next-offset`, `:cursor`, `:more?`, `:eof?`, and
+`:truncated?`. Pass `{:after (:cursor page)}` to read newly available text. Cursors are
+explicit, reusable maps tied to the job; separate readers never consume one another's
+output. An empty page while running keeps the same cursor and has `:eof? false`.
+Cursors continue to work across settlement/restart when output was retained. Choose
+only one of `:offset`, `:after`, or `:tail? true`; mismatched/out-of-range cursors are
+rejected. `:tail? true` reads the last `:limit` characters of the **retained** capture,
+not discarded output beyond its cap. Earlier schema-2 captures without a saved
+character count are measured exactly when read; byte counts are not substituted.
+
+Each job
 retains at most 1,048,576 characters; text beyond that cap is discarded. Live output
 is transient; settlement saves the capture as an immutable artifact. A crash can
 lose the live capture, and an interrupted job reports it unavailable.
@@ -228,7 +249,11 @@ lose the live capture, and an interrupted job reports it unavailable.
 Lifecycle: queued → running → completed/failed; cancellation of queued work prevents
 execution, while running work stays `:cancelling` until its worker and owned children
 exit. Arbitrary Clojure code may ignore interruption, so cancellation can remain
-pending. Children started inside a job are owned by that job; parents await children
+pending. Requested cancellation is classified as `cancelled`, including in the retained
+result descriptor. Detailed inspection preserves the original exception under
+`:error :cause`; compact status does not describe cancellation as a failure. An
+unrequested exception (even an interruption exception) still fails the job.
+Children started inside a job are owned by that job; parents await children
 before settling and cancel them on failure/cancellation. These are functions, not
 subagents.
 
@@ -249,7 +274,8 @@ inspectable within the originating session; forks/imports do not recreate jobs.
 `/jobs` uses the existing full-terminal browser and opens the execution inspector
 directly. Jobs also appear as live execution rows in the conversation; they never
 open a popup automatically. The inspector provides Output/Value/Code tabs, paging,
-F5 refresh, and Ctrl+K cancellation. The footer counts active background jobs. RPC clients use `job.list`,
+F5 refresh, End/Latest to read the retained output tail, and Ctrl+K cancellation.
+Refreshing preserves the selected output page or tail view. The footer counts active background jobs. RPC clients use `job.list`,
 `job.inspect`, `job.wait`, `job.cancel`, and `job.output`; start work through
 `session.evaluate` using `jobs/start!`. `session.view` includes the newest job records,
 and durable `job/changed` events reconcile status after reconnect.

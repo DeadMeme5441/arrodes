@@ -50,4 +50,5 @@ Escape closes job inspection before foreground cancellation. Cancelling a job pr
 the composer draft. Completed jobs and retained results remain inspectable after reconnect.
 
 Jobs appear inline with other execution artifacts; neither launch nor completion
-opens a popup. The inspector supplies F5 refresh and Ctrl+K cancellation.
+opens a popup. The inspector supplies F5 refresh, End/Latest for the retained output tail, and
+Ctrl+K cancellation. Refresh preserves the current page or tail view.

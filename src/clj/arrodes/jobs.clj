@@ -26,11 +26,42 @@
   ((:with-session manager) sid
     #(publish! manager (store/transition-job! (:store manager) sid id expected changes))))
 
+(defn normalize-record
+  "Present cancellation consistently, preserving older recorded causes without rewriting history."
+  [record]
+  (if (and (= :cancelled (:status record)) (not= "cancelled" (get-in record [:error :code])))
+    (assoc record :error (cond-> {:code "cancelled" :message "Job was cancelled"}
+                          (:error record) (assoc :cause (:error record))))
+    record))
+
 (defn inspect-job [manager sid id]
-  (let [record (store/job (:store manager) sid id)]
+  (let [record (normalize-record (store/job (:store manager) sid id))]
     (if-let [rid (:result-id record)]
       (assoc record :result (dissoc (artifacts/result (:store manager) sid rid) :value))
       record)))
+
+(defn- brief-error [error]
+  (let [message (str (:message error))]
+    (cond-> {:code (:code error) :message (subs message 0 (min 240 (count message)))}
+      (> (count message) 240) (assoc :truncated? true))))
+
+(defn summary
+  "Small native status view. Detailed records and results remain separately inspectable."
+  [record]
+  (cond-> (select-keys record [:id :name :status :result-id])
+    (:started-at record)
+    (assoc :duration-ms (max 0 (- (or (:finished-at record) (util/now)) (:started-at record))))
+    (:result record)
+    (assoc :result-available? (get-in record [:result :available?]))
+    (:output-truncated? record) (assoc :output-truncated? true)
+    (and (:error record) (not= :cancelled (:status record)))
+    (assoc :error (brief-error (:error record)))))
+
+(defn- detailed-option! [opts allowed]
+  (value/check! (and (map? opts) (every? allowed (keys opts))
+                     (or (not (contains? opts :detailed?)) (boolean? (:detailed? opts))))
+                :invalid-job-options "Unsupported job options or non-boolean :detailed?" {})
+  (:detailed? opts))
 
 (defn list-jobs [manager sid opts]
   (mapv #(inspect-job manager sid (:id %)) (store/jobs (:store manager) sid opts)))
@@ -49,7 +80,8 @@
     (reset! cancelled true)
     (let [record (transition! manager sid id #{:queued :running}
                               (if (= :queued (:status (store/job (:store manager) sid id)))
-                                {:status :cancelled :finished-at (util/now)}
+                                {:status :cancelled :finished-at (util/now)
+                                 :error {:code "cancelled" :message "Job was cancelled before execution"}}
                                 {:status :cancelling}))]
       (doseq [child (vals @(:children slot))] (cancel-slot! manager child))
       (when-let [worker @thread]
@@ -109,6 +141,12 @@
      :message (let [message (str (or (ex-message error) (.getName (class error))))]
                 (subs message 0 (min 8000 (count message))))}))
 
+(defn- cancellation-error [cause]
+  (ex-info "Job was cancelled"
+           (cond-> {:error/code "cancelled"}
+             cause (assoc :cause (assoc (error-data cause) :class (.getName (class cause)))))
+           cause))
+
 (defn- run-job! [manager registry slot f bindings context]
   (let [{:keys [sid id cancelled]} slot]
     (try
@@ -142,18 +180,23 @@
                   (try (deref (:done child) 50 nil) (catch InterruptedException _ nil))
                   (recur))))
             (Thread/interrupted)
-            (let [error (:error outcome)
-                  result (capabilities/retain-job-result! registry id (:value outcome) error)
-                  captured @(:output slot)
+            (let [captured @(:output slot)
                   artifact (artifacts/put! (:store manager) sid (:text captured)
                                           {:kind :text :name (str "job-" id ".log")})]
+              ;; Cancellation and successful settlement race under one gate. The
+              ;; retained descriptor and job record must describe the same outcome.
               (locking (:lock manager)
-                (transition! manager sid id #{:running :cancelling}
-                             (cond-> {:status (cond @cancelled :cancelled error :failed :else :completed)
-                                      :finished-at (util/now) :result-id (:id result)
-                                      :output-artifact-id (:id artifact)
-                                      :output-truncated? (:truncated? captured)}
-                               error (assoc :error (error-data error)))))))))
+                (let [error (if @cancelled (cancellation-error (:error outcome)) (:error outcome))
+                      result (capabilities/retain-job-result! registry id (:value outcome) error)]
+                  (transition! manager sid id #{:running :cancelling}
+                               (cond-> {:status (cond @cancelled :cancelled error :failed :else :completed)
+                                        :finished-at (util/now) :result-id (:id result)
+                                        :output-artifact-id (:id artifact)
+                                        :output-characters (count (:text captured))
+                                        :output-truncated? (:truncated? captured)}
+                                 error (assoc :error (cond-> (error-data error)
+                                                      (:cause (ex-data error))
+                                                      (assoc :cause (:cause (ex-data error)))))))))))))
       (catch Throwable error
         ;; Persistence/retention failure must never replay the function.
         (Thread/interrupted)
@@ -209,24 +252,51 @@
             (deliver (:done slot) true)))
         {:id id :session-id sid}))))
 
-(defn output-job [manager sid id {:keys [offset limit] :or {offset 0 limit 4096}}]
-  (value/check! (and (integer? offset) (<= 0 offset) (integer? limit) (<= 1 limit 32768))
-                :invalid-output-page "Output needs a non-negative offset and limit 1..32768" {})
-  (store/store-read (:store manager)
-    (fn [_]
-      (let [record (store/job (:store manager) sid id)
-            live (get @(:slots manager) id)
-            captured (when live @(:output live))]
-        (if captured
-          (let [text (:text captured) start (min offset (count text)) end (min (count text) (+ start limit))]
-            {:text (subs text start end) :offset start :next-offset end
-             :more? (< end (count text)) :eof? (and (terminal? record) (= end (count text))) :truncated? (:truncated? captured)})
-          (if-let [artifact-id (:output-artifact-id record)]
-            (let [page (artifacts/read! (:store manager) sid artifact-id {:offset (inc offset) :limit limit})]
-              {:text (:content page) :offset offset :next-offset (+ offset (count (:content page)))
-               :more? (:truncated? page) :eof? (not (:truncated? page)) :truncated? (:output-truncated? record) :artifact-id artifact-id})
-            {:text "" :offset offset :next-offset offset :eof? (terminal? record)
-             :unavailable? (= :interrupted (:status record))}))))))
+(defn- output-options! [id opts]
+  (let [{:keys [offset limit after tail?] :or {offset 0 limit 4096}} opts]
+    (value/check! (and (map? opts) (every? #{:offset :limit :after :tail?} (keys opts))
+                       (or (not (contains? opts :tail?)) (boolean? tail?))
+                       (integer? offset) (<= 0 offset Long/MAX_VALUE)
+                       (integer? limit) (<= 1 limit 32768)
+                       (<= (+ (if (contains? opts :offset) 1 0)
+                              (if (contains? opts :after) 1 0) (if tail? 1 0)) 1))
+                  :invalid-output-page "Choose offset, after cursor, or tail?; limit must be 1..32768" {})
+    (when (contains? opts :after)
+      (value/check! (and (map? after) (= #{:job-id :offset} (set (keys after)))
+                         (= id (:job-id after)) (integer? (:offset after))
+                         (<= 0 (:offset after) Long/MAX_VALUE))
+                    :invalid-output-cursor "Output cursor must belong to this job and have a non-negative offset" {}))
+    {:offset (if after (:offset after) offset) :limit limit :tail? tail? :after? (some? after)}))
+
+(defn output-job [manager sid id opts]
+  (let [{:keys [offset limit tail? after?]} (output-options! id opts)]
+    (store/store-read (:store manager)
+      (fn [_]
+        (let [record (store/job (:store manager) sid id)
+              live (get @(:slots manager) id)
+              captured (when live @(:output live))
+              artifact-id (:output-artifact-id record)
+              ;; Earlier schema-2 records have no character count. A bounded read
+              ;; obtains the exact length; UTF-8 byte counts cannot stand in for it.
+              older-text (when (and (nil? captured) artifact-id (nil? (:output-characters record)))
+                           (:content (artifacts/read! (:store manager) sid artifact-id {:offset 1 :limit output-limit})))
+              length (or (some-> captured :text count) (:output-characters record) (some-> older-text count))
+              _ (when (and after? length)
+                  (value/check! (<= offset length) :invalid-output-cursor "Cursor is beyond the retained output" {}))
+              start (if length (if tail? (max 0 (- length limit)) (min offset length)) offset)
+              end (if length (+ start (min limit (- length start))) start)
+              text (cond
+                     captured (subs (:text captured) start end)
+                     older-text (subs older-text start end)
+                     artifact-id (:content (artifacts/read! (:store manager) sid artifact-id {:offset (inc start) :limit limit}))
+                     :else "")]
+          (cond-> {:text text :offset start :next-offset end
+                   :cursor {:job-id id :offset end}
+                   :more? (boolean (and length (< end length)))
+                   :eof? (and (terminal? record) (or (nil? length) (= end length)))
+                   :truncated? (boolean (if captured (:truncated? captured) (:output-truncated? record)))}
+            artifact-id (assoc :artifact-id artifact-id)
+            (and (nil? length) (= :interrupted (:status record))) (assoc :unavailable? true)))))))
 
 (defn block-session! [manager sid]
   (locking (:lock manager) (swap! (:blocked manager) conj sid)))
@@ -257,7 +327,7 @@
     (value/check! manager :jobs-unavailable "Job functions require an active Arrodes REPL invocation" {})
     [manager registry context]))
 (defn- job-id [registry handle]
-  (when (map? handle)
+  (when (and (map? handle) (contains? handle :session-id))
     (value/check! (= (:session-id registry) (:session-id handle)) :job-not-found "Job belongs to another session" {}))
   (if (map? handle) (:id handle) handle))
 
@@ -266,24 +336,36 @@
   ([f] (start! {} f))
   ([opts f] (let [[manager registry context] (environment)] (start-job! manager registry opts f context))))
 (defn inspect
-  "Inspect status, origin, failure, and retained result metadata without loading the value."
-  [handle]
-  (let [[manager registry] (environment)] (inspect-job manager (:session-id registry) (job-id registry handle))))
+  "Compact status by default. Pass {:detailed? true} for origin, diagnostics, and retained descriptors."
+  ([handle] (inspect handle {}))
+  ([handle opts]
+   (let [detailed? (detailed-option! opts #{:detailed?})
+         [manager registry] (environment)
+         record (inspect-job manager (:session-id registry) (job-id registry handle))]
+     (if detailed? record (summary record)))))
 (defn list
-  "List newest jobs. Page with {:limit 100 :before last-id}."
+  "List compact statuses newest first. Options: :limit, :before, :detailed? (default false)."
   ([] (list {}))
-  ([opts] (let [[manager registry] (environment)] (list-jobs manager (:session-id registry) opts))))
+  ([opts]
+   (let [detailed? (detailed-option! opts #{:limit :before :detailed?})
+         [manager registry] (environment)
+         records (list-jobs manager (:session-id registry) (dissoc opts :detailed?))]
+     (if detailed? records (mapv summary records)))))
 (defn cancel!
-  "Request cancellation of this job and owned children. Running work remains :cancelling until it exits."
+  "Request cancellation of this job and owned children; return compact status. Inspect details separately."
   [handle]
-  (let [[manager registry] (environment)] (cancel-job! manager (:session-id registry) (job-id registry handle))))
+  (let [[manager registry] (environment)]
+    (summary (normalize-record (cancel-job! manager (:session-id registry) (job-id registry handle))))))
 (defn wait
-  "Wait up to :timeout-ms (default 1000, max 300000), returning the current record."
+  "Wait up to :timeout-ms (default 1000, max 300000). Returns compact status; :detailed? opts into the full record."
   ([handle] (wait handle {}))
-  ([handle {:keys [timeout-ms] :or {timeout-ms 1000}}]
-   (let [[manager registry] (environment)] (await-job manager (:session-id registry) (job-id registry handle) timeout-ms))))
+  ([handle opts]
+   (let [detailed? (detailed-option! opts #{:timeout-ms :detailed?})
+         [manager registry] (environment)
+         record (await-job manager (:session-id registry) (job-id registry handle) (get opts :timeout-ms 1000))]
+     (if detailed? record (summary record)))))
 (defn output
-  "Page captured output, with zero-based character offsets. Hard cap: 1 MiB characters per job."
+  "Read output by :offset, {:after (:cursor previous-page)}, or {:tail? true}. :limit defaults to 4096 (max 32768) characters. Cursors are independent, reusable, and job-scoped; tail reads the end of retained output."
   ([handle] (output handle {}))
   ([handle opts] (let [[manager registry] (environment)] (output-job manager (:session-id registry) (job-id registry handle) opts))))
 (defn result

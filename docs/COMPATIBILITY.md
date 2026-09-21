@@ -35,7 +35,8 @@ export format remains version 1: exports contain history/results/artifacts, incl
 job completion entries already delivered to context, but do not transfer job ownership
 or executable functions. Forks/clones/imports never launch jobs or copy live job handles;
 completion-entry result references are remapped through the existing retention contract.
- There is no automatic migration of the
+
+There is no automatic migration of the
 legacy shared store into a project's store. Do not describe that safeguard as a completed
 upgrade experience; changes to it need a dedicated migration design and fixtures.
 
@@ -45,3 +46,10 @@ State whether the previous executable can reopen the data after upgrade. If a fo
 change prevents downgrade, document the backup/restore path before publication. Record
 meaningful contract decisions in [decision records](decisions/README.md). Release notes
 must describe migration and compatibility effects, not just code changes.
+
+The job-ergonomics update keeps schema 2 and RPC protocol 1. `output-characters` is
+optional on older job records, and output cursors/tail options are additive. Existing
+cancellation records are presented as cancellations with their old error preserved
+as a diagnostic cause; stored history is not rewritten. REPL status helpers now
+return compact maps by default; code needing provenance/timestamps/descriptors must
+request `:detailed? true`. Native computation results are unaffected.

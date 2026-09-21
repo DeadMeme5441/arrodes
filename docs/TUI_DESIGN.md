@@ -65,4 +65,5 @@ interactive region or expanded execution; prose stays on the base surface.
   to their launching evaluation and updated in place. They never open popups on start
   or completion. `/jobs` uses the full-terminal browser pattern; Enter goes directly
   to the existing full-width inspector without an intermediate action-selection view.
-  Cancellation lives in that inspector (Ctrl+K), with F5 refresh and the normal tabs.
+  Cancellation lives in that inspector (Ctrl+K), with F5 refresh and the normal tabs. End/Latest reads the retained output tail in
+  the same inspector; refreshing preserves that view.

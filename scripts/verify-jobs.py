@@ -79,7 +79,13 @@ async def main():
             recovered = await core.call("job.inspect", {"session-id": sid, "job-id": interrupted["id"]})
             assert recovered["status"] == "interrupted", recovered
             assert (root / "effect.txt").read_text() == "once\n", "External effect was repeated"
-            assert (await core.call("job.output", completed_params))["text"] == "saved output\n"
+            saved_output = await core.call("job.output", completed_params)
+            assert saved_output["text"] == "saved output\n"
+            assert (await core.call("job.output", dict(completed_params, after=saved_output["cursor"])))["text"] == ""
+            tail = await core.call("job.output", dict(completed_params, **{"tail?": True, "limit": 7}))
+            assert tail["text"] == "output\n" and tail["eof?"], tail
+            cancelled_record = await core.call("job.inspect", cancelled_params)
+            assert cancelled_record["error"]["code"] == "cancelled", cancelled_record
             result = await core.call("session.evaluate", {"session-id": sid,
                                      "source": '(jobs/result "' + completed["id"] + '")'})
             assert result["result"]["value"] == {"answer": 42}, result

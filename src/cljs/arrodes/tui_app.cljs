@@ -401,7 +401,7 @@
       (-> (client/mutation! app "job.cancel" {:session-id sid :job-id (:id data)}) (.then client/decode))
       :job-output
       (-> (client/call! app "job.output" (merge {:session-id sid :job-id (:id data) :limit 12000}
-                                               (select-keys data [:offset :limit]))) (.then client/decode))
+                                               (select-keys data [:offset :limit :after :tail?]))) (.then client/decode))
       :refresh (if sid (sessions/hydrate-session! app sid false) (client/resolved (:view state)))
       :sessions (sessions/load-sessions! app)
       :switch-session (sessions/switch-session! app (:id data))

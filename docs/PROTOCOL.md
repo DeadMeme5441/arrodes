@@ -205,7 +205,7 @@ value is a session-scoped job handle. Every job method requires `session-id`.
 | `job.inspect` | `job-id`; returns status, origin, error, result descriptor and output artifact reference |
 | `job.wait` | `job-id`, optional `timeout-ms` (1–300000, default 1000); returns current record without cancelling on timeout |
 | `job.cancel` | `job-id`; requests cancellation of the job and its owned children |
-| `job.output` | `job-id`, optional zero-based `offset` (default 0), `limit` (1–32768, default 4096); returns a text page |
+| `job.output` | `job-id`, optional `limit` (1–32768, default 4096), and one of zero-based `offset`, `after` cursor, or `tail?: true`; returns a text page and reusable `{job-id, offset}` cursor |
 
 Use `result.inspect` with a completed job's `result-id` for bounded native EDN, or
 `jobs/result` in the REPL for its native value. `session.view.state.jobs` contains the
@@ -213,3 +213,12 @@ newest 100 records plus every active job. `job/changed` carries `{job: record}` 
 `{job-id, content}` transiently. Completed output is artifact-backed. Job cancellation
 can return `cancelling`; terminal state means execution/owned-child cleanup has settled.
 Cross-session controls fail with `job-not-found`. No request automatically replays work.
+
+Job output cursors do not acknowledge or consume output. Reusing the same cursor
+returns the same retained range; separate readers are independent. A cursor from a
+different job or beyond the capture fails with `invalid-output-cursor`. `tail?` is
+bounded by `limit` and reports capture truncation; it cannot recover discarded text.
+New records include optional `output-characters` for exact tail offsets. Cancellation
+records use `error.code = "cancelled"`, with original interruption details under
+`error.cause` when present. Completed/failed records and all RPC metadata remain rich;
+compact defaults apply to the REPL status helpers, with `detailed?` for full records.

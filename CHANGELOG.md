@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Return compact REPL job statuses by default, with `:detailed? true` for full provenance and diagnostics; native job result values remain unchanged.
+- Classify requested job cancellation consistently as cancelled and retain the original interruption as a diagnostic cause.
+- Add independent, reusable job-output cursors and retained-tail reads, including after restart. The existing inspector supports End/Latest and preserves its page or tail on refresh.
+
 - Resume automatic following when scrolling back to the bottom during a streamed reply, including when new text arrives before the next frame.
 
 - Add session-owned background Clojure jobs with independent cancellation/output, owned child cleanup, retained native results, paged logs, and once-only completion delivery at model boundaries. Restart records interrupted work without replaying effects.

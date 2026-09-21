@@ -271,7 +271,7 @@
                               (positive-int (:timeout-ms params) :timeout-ms 1000 300000))
     "job.cancel" (jobs/cancel-job! (:jobs rt) (sid params) (required-string params :job-id))
     "job.output" (jobs/output-job (:jobs rt) (sid params) (required-string params :job-id)
-                                 (select-keys params [:offset :limit]))
+                                 (select-keys params [:offset :limit :after :tail?]))
     "operation.list" {:operations (runtime/operations rt params)}
     "operation.inspect" (runtime/operation rt (oid params))
     "operation.wait" (runtime/wait! rt (oid params) (positive-int (:timeout-ms params) :timeout-ms 30000 300000))

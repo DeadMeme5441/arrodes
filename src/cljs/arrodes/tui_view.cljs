@@ -54,6 +54,7 @@
 
 
 (defn frame! [view]
+  (inspection/frame! view)
   (when (and (not @(:closed? view)) (.-visible (:modal-sidebar view)))
     (when-let [id (:sidebar-choice @(:local view))]
       (when-let [row (.findDescendantById (:modal-sidebar view) id)]
@@ -169,6 +170,7 @@
         inspector-prev (w/button renderer "[Prev]" #(inspection/page! @view-ref :prev) {:width 8 :visible false})
         inspector-next (w/button renderer "[Next page]" #(inspection/page! @view-ref :next) {:width 13 :visible false})
         inspector-job-cancel (w/button renderer "[Cancel job]" #(inspection/cancel-job! @view-ref) {:width 14 :visible false})
+        inspector-job-latest (w/button renderer "[Latest]" #(inspection/latest-job-output! @view-ref) {:width 10 :visible false})
         inspector-job-refresh (w/button renderer "[Refresh]" #(inspection/request-inspection! @view-ref (c/selected-row @view-ref)) {:width 11 :visible false})
         inspector-branch (w/button renderer "[Branch]" (fn [] (when-let [row (c/selected-row @view-ref)] (inspection/branch! @view-ref row)))
                                    {:width 9 :visible false})
@@ -326,7 +328,7 @@
               :metadata metadata :project-status project-status :command-menu command-menu :spacer spacer
               :inspector inspector :inspector-title inspector-title :inspector-tabs inspector-tabs
               :inspector-scroll inspector-scroll :inspector-output inspector-output :inspector-next inspector-next
-              :inspector-prev inspector-prev :inspector-job-cancel inspector-job-cancel :inspector-job-refresh inspector-job-refresh
+              :inspector-prev inspector-prev :inspector-job-cancel inspector-job-cancel :inspector-job-refresh inspector-job-refresh :inspector-job-latest inspector-job-latest
               :inspector-branch inspector-branch :inspector-lifetime inspector-lifetime
               :pending pending :pending-items pending-items :pending-more pending-more :new-activity new-activity
               :widget-box widget-box :widget-items widget-items
@@ -347,7 +349,7 @@
     (w/add! inspector-header inspector-title inspector-close)
     (doseq [tab [:summary :output :value :code]] (.add inspector-tab-row (get inspector-tabs tab)))
     (w/add! inspector-scroll inspector-output)
-    (w/add! inspector-actions inspector-copy inspector-prev inspector-next inspector-branch inspector-job-refresh inspector-job-cancel)
+    (w/add! inspector-actions inspector-copy inspector-prev inspector-next inspector-branch inspector-job-refresh inspector-job-latest inspector-job-cancel)
     (w/add! inspector inspector-header inspector-tab-row inspector-scroll inspector-actions inspector-lifetime)
     (w/add! body conversation inspector)
     (w/add! pending pending-title pending-items pending-more)

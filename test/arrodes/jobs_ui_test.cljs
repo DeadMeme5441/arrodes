@@ -73,14 +73,28 @@
         (.then (fn [_] (capture! @terminal "jobs-inspector") (.pressKey (.-mockInput @terminal) "k" #js {:ctrl true})))
         (.then (fn [_] (until! @terminal #(= :cancelled (:status (job application "Long runner"))) "Job cancellation did not settle")))
         (.then (fn [_]
+                 (check! (= "cancelled" (get-in (job application "Long runner") [:error :code]))
+                         "Cancellation must not be labelled job-failed")))
+        (.then (fn [_]
                  (check! (= "preserve this draft" (get-in @(:state application) [:ui :draft])) "Jobs screen discarded composer draft")
                  (.pressEscape (.-mockInput @terminal))
-                 (app/command! application :submit {:mode :evaluate :text "(jobs/start! {:name \"Completed value\"} #(do (print (apply str (repeat 25000 \"x\"))) {:answer 42 :ratio 2/3}))"})))
+                 (app/command! application :submit {:mode :evaluate :text "(jobs/start! {:name \"Completed value\"} #(do (print (apply str (repeat 25000 \"x\"))) (print \"LATEST-JOB-OUTPUT\") {:answer 42 :ratio 2/3}))"})))
         (.then (fn [_] (until! @terminal #(= :completed (:status (job application "Completed value"))) "Completion event not projected")))
         (.then (fn [_] (jobs/open! @mounted) (choose! application @mounted @terminal "Completed value")))
         (.then (fn [_] (until! @terminal #(= 12000 (count (get-in @(:state application) [:ui :inspection :job-output :text]))) "Output page not loaded")))
         (.then (fn [_] (inspection/page! @mounted :next)))
         (.then (fn [_] (until! @terminal #(= 12000 (get-in @(:state application) [:ui :inspection :job-output :offset])) "Next output page lost its offset")))
+        (.then (fn [_] (.pressKey (.-mockInput @terminal) "END")))
+        (.then (fn [_]
+                 (until! @terminal #(and (get-in @(:state application) [:ui :inspection :job-output :tail?])
+                                        (> (get-in @(:state application) [:ui :inspection :job-output :offset] 0) 12000)
+                                        (str/includes? (.captureCharFrame @terminal) "LATEST-JOB-OUTPUT"))
+                         "End must show the retained tail in the existing inspector")))
+        (.then (fn [_] (.pressKey (.-mockInput @terminal) "F5")))
+        (.then (fn [_]
+                 (until! @terminal #(and (get-in @(:state application) [:ui :inspection :job-output :tail?])
+                                        (str/includes? (.captureCharFrame @terminal) "LATEST-JOB-OUTPUT"))
+                         "Refresh must preserve the tail view")))
         (.then (fn [_] (.pressEscape (.-mockInput @terminal)) (jobs/open! @mounted) (choose! application @mounted @terminal "Completed value")))
         (.then (fn [_] (.pressKey (.-mockInput @terminal) "3")))
         (.then (fn [_] (until! @terminal #(str/includes? (.captureCharFrame @terminal) "2/3") "Native EDN result was not rendered")))
@@ -96,7 +110,7 @@
                                (model/rows (:view @(:state application)))) "Reconnect lost inline job activity")
                  (check! (= :completed (:status (job application "Completed value"))) "Reconnect lost completed jobs")
                  (check! (= :failed (:status (job application "Failed value"))) "Reconnect lost failed jobs")
-                 (println "Jobs UI passed: inline conversation activity, direct full-width inspector (no popup/action screen), real core, running/cancelled/failed/completed states, keyboard actions, output paging, native values, narrow layout, drafts, reconnect.")))
+                 (println "Jobs UI passed: inline conversation activity, direct full-width inspector (no popup/action screen), real core, running/cancelled/failed/completed states, keyboard actions, output paging/tail refresh, cancellation classification, native values, narrow layout, drafts, reconnect.")))
         (.finally (fn []
                     (when @mounted (view/destroy! @mounted))
                     (when @terminal (.destroy (.-renderer @terminal)))

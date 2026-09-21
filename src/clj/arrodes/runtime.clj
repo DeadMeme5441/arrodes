@@ -642,7 +642,8 @@
                            :data (cond-> {:message/role :user :message/job-id (:id record)
                                           :message/content (str "Background job " (pr-str (:name record))
                                                                 " is " (name (:status record)) "."
-                                                                (when-let [error (:error record)] (str " " (:message error))))}
+                                                                (when-let [error (when (not= :cancelled (:status record)) (:error record))]
+                                                                  (str " " (:message error))))}
                                    (:result-id record)
                                    (assoc :message/result (artifacts/result (:store runtime) sid (:result-id record))))})
                         applicable)]
