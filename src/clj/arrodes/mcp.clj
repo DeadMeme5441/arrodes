@@ -344,7 +344,7 @@
     (try
       (let [mcp-client
             (client/make-client
-             {:info (entity-support/make-info "Arrodes" "0.1.5" "Arrodes headless runtime")
+             {:info (entity-support/make-info "Arrodes" "0.1.6" "Arrodes headless runtime")
               :client-transport transport
               :traffic-logger traffic/nop-traffic-logger
               :print-banner? false
