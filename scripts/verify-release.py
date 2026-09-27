@@ -47,6 +47,9 @@ class FixtureProvider(BaseHTTPRequestHandler):
         events = [
             {"id": "local", "model": "fixture-model", "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
             {"id": "local", "model": "fixture-model", "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]},
+            {"id": "local", "model": "fixture-model", "choices": [],
+             "usage": {"prompt_tokens": 1000, "completion_tokens": 20, "total_tokens": 1020,
+                       "prompt_tokens_details": {"cached_tokens": 900}}},
         ]
         payload = "".join("data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n\n"
         self.send_response(200)
@@ -299,10 +302,11 @@ def terminal_smoke(executable, home, project, environment):
     stream = pyte.ByteStream(screen)
 
     def wait_for(text, timeout=60, absent=False):
-        expected = text.decode().lower()
+        expected = None if callable(text) else text.decode().lower()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if (expected in "\n".join(screen.display).lower()) != absent:
+            matched = bool(text()) if callable(text) else expected in "\n".join(screen.display).lower()
+            if matched != absent:
                 return
             if process.poll() is not None:
                 break
@@ -359,6 +363,36 @@ def terminal_smoke(executable, home, project, environment):
         wait_for(b"Clojure")
         os.write(master, b"(+ 20 22)\r")
         wait_for(b"42")
+        os.write(master, b"Keep this draft")
+        wait_for(b"Keep this draft")
+        os.write(master, b"\x1bOR")  # F3 opens commands without replacing the draft.
+        def selected_command():
+            return next((line.strip() for line in screen.display
+                         if line.lstrip().startswith("›") and "/" in line), "")
+        wait_for(lambda: bool(selected_command()))
+        for _ in range(64):
+            selected = selected_command()
+            if "/usage " in selected:
+                break
+            os.write(master, b"\x1b[B")
+            wait_for(lambda: selected_command() != selected)
+        else:
+            raise AssertionError("Usage command is missing from the command picker")
+        os.write(master, b"\r")
+        wait_for(b"Cache read: 900")
+        wait_for(b"Cache write: unknown")
+        wait_for(b"Estimated spend: unknown")
+        print("Packaged usage screen:\n" + "\n".join(screen.display).rstrip())
+        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 36, 60, 0, 0))
+        screen.resize(lines=36, columns=60)
+        import signal
+        before_resize = len(capture)
+        os.kill(process.pid, signal.SIGWINCH)
+        wait_for(lambda: len(capture) > before_resize)
+        wait_for(b"Cache read: 900")
+        os.write(master, b"\x1b")
+        wait_for(b"Keep this draft")
+        os.write(master, b"\x15")  # Clear the unsubmitted draft before quitting.
         os.write(master, b"\x04")
         deadline = time.monotonic() + 20
         while process.poll() is None and time.monotonic() < deadline:
@@ -374,7 +408,7 @@ def terminal_smoke(executable, home, project, environment):
         except subprocess.TimeoutExpired:
             raise AssertionError("Terminal did not exit:\n" + "\n".join(screen.display))
         assert process.returncode == 0, capture.decode(errors="replace")[-4000:]
-        return "PTY providers, cancelled/secret login, model/default selection, evaluation 42, clean exit"
+        return "PTY providers, cancelled/secret login, model/default selection, evaluation 42, measured usage at 120/60 columns, draft preservation, clean exit"
     finally:
         if process.poll() is None:
             process.kill()

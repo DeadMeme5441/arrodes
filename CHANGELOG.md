@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 0.1.8
+
+- Reduce standalone executable weight by writing actual gzip payload bytes and
+  excluding SQLite/JNA native libraries for other OS/CPU targets. Keep all Java
+  modules, runtime capabilities, parser assets and license material.
+- Add packaged `arrodes update`, `--check` and explicit `--version` selection:
+  verify published release metadata/checksums, stream to private staging and replace
+  the owned executable atomically without touching application data.
+- Replace destructive incompatible-store reset with preservation-first upgrades.
+  Supported schema-3/4 layouts receive private WAL-inclusive backups before
+  transactional migration; unsupported/newer/foreign/malformed stores fail intact,
+  and interrupted legacy reset markers never resume deletion.
+- Validate known model capabilities before transport, bound connect/read-idle waits,
+  reject incomplete or malformed streamed tool responses, and classify actionable
+  provider failures while preserving runtime-owned safe retries and partial outcomes.
+- Preserve the conversation cache prefix across evaluator replacement using
+  append-only reset notices; isolate summary cache scopes and defer automatic
+  compaction until another provider request needs context.
+- Add `/usage` and a clickable context footer for measured cache-read/write,
+  uncached input, output and active-path estimated spend, with explicit unknowns
+  and partial totals rather than fabricated zeros.
+
 - Update the optional packaged-release diagnostic to follow reconciled provider
   state, inline model settings and first-send session creation instead of obsolete
   dialogs and transient notification wording.

@@ -18,13 +18,12 @@ The process first emits a `hello` record containing the protocol version and con
 
 `cwd` selects project identity and the default session working directory. `home` and `data-dir` are optional. Set `memory?` to `true` only for an explicitly ephemeral runtime. Credentials are not initialization parameters.
 
-**Initialization can delete old session data.** An incompatible
-**recognized Arrodes** file-backed store is automatically reset after
-exclusive ownership: its SQLite files and owned retained artifacts are
-deleted/recreated, with no migration or automatic backup. Export needed
-old sessions with a compatible earlier build before calling `initialize`.
-Foreign SQLite databases are rejected unchanged. Credentials, settings
-and unrelated files are not part of the reset.
+Initialization preserves existing data. Supported schema-3/4 stores receive a
+consistent retained backup and transactional upgrade to schema 5 before recovery.
+Unsupported/newer, malformed or foreign databases are rejected intact. An interrupted
+legacy reset marker fails with recovery guidance instead of resuming deletion.
+Credentials/settings and immutable artifact content are not rewritten by migration.
+See [compatibility](COMPATIBILITY.md) for the supported historical layouts.
 
 A normal response repeats the request ID and contains either `result` or `error`:
 

@@ -57,14 +57,12 @@ operations and events. Artifacts store larger immutable content. Result descript
 honestly distinguish inline, artifact-backed, live-only and unavailable values.
 Streaming text/progress is transient; it cannot become a competing durable history.
 
-Startup takes an exclusive file-backed store lock. Schema-5 validation
-resets an incompatible **recognized Arrodes** store by removing its owned
-artifacts and SQLite files before fresh initialization, with a durable
-reset marker for interrupted cleanup. It does not replay effects, migrate
-history, clear credentials/settings or delete unrelated neighbors.
-Foreign databases, unsafe paths, shared artifact roots, corruption and lock
-contention fail instead of broadening the destructive scope. See the
-[format contract](COMPATIBILITY.md).
+Startup takes exclusive database/artifact ownership and validates before mutation.
+Supported schema-3/4 stores receive a consistent retained SQLite backup and a
+transactional upgrade to schema 5. Current stores reopen directly. Unsupported,
+newer, foreign, malformed or unsafe stores fail intact; legacy reset markers never
+resume deletion. Recovery does not replay effects or change credentials/settings.
+See the [format contract](COMPATIBILITY.md) for supported layouts and recovery.
 
 `session.view` provides an atomic snapshot and event cursor. UI hydration buffers events,
 replays activity through the cursor, then applies later events without duplicating entries

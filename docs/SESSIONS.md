@@ -87,6 +87,10 @@ Usage includes uncached input, cache reads, cache writes, and output; a reported
 total takes precedence. Reasoning and modality breakdowns are not added again.
 Cumulative token spend is separate from the current context size.
 
+Automatic compaction runs only when another provider request needs context, not
+after a completed final answer. An idle session does not incur a speculative
+summary request. `/compact` remains an explicit immediate action.
+
 No character-based estimate is used. New user messages and REPL output remain
 unmeasured until the next provider completion. A very large addition can therefore
 exceed the provider's limit before a new measurement arrives; it is not represented
@@ -113,6 +117,28 @@ available to subsequent model calls and history inspection.
 The footer shows **Compacting context…** during summarization and returns to the
 normal operation status afterward. The live phase is also present in `session.view`
 so refreshing during compaction preserves that status.
+
+### Cache continuity and measured usage
+
+Ordinary requests keep a stable system prefix and append new context instead of
+rewriting previous messages. Evaluator namespace/generation identifiers are not
+inserted into that prefix. After reload/restart or branch navigation, the next
+model run records one environment notice when prior context exists: definitions
+and live objects are gone, while saved results and external effects remain.
+This notice does not replay effects or pretend to restore a JVM checkpoint.
+
+Normal requests use the session's cache scope; compaction, branch summaries and
+title generation use separate scopes. Explicit cache settings remain respected.
+Changing instructions, model/provider or compacting history can legitimately
+invalidate provider caches; extension context/request hooks must remain deterministic
+to preserve a stable prefix. Large native values stay available through retained
+result/artifact inspection rather than requiring wholesale reinsertion in context.
+
+`/usage` (also the clickable footer context indicator) separates the latest ordinary
+request's context from measured cumulative usage on the active history path.
+It displays uncached input, cache reads, cache writes, output and known estimated
+USD spend, including compaction and branch summaries. Missing counters/prices remain
+unknown or explicitly partial. Title requests and inactive branches are excluded.
 
 ## Inspecting activity and results
 
@@ -504,13 +530,12 @@ Durable:
   and inspectable child operation outcomes (schema 5);
 - exported files you explicitly write.
 
-These records survive a normal restart **only when the store already uses the
-current schema**. Startup automatically resets an incompatible **recognized
-Arrodes** store (including schemas 3 and 4) and its owned artifacts after exclusive
-ownership; foreign SQLite remains untouched. The old Arrodes sessions, branches,
-messages, jobs and results are lost without migration or automatic backup;
-export needed history beforehand with a compatible earlier build.
-Credentials/settings and unrelated files remain.
+These records survive a normal current-format restart and supported schema upgrades.
+Before upgrading a supported schema-3/4 layout, startup retains a consistent private
+SQLite backup and commits schema changes transactionally. Artifact content remains
+unchanged. Unsupported/newer, malformed and foreign stores are rejected intact,
+never reset. Credentials/settings and unrelated files remain untouched. See the
+[format contract](COMPATIBILITY.md) for supported layouts and backup recovery.
 
 Live only:
 

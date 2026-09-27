@@ -80,7 +80,7 @@ A concise global configuration can look like this:
  :fallback-model? false}
 ```
 
-Use `/providers` to manage connections and discover models. In `/models`, choose a reasoning level and then **Make default for new conversations** to save global defaults, or **Use in this conversation** to change only the current session. Editing defaults does not retroactively replace an existing session's configuration.
+Use `/providers` to manage connections and discover models. In `/models`, choose a reasoning level and then **Make default for new conversations** to save global defaults and apply them to the current conversation, or **Use in this conversation** to change only the current session. Other saved sessions retain their configuration; directly editing settings files does not retroactively reconfigure sessions.
 
 Supported session-default fields are:
 
@@ -92,6 +92,12 @@ Supported session-default fields are:
 - generation fields such as `:temperature`, `:top-p`, `:max-output-tokens`, `:stop`, `:response-format`, `:cache`, `:auto-compact?`, compaction limits, `:max-steps`, `:provider-retries`, `:fallback-model?`, and `:provider-options`.
 
 `provider-retries` is bounded to five retries at runtime. A false `:fallback-model?` prevents silent model substitution.
+
+Provider transports default to `:connect-timeout-ms 15000` and `:timeout-ms 60000`
+(stream read-idle timeout). Configure these at runtime/global settings scope, or
+under `:provider-options` keyed by provider ID for provider-specific overrides.
+Long silent reasoning requests may require a larger read-idle timeout. These
+deadlines do not authorize retries after visible output or replay of REPL effects.
 
 Session-agent runtime limits are configured under runtime `:settings`: `:operation-limit`
 (default 32, 1–128 admitted foreground operations), `:agent-limit` (default 32,
@@ -188,9 +194,8 @@ Arrodes never moves, merges, or overwrites them. Choose a current-format applica
 home explicitly when necessary.
 
 An implicit `HOME/data` directory is not selected as project history. An explicit
-`--data-dir PATH` selects one data directory. If its **recognized Arrodes** SQLite
-store has an incompatible schema, Arrodes automatically resets its exclusively
-owned session database and retained artifacts to fresh schema 5. Prior
-sessions/results are lost. A foreign SQLite database is rejected intact;
-credentials, settings and unrelated files remain outside this reset. This is
-not a migration and does not require a new `--data-dir` flag or path.
+`--data-dir PATH` selects one data directory. Supported schema-3/4 layouts upgrade
+to schema 5 after a retained SQLite backup; artifact content and credentials/settings
+are preserved. Unsupported, malformed, newer and foreign stores are rejected intact.
+The [format contract](COMPATIBILITY.md) defines supported layouts, backup names
+and explicit recovery; startup never resets an incompatible store.

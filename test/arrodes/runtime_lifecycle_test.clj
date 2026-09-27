@@ -253,46 +253,35 @@
         (runtime/close! rt)
         (fixtures/remove-directory! directory)))))
 
-(deftest post-turn-compaction-does-not-reopen-input-admission
+(deftest automatic-compaction-does-not-spend-a-request-after-the-user-task-finishes
   (let [directory (fixtures/temp-directory)
-        runtime* (atom nil)
-        session-id* (atom nil)
-        calls (atom 0)
-        rejected (atom nil)
-        provider (fn [_ _]
-                   (case (swap! calls inc)
-                     1 (answer :fixture "large" "First answer")
-                     2 (assoc (answer :fixture "large" "Second answer")
-                              :response/usage {:usage/input-tokens 60000})
-                     3 (do
-                         (reset! rejected
-                                 (try
-                                   (runtime/follow-up! @runtime* @session-id*
-                                                       "Must not be stranded")
-                                   (catch clojure.lang.ExceptionInfo error
-                                     (ex-data error))))
-                         (answer :fixture "large" "Durable summary"))))
+        requests (atom [])
+        provider (fn [request _]
+                   (swap! requests conj request)
+                   (if (summary-request? request)
+                     (answer :fixture "large" "Durable summary")
+                     (assoc (answer :fixture "large" "Completed task")
+                            :response/usage {:usage/input-tokens 60000})))
         settings {:providers
-                  {:fixture {:type :profile-alias
-                             :provider :openai
+                  {:fixture {:type :profile-alias :provider :openai
                              :models [{:id "large" :context-window 100000
                                        :thinking-levels [:none]}]}}}
         rt (runtime/open! {:cwd directory :home (str directory "/home")
                            :data-dir (str directory "/data")
                            :settings settings :complete-fn provider})
-        config {:provider :fixture :model "large" :thinking :none :tools []
-                :instructions ""
-                :settings {:compaction-threshold 0.5
-                           :compaction-keep-entries 1}}
-        sid (:id (create-test-session! rt {:config config}))]
+        sid (:id (create-test-session! rt
+                   {:config {:provider :fixture :model "large" :thinking :none
+                             :tools [] :settings {:compaction-threshold 0.5
+                                                  :compaction-keep-entries 1}}}))]
     (try
-      (reset! runtime* rt)
-      (reset! session-id* sid)
-      (runtime/run! rt sid "First prompt")
-      (runtime/run! rt sid "Second prompt")
-      (is (= 3 @calls))
-      (is (= "operation-not-active" (:error/code @rejected)))
-      (is (some #(= :compaction (:kind %)) (runtime/entries rt sid)))
+      (runtime/run! rt sid "First task")
+      (is (= 1 (count @requests)))
+      (is (= :idle (:status (runtime/session rt sid))))
+      (is (not-any? #(= :compaction (:kind %)) (runtime/entries rt sid)))
+      (runtime/run! rt sid "Second task")
+      (is (= [:completion :summary :completion]
+             (mapv #(if (summary-request? %) :summary :completion) @requests)))
+      (is (= :idle (:status (runtime/session rt sid))))
       (is (empty? (runtime/pending rt sid)))
       (finally
         (runtime/close! rt)

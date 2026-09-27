@@ -2,6 +2,8 @@
   "Composition root: mount, render scheduling and native renderer lifecycle."
   (:require [arrodes.tui-app :as app]
             [arrodes.catalog :as catalog]
+            [arrodes.run :as run]
+            [arrodes.tui-model :as model]
             [arrodes.tui-present :as present]
             [arrodes.tui-widgets :as w]
             [clojure.string :as str]
@@ -246,7 +248,12 @@
                                 {:id "footer-agents" :height 1 :width 18
                                  :truncate true :wrapMode "none" :fg :text/secondary})
         footer-space (w/box renderer {:flexGrow 1 :minWidth 2})
-        context-status (w/text renderer "" {:id "footer-context" :height 1 :fg :text/secondary :wrapMode "none"})
+        context-status (w/button renderer "" (fn [] (let [entries (get-in (c/state @view-ref) [:view :entries])]
+                                                       (screens/open-overlay! @view-ref
+                                                                      {:kind :usage :title "Session usage"
+                                                                       :hint "Measured provider usage · Esc returns to your draft"
+                                                                       :body (model/usage-details (run/usage-report entries))})))
+                                 {:id "footer-context" :height 1 :fg :text/secondary :wrapMode "none" :truncate true})
         metadata (w/box renderer {:id "project-footer" :width "100%" :height 1 :paddingX 2 :flexDirection "row"})
         project-status (w/text renderer "" {:flexGrow 1 :flexShrink 1 :height 1 :truncate true :wrapMode "none" :fg :text/secondary})
         command-menu (w/box renderer {:id "command-menu" :visible false :width "100%" :paddingX 2})

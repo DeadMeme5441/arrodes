@@ -234,6 +234,51 @@
            :message/provider-data
            :response/usage))
 
+(def ^:private usage-counters
+  [:usage/input-tokens :usage/cached-input-tokens :usage/cache-write-tokens
+   :usage/output-tokens :usage/total-tokens])
+
+(defn usage-report
+  "Measured usage for the visible active path. Missing per-request counters and
+   unknown SDK prices remain unknown; totals are sums of reported values only.
+   Summaries contribute spend but never replace the latest ordinary context."
+  [entries]
+  (let [entries (vec entries)]
+    (reduce
+     (fn [report entry]
+       (let [kind (:kind entry)
+             data (:data entry)
+             provider-data (:message/provider-data data)
+             counted? (or (and (= kind :message)
+                               (= :assistant (:message/role data)))
+                          (contains? #{:compaction :branch-summary} kind))
+             usage (if (= kind :message) (:response/usage provider-data) (:usage data))
+             cost (if (= kind :message) (:response/cost provider-data) (:cost data))
+             usd (:cost/usd cost)]
+         (if-not counted?
+           report
+           (-> report
+               (update :requests inc)
+               (update :totals
+                       (fn [totals]
+                         (reduce (fn [totals key]
+                                   (if (number? (get usage key))
+                                     (update totals key (fnil + 0) (get usage key))
+                                     totals))
+                                 totals usage-counters)))
+               (update :missing
+                       (fn [missing]
+                         (reduce (fn [missing key]
+                                   (if (number? (get usage key))
+                                     missing
+                                     (update missing key (fnil inc 0))))
+                                 missing usage-counters)))
+               (cond-> (number? usd) (update :known-cost-usd (fnil + 0) usd)
+                       (not (number? usd)) (update :unknown-cost-count inc))))))
+     {:latest-usage (latest-usage entries) :requests 0
+      :totals {} :missing {} :known-cost-usd nil :unknown-cost-count 0}
+     entries)))
+
 (defn auto-compact?
   "Decide from the latest provider measurement only; never estimate new content."
   [config model usage]

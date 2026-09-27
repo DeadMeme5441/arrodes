@@ -307,13 +307,13 @@
         (util/private-file! candidate)))))
 
 
-(defn- safe-reset-path! [path]
+(defn- safe-storage-path! [path]
   (let [candidate (.toAbsolutePath (util/path path))]
     (loop [parts (iterator-seq (.iterator candidate))
            parent (.getRoot candidate)]
       (when-let [part (first parts)]
         (value/check! (not= ".." (str part)) :insecure-database
-                      "Destructive reset refuses path traversal" {:path (str candidate)})
+                      "Storage path refuses traversal" {:path (str candidate)})
         (let [current (.resolve parent ^java.nio.file.Path part)
               symlink? (Files/isSymbolicLink current)
               trusted-parent? (when symlink?
@@ -328,24 +328,13 @@
                                        (not (contains? permissions
                                                        java.nio.file.attribute.PosixFilePermission/OTHERS_WRITE)))))]
           (value/check! (or (not symlink?) trusted-parent?) :insecure-database
-                        "Destructive reset refuses untrusted symbolic links"
+                        "Storage path refuses untrusted symbolic links"
                         {:path (str current)})
           (recur (next parts) current))))))
 
-(defn- reset-file! [path]
-  (safe-reset-path! path)
-  (let [target (util/path path)]
-    (when (Files/exists target (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
-      (value/check! (Files/isRegularFile target
-                                        (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
-                    :insecure-database "Reset target is not a regular file"
-                    {:path (str target)})
-      (single-link! target)
-      (Files/delete target))))
-
-(defn- artifact-reset-plan [artifact-dir]
+(defn- artifact-content-plan [artifact-dir]
   (when artifact-dir
-    (safe-reset-path! artifact-dir)
+    (safe-storage-path! artifact-dir)
     (let [root (util/path artifact-dir)]
       (when (Files/exists root (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
         (value/check! (Files/isDirectory root
@@ -354,37 +343,41 @@
                       {:path (str root)})
         (with-open [walk (Files/walk root (make-array java.nio.file.FileVisitOption 0))]
           (let [paths (vec (iterator-seq (.iterator walk)))
-                content (transient [])
-                directories (transient [])]
+                content (transient [])]
             (doseq [path paths]
-              (safe-reset-path! path)
+              (safe-storage-path! path)
               (let [relative (.relativize root path)
                     segments (mapv str (iterator-seq (.iterator relative)))]
                 (cond
                   (Files/isDirectory path
                                      (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
-                  (when (and (= 1 (count segments))
-                             (re-matches #"[0-9a-f]{2}" (first segments)))
-                    (conj! directories path))
+                  (value/check! (or (= path root)
+                                    (and (= 1 (count segments))
+                                         (re-matches #"[0-9a-f]{2}" (first segments))))
+                                :artifact-owner-unknown
+                                "Unmarked artifact directory contains unknown content"
+                                {:path (str path)})
 
                   (Files/isRegularFile path
                                        (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
-                  (when (and (= 2 (count segments))
-                             (re-matches #"[0-9a-f]{2}" (first segments))
-                             (re-matches #"[0-9a-f]{64}" (second segments))
-                             (= (first segments) (subs (second segments) 0 2)))
+                  (when-not (and (= 1 (count segments))
+                                 (= ".lock" (first segments)))
+                    (value/check! (and (= 2 (count segments))
+                                       (re-matches #"[0-9a-f]{2}" (first segments))
+                                       (re-matches #"[0-9a-f]{64}" (second segments))
+                                       (= (first segments) (subs (second segments) 0 2)))
+                                  :artifact-owner-unknown
+                                  "Unmarked artifact directory contains unknown content"
+                                  {:path (str path)})
+                    (single-link! path)
                     (conj! content path))
 
                   :else
                   (value/fail! :insecure-directory
                                "Artifact storage contains an unsafe filesystem entry"
                                {:path (str path)}))))
-            {:root root :files (persistent! content)
-             :directories (persistent! directories)}))))))
+            {:files (persistent! content)}))))))
 
-(defn- empty-directory? [path]
-  (with-open [stream (Files/list path)]
-    (not (.isPresent (.findAny stream)))))
 
 (defn- release-artifact-owner! [{:keys [artifact-channel artifact-lock]}]
   (when artifact-lock
@@ -395,7 +388,7 @@
         (.close ^FileChannel artifact-channel)))))
 
 (defn- acquire-artifact-owner! [artifact-dir db-path]
-  (safe-reset-path! artifact-dir)
+  (safe-storage-path! artifact-dir)
   (private-dir! artifact-dir)
   (let [root (util/path artifact-dir)
         lock-path (.resolve root ".lock")
@@ -437,13 +430,13 @@
                     (when (Files/exists (util/path db-path)
                                         (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
                       (with-open [connection (DriverManager/getConnection
-                                              (str "jdbc:sqlite:" db-path))]
+                                              (str "jdbc:sqlite:" (.toUri (util/path db-path)) "?mode=ro"))]
                         (when (scalar connection
                                       "SELECT 1 FROM sqlite_master WHERE type='table' AND name='artifacts'"
                                       [])
                           (set (query-sql connection "SELECT sha256 FROM artifacts"
                                           [] #(.getString ^ResultSet % "sha256"))))))
-                    plan (artifact-reset-plan artifact-dir)]
+                    plan (artifact-content-plan artifact-dir)]
                 (value/check! (every? #(contains? owned-hashes
                                                   (str (.getFileName ^java.nio.file.Path %)))
                                       (:files plan))
@@ -467,92 +460,6 @@
           (.close channel)
           (throw error))))))
 
-(defn- reset-incompatible-store! [db-path artifact-plan]
-  (doseq [target (map util/path [db-path (str db-path "-wal") (str db-path "-shm")])]
-    (safe-reset-path! target)
-    (when (Files/exists target (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
-      (value/check! (Files/isRegularFile target
-                                        (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
-                    :insecure-database "SQLite reset target is not a regular file"
-                    {:path (str target)})
-      (single-link! target)))
-  ;; The incompatible database is the retry marker until every owned artifact
-  ;; and sidecar has been removed. Remove it last, never before cleanup succeeds.
-  (doseq [path (:files artifact-plan)]
-    (reset-file! path))
-  (doseq [path (:directories artifact-plan)]
-    (safe-reset-path! path)
-    (when (and (Files/isDirectory path
-                                  (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
-               (empty-directory? path))
-      (Files/delete path)))
-  (when-let [root (:root artifact-plan)]
-    (safe-reset-path! root)
-    (when (and (Files/isDirectory root
-                                  (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
-               (empty-directory? root))
-      (Files/delete root)))
-  (reset-file! (str db-path "-wal"))
-  (reset-file! (str db-path "-shm"))
-  (reset-file! db-path))
-(declare check-schema!)
-
-(defn- reset-marker [db-path]
-  (util/path (str db-path ".reset")))
-
-(defn- read-reset-marker [db-path]
-  (let [marker (reset-marker db-path)]
-    (safe-reset-path! marker)
-    (when (Files/exists marker (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
-      (value/check! (and (Files/isRegularFile marker
-                                              (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
-                         (<= (Files/size marker) 16384))
-                    :insecure-database "Store reset marker is unsafe"
-                    {:path (str marker)})
-      (single-link! marker)
-      (let [record (decode (Files/readString marker))]
-        (value/check! (and (map? record)
-                           (= #{:database :artifacts} (set (keys record)))
-                           (string? (:database record))
-                           (string? (:artifacts record)))
-                      :insecure-database "Store reset marker is malformed"
-                      {:path (str marker)})
-        record))))
-
-(defn- begin-reset! [db-path artifact-dir]
-  (let [expected {:database db-path :artifacts artifact-dir}
-        marker (reset-marker db-path)]
-    (if-let [existing (read-reset-marker db-path)]
-      (value/check! (= expected existing) :insecure-database
-                    "An incomplete reset belongs to another storage path"
-                    {:path (str marker)})
-      (let [temp (Files/createTempFile (.getParent marker) ".reset-" ".tmp"
-                                       (make-array FileAttribute 0))]
-        (try
-          (Files/write temp (.getBytes (encode expected) "UTF-8")
-                       (into-array OpenOption [StandardOpenOption/WRITE]))
-          (util/private-file! temp)
-          (Files/move temp marker (make-array StandardCopyOption 0))
-          (finally (Files/deleteIfExists temp)))))))
-
-(defn- resume-reset! [db-path artifact-dir]
-  (when-let [marker (read-reset-marker db-path)]
-    (value/check! (= marker {:database db-path :artifacts artifact-dir})
-                  :insecure-database "An incomplete reset belongs to another storage path"
-                  {:path (str (reset-marker db-path))})
-    (when (Files/exists (util/path db-path)
-                        (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
-      (prepare-database-file! db-path)
-      (with-open [connection (DriverManager/getConnection (str "jdbc:sqlite:" db-path))]
-        ;; A replacement at this pathname must never be mistaken for the owned
-        ;; database whose reset was interrupted.
-        (try
-          (check-schema! connection)
-          (catch clojure.lang.ExceptionInfo error
-            (when-not (= "unsupported-store-format" (:error/code (ex-data error)))
-              (throw error))))))
-    (reset-incompatible-store! db-path (artifact-reset-plan artifact-dir))
-    (prepare-database-file! db-path)))
 
 (defn- execute-script! [^Connection connection statements]
   (with-open [statement (.createStatement connection)]
@@ -577,26 +484,58 @@
                                               [] #(.getString ^ResultSet % "name")))))
                arrodes-table-signature)))
 
+(def ^:private historical-columns
+  {"sessions" #{"id" "name" "cwd" "head" "revision" "base_config" "config" "status" "created_at" "updated_at" "metadata" "labels" "parent_id" "fork_entry"}
+   "entries" #{"id" "session_id" "parent_id" "seq" "kind" "data" "created_at"}
+   "queue" #{"id" "session_id" "seq" "kind" "content" "options" "created_at"}
+   "operations" #{"id" "session_id" "kind" "status" "created_at" "finished_at" "result" "error"}
+   "events" #{"seq" "id" "session_id" "operation_id" "type" "data" "time"}
+   "artifacts" #{"id" "session_id" "sha256" "bytes" "kind" "available" "created_at" "name" "content"}
+   "results" #{"session_id" "id" "kind" "descriptor" "created_at"}
+   "jobs" #{"id" "session_id" "status" "created_at" "delivered" "record"}})
+
+(def ^:private agent-columns
+  {"agent_routes" #{"session_id" "root_id" "parent_session_id" "name" "context_id" "parent_context_id" "depth" "paused" "stopped" "origin"}
+   "agent_submissions" #{"source_id" "submission_id" "kind" "payload" "receipt"}
+   "agent_messages" #{"seq" "id" "root_id" "sender_id" "kind" "content" "source_operation_id" "created_at" "wake"}
+   "agent_deliveries" #{"message_id" "recipient_id" "context_id" "status" "entry_id" "operation_id"}})
+
+(defn- column-shape? [connection expected tables]
+  (and (set/subset? (set (keys expected)) tables)
+       (every? (fn [[table columns]]
+                 (= columns (set (query-sql connection (str "PRAGMA table_info(" table ")")
+                                            [] #(.getString ^ResultSet % "name")))))
+               expected)))
+
 (defn- check-schema! [^Connection connection]
   (let [current (long (or (scalar connection "PRAGMA user_version" []) 0))
         marker (long (or (scalar connection "PRAGMA application_id" []) 0))
         tables (set (query-sql connection
-                               "SELECT name FROM sqlite_master WHERE type='table'"
+                               "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
                                [] #(.getString ^ResultSet % "name")))
         fresh? (and (zero? current) (zero? marker)
                     (zero? (long (scalar connection
                                              "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
-                                             []))))]
-    (when-not fresh?
-      (value/check! (or (= marker application-id)
+                                             []))))
+        recognized? (or (= marker application-id)
                         (and (zero? marker) (arrodes-owned? connection tables)))
-                    :unrecognized-store
-                    "An unrelated SQLite database cannot be reset as an Arrodes store"
-                    {:found current :application-id marker}))
-    (value/check! (or fresh? (= current schema-version)) :unsupported-store-format
-                  "Unsupported store format. An incompatible file-backed store is reset on open; no migration is available."
-                  {:found current :required schema-version})
+        base? (column-shape? connection historical-columns tables)
+        agents? (column-shape? connection agent-columns tables)]
     (when-not fresh?
+      (value/check! recognized? :unrecognized-store
+                    "Unrecognized SQLite store; the database was left unchanged"
+                    {:found current :application-id marker})
+      (value/check! (contains? #{3 4 5} current) :unsupported-store-format
+                    "Unsupported store version; use a compatible Arrodes build or restore a backup"
+                    {:found current :required schema-version})
+      (value/check! (and base?
+                         (if (= current 5) agents?
+                             (or (= tables (set (keys historical-columns)))
+                                 (and (= current 4) agents?))))
+                    :unsupported-store-format
+                    "Store tables do not match a supported schema; restore from a backup"
+                    {:found current :required schema-version}))
+    (when agents?
       (let [required #{"sessions" "entries" "queue" "operations" "events"
                        "artifacts" "results" "jobs" "agent_routes"
                        "agent_submissions" "agent_messages" "agent_deliveries"}]
@@ -657,15 +596,24 @@
            false)
          :unsupported-store-format "Malformed agent delivery link"
          {:status (:status row) :recipient-id (:recipient-id row)})))
-    fresh?))
+    (if fresh? :fresh current)))
+
+(def ^:private agent-table-statements
+  ["CREATE TABLE agent_routes (session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, root_id TEXT NOT NULL REFERENCES sessions(id), parent_session_id TEXT REFERENCES sessions(id), name TEXT NOT NULL, context_id TEXT NOT NULL, parent_context_id TEXT, depth INTEGER NOT NULL, paused INTEGER NOT NULL DEFAULT 0, stopped INTEGER NOT NULL DEFAULT 0, origin TEXT NOT NULL, UNIQUE(root_id,name))"
+   "CREATE INDEX agent_routes_parent ON agent_routes(parent_session_id)"
+   "CREATE TABLE agent_submissions (source_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, submission_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(source_id,submission_id))"
+   "CREATE TABLE agent_messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, root_id TEXT NOT NULL, sender_id TEXT, kind TEXT NOT NULL, content TEXT NOT NULL, source_operation_id TEXT, created_at INTEGER NOT NULL, wake INTEGER NOT NULL DEFAULT 0, UNIQUE(source_operation_id,kind))"
+   "CREATE TABLE agent_deliveries (message_id TEXT NOT NULL REFERENCES agent_messages(id) ON DELETE CASCADE, recipient_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, context_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', entry_id TEXT, operation_id TEXT REFERENCES operations(id), PRIMARY KEY(message_id,recipient_id))"
+   "CREATE INDEX agent_deliveries_recipient ON agent_deliveries(recipient_id,status,message_id)"])
 
 (defn- initialize-schema! [^Connection connection]
-  (when (check-schema! connection)
+  (when (= :fresh (check-schema! connection))
     (let [old-auto (.getAutoCommit connection)]
       (try
         (.setAutoCommit connection false)
         (execute-script! connection
-          ["CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT NOT NULL, cwd TEXT NOT NULL, head TEXT, revision INTEGER NOT NULL, base_config TEXT NOT NULL, config TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, metadata TEXT NOT NULL, labels TEXT NOT NULL, parent_id TEXT, fork_entry TEXT)"
+          (concat
+           ["CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT NOT NULL, cwd TEXT NOT NULL, head TEXT, revision INTEGER NOT NULL, base_config TEXT NOT NULL, config TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, metadata TEXT NOT NULL, labels TEXT NOT NULL, parent_id TEXT, fork_entry TEXT)"
             "CREATE TABLE entries (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, parent_id TEXT, seq INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(session_id, seq), FOREIGN KEY(parent_id) REFERENCES entries(id))"
             "CREATE INDEX entries_session_parent ON entries(session_id, parent_id)"
             "CREATE TABLE queue (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, seq INTEGER NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, options TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(session_id, seq))"
@@ -678,13 +626,8 @@
             "CREATE INDEX artifacts_session_created ON artifacts(session_id, created_at)"
             "CREATE TABLE results (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, id INTEGER NOT NULL, kind TEXT NOT NULL, descriptor TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(session_id, id))"
             "CREATE TABLE jobs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, status TEXT NOT NULL, created_at INTEGER NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, record TEXT NOT NULL)"
-            "CREATE INDEX jobs_session_created ON jobs(session_id, created_at DESC, id)"
-            "CREATE TABLE agent_routes (session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, root_id TEXT NOT NULL REFERENCES sessions(id), parent_session_id TEXT REFERENCES sessions(id), name TEXT NOT NULL, context_id TEXT NOT NULL, parent_context_id TEXT, depth INTEGER NOT NULL, paused INTEGER NOT NULL DEFAULT 0, stopped INTEGER NOT NULL DEFAULT 0, origin TEXT NOT NULL, UNIQUE(root_id,name))"
-            "CREATE INDEX agent_routes_parent ON agent_routes(parent_session_id)"
-            "CREATE TABLE agent_submissions (source_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, submission_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(source_id,submission_id))"
-            "CREATE TABLE agent_messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, root_id TEXT NOT NULL, sender_id TEXT, kind TEXT NOT NULL, content TEXT NOT NULL, source_operation_id TEXT, created_at INTEGER NOT NULL, wake INTEGER NOT NULL DEFAULT 0, UNIQUE(source_operation_id,kind))"
-            "CREATE TABLE agent_deliveries (message_id TEXT NOT NULL REFERENCES agent_messages(id) ON DELETE CASCADE, recipient_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, context_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', entry_id TEXT, operation_id TEXT REFERENCES operations(id), PRIMARY KEY(message_id,recipient_id))"
-            "CREATE INDEX agent_deliveries_recipient ON agent_deliveries(recipient_id,status,message_id)"])
+            "CREATE INDEX jobs_session_created ON jobs(session_id, created_at DESC, id)"]
+           agent-table-statements))
         (execute-command! connection (str "PRAGMA user_version = " schema-version))
         (execute-command! connection (str "PRAGMA application_id = " application-id))
         (.commit connection)
@@ -705,36 +648,84 @@
                   [(encode (assoc descriptor :available? false)) session-id id])))
 
 
-(defn- open-current-connection! [memory? db-path requested-db-path
-                                 requested-artifact-dir artifact-dir artifact-owner*]
-  (let [url (if memory? "jdbc:sqlite::memory:" (str "jdbc:sqlite:" db-path))
-        connection (DriverManager/getConnection url)]
+(defn- check-legacy-reset-marker! [db-path]
+  (let [marker (str db-path ".reset")]
+    (safe-storage-path! marker)
+    (when (Files/exists (util/path marker) (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+      (single-link! marker)
+      (value/fail! :incomplete-legacy-reset
+                   "Interrupted legacy reset; no further cleanup was attempted. Inspect the database and artifacts, restore from a backup if needed, and move the .reset marker aside only after recovery."
+                   {:path marker}))))
+
+(defn- backup-store! [^Connection connection db-path version]
+  ;; VACUUM INTO reads a consistent SQLite snapshot, including committed WAL frames.
+  (let [parent (.getParent (util/path db-path))
+        temp (Files/createTempFile parent ".arrodes-backup-" ".tmp"
+                                   (into-array FileAttribute
+                                               [(PosixFilePermissions/asFileAttribute
+                                                 (PosixFilePermissions/fromString "rw-------"))]))
+        backup (util/path (str db-path ".schema" version "-" (util/id) ".backup"))]
     (try
+      (execute-command! connection (str "VACUUM INTO '" (str/replace (str temp) "'" "''") "'"))
+      (util/private-file! temp)
+      (with-open [channel (FileChannel/open temp (into-array OpenOption [StandardOpenOption/WRITE]))]
+        (.force channel true))
+      (Files/move temp backup (into-array StandardCopyOption [StandardCopyOption/ATOMIC_MOVE]))
+      (with-open [channel (FileChannel/open parent (into-array OpenOption [StandardOpenOption/READ]))]
+        (.force channel true))
+      (str backup)
+      (finally (Files/deleteIfExists temp)))))
+
+(defn- upgrade-schema! [^Connection connection]
+  (let [old-auto (.getAutoCommit connection)
+        tables (set (query-sql connection
+                               "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                               [] #(.getString ^ResultSet % "name")))]
+    (try
+      (.setAutoCommit connection false)
+      (when-not (contains? tables "agent_routes")
+        (execute-script! connection agent-table-statements)
+        ;; Historical forks and clones are independent sessions, not active teams.
+        (execute-command! connection
+                          "INSERT INTO agent_routes(session_id,root_id,parent_session_id,name,context_id,parent_context_id,depth,paused,stopped,origin) SELECT id,id,NULL,'Main',id,NULL,0,0,0,'{}' FROM sessions"))
+      (execute-command! connection (str "PRAGMA user_version = " schema-version))
+      (execute-command! connection (str "PRAGMA application_id = " application-id))
       (check-schema! connection)
-      (when (and artifact-dir (nil? @artifact-owner*))
-        (reset! artifact-owner*
-                (acquire-artifact-owner! artifact-dir db-path)))
-      connection
+      (.commit connection)
       (catch Throwable error
-        (.close connection)
-        (if (and db-path (= "unsupported-store-format" (:error/code (ex-data error))))
-          (do
-            (safe-reset-path! requested-db-path)
-            (when requested-artifact-dir
-              (safe-reset-path! requested-artifact-dir))
-            (when-not @artifact-owner*
-              (reset! artifact-owner*
-                      (acquire-artifact-owner! artifact-dir db-path)))
-            (begin-reset! db-path artifact-dir)
-            (reset-incompatible-store! db-path (artifact-reset-plan artifact-dir))
-            (prepare-database-file! db-path)
-            (let [fresh (DriverManager/getConnection url)]
-              (try
-                (check-schema! fresh)
-                fresh
-                (catch Throwable reopen-error
-                  (.close fresh)
-                  (throw reopen-error)))))
+        (.rollback connection)
+        (throw error))
+      (finally (.setAutoCommit connection old-auto)))))
+
+(defn- open-current-connection! [memory? db-path artifact-dir artifact-owner*]
+  (let [url (if memory? "jdbc:sqlite::memory:" (str "jdbc:sqlite:" db-path))
+        version (when db-path
+                  (with-open [reader (DriverManager/getConnection
+                                     (str "jdbc:sqlite:" (.toUri (util/path db-path)) "?mode=ro"))]
+                    (let [version (check-schema! reader)]
+                      (when (#{3 4} version)
+                        (value/check! (= "ok" (scalar reader "PRAGMA integrity_check" []))
+                                      :unsupported-store-format
+                                      "SQLite integrity check failed; restore the database from a backup"
+                                      {:path db-path}))
+                      version)))]
+    (when artifact-dir
+      (reset! artifact-owner*
+              (acquire-artifact-owner! artifact-dir db-path)))
+    (let [connection (DriverManager/getConnection url)]
+      (try
+        (let [checked (check-schema! connection)
+              version (or version checked)]
+          (value/check! (= checked version) :unsupported-store-format
+                        "Store changed during validation; retry after closing other database writers"
+                        {:path db-path})
+          (when (and db-path (#{3 4} version))
+            (execute-command! connection "PRAGMA synchronous = FULL")
+            (backup-store! connection db-path version)
+            (upgrade-schema! connection))
+          connection)
+        (catch Throwable error
+          (.close connection)
           (throw error))))))
 
 (defn open!
@@ -742,24 +733,19 @@
   [{:keys [path memory? artifact-dir]}]
   (Class/forName "org.sqlite.JDBC")
   (let [memory? (or memory? (nil? path))
-        db-path (when-not memory? (canonical-database-path path))
+        db-path (when-not memory?
+                  (safe-storage-path! path)
+                  (canonical-database-path path))
         owner (when db-path (acquire-owner! db-path))
         artifact-owner* (atom nil)]
     (try
-      (let [requested-artifact-dir artifact-dir
-            artifact-dir (when-not memory?
+      (let [artifact-dir (when-not memory?
+                           (when artifact-dir (safe-storage-path! artifact-dir))
                            (util/canonical-path
                             (or artifact-dir (str db-path ".artifacts"))))
-            _ (when (and db-path (read-reset-marker db-path))
-                (safe-reset-path! path)
-                (when requested-artifact-dir (safe-reset-path! requested-artifact-dir))
-                (reset! artifact-owner*
-                        (acquire-artifact-owner! artifact-dir db-path))
-                (resume-reset! db-path artifact-dir))
+            _ (when db-path (check-legacy-reset-marker! db-path))
             _ (when db-path (prepare-database-file! db-path))
-            connection (open-current-connection! memory? db-path path
-                                                 requested-artifact-dir artifact-dir
-                                                 artifact-owner*)
+            connection (open-current-connection! memory? db-path artifact-dir artifact-owner*)
             lock (ReentrantLock.)
             closed? (atom false)
             store (map->Store
@@ -785,7 +771,6 @@
           (tighten-store-files! store)
           (when db-path (util/private-file! db-path))
           (when artifact-dir (private-dir! artifact-dir))
-          (when db-path (Files/deleteIfExists (reset-marker db-path)))
           store
           (catch Throwable error
             (try (.close connection) (catch Throwable _))

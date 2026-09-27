@@ -464,10 +464,7 @@
 (defn- runtime-context [runtime sid registry manager config]
   (let [project (resources/context manager)
         instructions (:instructions config)
-        developer (->> [repl-wire/instructions
-                        (str "Current REPL generation: " (:generation registry)
-                             ". Namespace: " (:namespace registry) ".")
-                        project instructions]
+        developer (->> [repl-wire/instructions project instructions]
                        (remove str/blank?)
                        (str/join "\n\n"))
         messages (store/context-messages (:store runtime) sid)
@@ -569,7 +566,7 @@
                 request (-> (capabilities/apply-hooks
                              registry :transform-request hook-context
                              (run/summary-request config (:summary-entries plan) instructions))
-                            (session-cache sid))
+                            (session-cache (str sid ":compaction")))
                 _ (value/check! (map? request) :invalid-hook-result
                                 "transform-request hooks must return a request map" {})
                 response (provider-complete! runtime sid slot config request callback
@@ -585,12 +582,14 @@
                        {:entries [{:kind :compaction
                                    :data {:summary summary
                                           :first-kept-entry-id (:first-kept-entry-id plan)
-                                          :usage (:response/usage response)}}]
+                                          :usage (:response/usage response)
+                                          :cost (:response/cost response)}}]
                         :events [{:operation-id (:operation-id slot)
                                   :type :session/compacted
                                   :data {:automatic? automatic?
                                          :first-kept-entry-id (:first-kept-entry-id plan)
-                                         :usage (:response/usage response)}}]}))
+                                         :usage (:response/usage response)
+                                         :cost (:response/cost response)}}]}))
             {:summary summary :first-kept-entry-id (:first-kept-entry-id plan)
              :usage (:response/usage response)})
           (finally (publish-phase! runtime sid slot previous-phase callback)))))))
@@ -626,9 +625,8 @@
             (util/check-cancelled! (:cancelled slot))
             (try
               {:response (complete-request! runtime sid slot config
-                                             (prepare-completion-request runtime sid slot registry manager config)
-                                             callback)
-               :recovered? true}
+                                            (prepare-completion-request runtime sid slot registry manager config)
+                                            callback)}
               (catch Throwable retry-error
                 (if (run/context-overflow? retry-error)
                   (throw (context-recovery-error "The provider still rejects the context after one compaction retry." retry-error))
@@ -698,7 +696,19 @@
           initial-intents
           (locking (session-lock runtime sid)
             (util/check-cancelled! (:cancelled slot))
-            (let [items (if (contains? #{:run :continue} (:kind slot))
+            (let [snapshot (store/session (:store runtime) sid)
+                  running? (contains? #{:run :continue} (:kind slot))
+                  new-generation? (and running?
+                                       (not= (:generation registry)
+                                             (get-in snapshot [:metadata :repl/generation])))
+                  reset-entry (when (and new-generation?
+                                         (seq (store/context-messages (:store runtime) sid)))
+                                {:kind :custom-context
+                                 :data {:message/role :user
+                                        :message/repl-generation (:generation registry)
+                                        :message/content
+                                        "Execution environment notice: the REPL evaluator has been replaced. Earlier definitions and live JVM objects are no longer available; durable results and external effects remain. Inspect (workspace) and retained results before continuing; do not replay effects to reconstruct bindings."}})
+                  items (if running?
                           (run/select-intents (store/pending (:store runtime) sid)
                                               :start-boundary)
                           [])
@@ -708,6 +718,12 @@
                                    :data (run/user-message (:prompt prepared))}))
                   naming (initial-title runtime sid entries config)
                   _ (reset! title naming)
+                  entries (cond->> entries reset-entry (into [reset-entry]))
+                  session-changes (cond-> (select-keys naming [:name :metadata])
+                                    new-generation?
+                                    (assoc :metadata
+                                           (assoc (or (:metadata naming) (:metadata snapshot))
+                                                  :repl/generation (:generation registry))))
                   events (cond-> []
                            (seq items)
                            (conj {:operation-id (:operation-id slot)
@@ -717,12 +733,12 @@
                            (conj {:operation-id (:operation-id slot)
                                   :type :message/user :data {}})
                            naming (conj {:type :session/named :data {:name (:name naming) :source :auto}}))]
-              (when (or (seq entries) (seq items))
+              (when (or (seq entries) (seq items) (seq session-changes))
                 (commit! runtime sid
-                         (cond-> {:entries entries
+                         {:entries entries
                           :queue-deliver (mapv :id items)
-                          :events events}
-                           naming (assoc :session (select-keys naming [:name :metadata])))))
+                          :events events
+                          :session session-changes}))
               items))]
       (when @title (start-title! runtime sid config @title))
       {:registry registry :manager manager :config config :hook-context context
@@ -765,9 +781,9 @@
       (deliver-job-results! runtime sid)
       (agents/deliver! (:agents runtime) sid (:operation-id slot))
       (let [path (store/active-path (:store runtime) sid)
-            compacted? (maybe-auto-compact!
-                        runtime sid slot registry config callback (run/latest-usage path))
-            {:keys [response recovered?]} (complete-with-context-recovery! runtime sid slot registry manager config callback)
+            _ (maybe-auto-compact!
+               runtime sid slot registry config callback (run/latest-usage path))
+            {:keys [response]} (complete-with-context-recovery! runtime sid slot registry manager config callback)
             assistant (run/validate-assistant! (run/response->assistant response))
             calls (:message/tool-calls assistant)]
         (commit-assistant! runtime sid slot assistant response)
@@ -787,14 +803,10 @@
               (let [next-config (provider-config runtime sid
                                                  (run/config-with-intents config intents))]
                 (recur (inc step) next-config))
-              (do
-                (when-not (or compacted? recovered?)
-                  (maybe-auto-compact! runtime sid slot registry config callback
-                                       (:response/usage response)))
-                (let [final (capabilities/apply-hooks registry :after-run hook-context assistant)]
-                  (value/check! (map? final) :invalid-hook-result
-                                "after-run hooks must return an assistant message" {})
-                  final)))))))))
+              (let [final (capabilities/apply-hooks registry :after-run hook-context assistant)]
+                (value/check! (map? final) :invalid-hook-result
+                              "after-run hooks must return an assistant message" {})
+                final))))))))
 
 (defn- compact-operation! [runtime sid slot opts]
   (let [{:keys [registry config]} (prepare-run! runtime sid slot nil (:config opts))]
@@ -1103,7 +1115,7 @@
            request (-> (capabilities/apply-hooks
                         registry :transform-request hook-context
                         (run/summary-request config abandoned (:instructions opts)))
-                       (session-cache sid))
+                       (session-cache (str sid ":branch-summary")))
            _ (value/check! (map? request) :invalid-hook-result
                            "transform-request hooks must return a request map" {})
            response (provider-complete! runtime sid slot config request (:on-event opts)
@@ -1123,12 +1135,15 @@
            (commit! runtime sid
                     {:entries [{:kind :branch-summary
                                 :data {:summary summary
-                                       :from-id (get-in source [:snapshot :head])}}]
+                                       :from-id (get-in source [:snapshot :head])
+                                       :usage (:response/usage response)
+                                       :cost (:response/cost response)}}]
                      :events [{:operation-id (:operation-id slot)
                                :type :session/branch-summarized
                                :data {:from-id (get-in source [:snapshot :head])
                                       :entry-id leaf
-                                      :usage (:response/usage response)}}]})))
+                                      :usage (:response/usage response)
+                                      :cost (:response/cost response)}}]})))
        {:summary summary :usage (:response/usage response)}))))
 
 (defn- with-session-reset! [runtime sid work]

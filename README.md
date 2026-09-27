@@ -12,11 +12,27 @@ Install the latest release on macOS or glibc-based Linux:
 curl -fsSL https://raw.githubusercontent.com/DeadMeme5441/arrodes/main/install.sh | sh
 ```
 
-The installer detects your OS and architecture, verifies the SHA-256 checksum, and installs to `~/.local/bin/arrodes`. No sudo, language runtimes, or package managers required. Run the same command to update.
+The installer detects your OS and architecture, verifies the SHA-256 checksum, and installs to `~/.local/bin/arrodes`. No sudo, language runtimes, or package managers required.
 
 If `~/.local/bin` is not on your `PATH`, the installer prints the command to add it. Then run `arrodes` inside a project to begin setup.
 
 Prefer to inspect scripts before running them? [Read the installer](install.sh), or use the manual downloads below.
+
+### Update
+
+```sh
+arrodes update --check
+arrodes update
+arrodes update --version 0.1.7
+```
+
+The packaged executable checks published stable releases, verifies the selected
+asset against its SHA-256 metadata and checksum file, and atomically replaces itself.
+Failed downloads leave the installed executable unchanged. Restart Arrodes afterward;
+the updater never opens or modifies your settings, credentials or sessions.
+Default updates never downgrade. Selecting an older version is explicit and does
+not roll back session data; check the [format contract](docs/COMPATIBILITY.md) first.
+Source checkouts do not replace their Bun executable: update the checkout instead.
 
 ### Manual download
 
@@ -89,7 +105,7 @@ and typing filters models. **Change provider** also works in narrow terminals.
 F5 discovers models from the selected provider. Enter chooses reasoning and then:
 
 - **Use in this conversation** — preserves history and live REPL definitions.
-- **Make default for new conversations** — leaves existing conversations unchanged.
+- **Make default for new conversations** — saves defaults and applies them to the current conversation; other saved conversations remain unchanged.
 
 OAuth can open a browser or show a URL for manual completion. API keys and pasted authorization codes are masked and excluded from conversation drafts and history. Press `Esc` to cancel a setup screen without exiting; run `/setup` or `/login` later to continue.
 
@@ -123,13 +139,10 @@ team browser for navigation, messages, results and explicit cancel/stop/resume;
 the ordinary composer retains its unsent text across navigation. Children share
 the working checkout and process permissions, **not** the parent's live REPL
 bindings. Foreground cancellation does not cancel accepted jobs or children.
-See the [agent/session contract](docs/SESSIONS.md). **Storage cutover:** on
-this unreleased branch, an incompatible *recognized Arrodes* SQLite store
-(including schemas 3 and 4) is automatically deleted and recreated as schema 5.
-Its prior sessions, history, jobs and retained results are permanently lost;
-export needed history with a compatible earlier build before launching.
-Foreign SQLite databases, credentials, settings and unrelated files are
-not reset. This is not a migration and requires no new `--data-dir`.
+See the [agent/session contract](docs/SESSIONS.md). Current schema-5 stores reopen
+directly; supported schema-3/4 layouts upgrade transactionally after a retained
+backup. Unknown/newer, malformed and foreign stores are rejected intact, not reset.
+See [compatibility](docs/COMPATIBILITY.md) for supported layouts and recovery.
 
 ### Keys
 
@@ -172,6 +185,7 @@ not reset. This is not a migration and requires no new `--data-dir`.
 | `/rename` | Rename the current session |
 | `/continue` | Continue from the current conversation |
 | `/compact` | Compact model context without deleting history |
+| `/usage` | Inspect measured cache tokens and active-path estimated spend |
 | `/eval` | Evaluate trusted Clojure input in the live session |
 | `/reload` | Reset the evaluator and reload resources; live definitions are lost |
 | `/reconnect` | Restart the owned core without repeating an interrupted mutation |

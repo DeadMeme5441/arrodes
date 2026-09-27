@@ -1,6 +1,8 @@
 (ns arrodes.tui.commands
   "User-visible command catalog and navigation actions."
   (:require
+            [arrodes.run :as run]
+            [arrodes.tui-model :as model]
             [arrodes.tui-present :as present]
             [clojure.string :as str]
             [arrodes.tui.context :as c]))
@@ -27,6 +29,12 @@
    {:label "History and branches" :description "/history" :choose #(c/action! :open-history! view)}
    {:label "Refresh session state" :description "/refresh  Read-only reconciliation; keeps live definitions"
     :choose #(do (c/action! :close-overlay! view) (c/fire! view :refresh {}))}
+   {:label "Session usage" :command "usage" :description "/usage  Inspect measured cache tokens and active-path spend"
+    :choose #(c/action! :open-overlay! view
+                        {:kind :usage :title "Session usage"
+                         :hint "Measured provider usage · Esc returns to your draft"
+                         :body (model/usage-details
+                                (run/usage-report (get-in (c/state view) [:view :entries])))})}
    {:label "Pending messages" :description "/pending  Edit or drop queued input"
     :choose #(c/action! :open-overlay! view {:kind :pending :title "Pending messages" :query ""
                                   :hint "Enter edits; Delete drops a still-pending message."})}

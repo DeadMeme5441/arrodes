@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import payloadPath from "../target/release-build/payload.tar.gz" with { type: "file" };
+import { runUpdate } from "./updater";
 
 declare const __ARRODES_VERSION__: string;
 declare const __ARRODES_PLATFORM__: string;
@@ -17,6 +18,7 @@ const HELP = `Arrodes - conversation-first terminal agent
 
 Usage: arrodes [options] [prompt]
        arrodes --rpc [RPC options]
+       arrodes update [--check] [--version VERSION]
 
   --cwd PATH        Project directory
   --home PATH       Application home (default: ~/.arrodes)
@@ -30,6 +32,7 @@ Usage: arrodes [options] [prompt]
   --memory          Ephemeral in-memory sessions
   --no-mouse        Disable mouse capture
   --rpc             Run headless JSONL RPC on stdio
+  update           Check or install a published executable release
   --help, -h        Show help
   --version, -v     Show version
 `;
@@ -174,6 +177,11 @@ async function tui(directory: string, args: string[], home: string, cwd: string)
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  if (args[0] === "update") {
+    await runUpdate({ args: args.slice(1), currentVersion: VERSION, executable: process.execPath,
+                      platform: PLATFORM, arch: ARCH, packaged: true });
+    return;
+  }
   const separator = args.indexOf("--");
   const flags = separator < 0 ? args : args.slice(0, separator);
   if (flags.includes("--help") || flags.includes("-h")) {

@@ -2,6 +2,7 @@
   (:require [arrodes.auth :as auth]
             [arrodes.provider :as provider]
             [arrodes.session-test :as fixtures]
+            [clojure.data.json :as json]
             [clojure.test :refer [deftest is]]
             [llm.sdk :as sdk]
             [llm.sdk.http :as sdk-http])
@@ -136,7 +137,9 @@
         (auth/put-credential! (:auth manager) :anthropic legacy)
         (provider/register! manager :claude-alias
                             {:type :profile-alias :provider :anthropic})
-        (with-redefs [auth/request! (fn [& _] (swap! calls inc))
+        (with-redefs [sdk/list-models (fn [_] [{:model/id "test-model"
+                                                :model/capabilities #{:chat :streaming :tools}}])
+                      auth/request! (fn [& _] (swap! calls inc))
                       sdk/complete (fn [& _] (swap! calls inc))]
           (let [completion-error
                 (try
@@ -200,7 +203,9 @@
                                :refresh-token "dummy-refresh-token"
                                :expires-at Long/MAX_VALUE
                                :source :stored-oauth})
-        (with-redefs [sdk-http/sse-response (fn [request]
+        (with-redefs [sdk/list-models (fn [_] [{:model/id "test-model"
+                                                :model/capabilities #{:chat :streaming :tools}}])
+                      sdk-http/sse-response (fn [request]
                                               (reset! captured request)
                                               {:status 200 :headers {} :body body})]
           (try

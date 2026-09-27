@@ -64,16 +64,17 @@ If you deliberately need another store, pass a distinct `--data-dir PATH`. This 
 
 ### Incompatible store format or unsupported home layout
 
-Schema 5 is current. If the selected, exclusively owned **recognized Arrodes**
-SQLite session store has an incompatible format (including schemas 3 and 4), startup
-automatically resets that store and its owned retained artifacts. **Old sessions,
-history, jobs and results in that store are permanently lost.** There is no
-migration or backup; export needed history using a compatible earlier build
-before starting this one. Foreign/unrecognized SQLite databases are rejected
-unchanged rather than deleted. Credentials, settings and unrelated neighboring
-files remain intact. `store-in-use` prevents a competing process from resetting
-the store. Corrupt SQLite, unsafe paths, shared artifact directories and
-permission errors are reported rather than treated as permission to delete data.
+Schema 5 is current. Supported schema-3/4 layouts upgrade transactionally after a
+private, WAL-inclusive backup beside the database (`.schemaVERSION-UUID.backup`).
+Unsupported/newer, malformed or foreign stores are rejected without deletion.
+Use a compatible build or restore a known-good backup explicitly while all runtimes
+are closed; preserve its matching artifacts. Never delete history to silence a
+format error. Credentials/settings and unrelated files are not part of migration.
+
+`incomplete-legacy-reset` means an earlier version left a `.reset` marker. This
+version does not continue deletion. Inspect the remaining database/artifacts and
+restore a backup if needed before moving the marker aside. `store-in-use`, unsafe
+paths, shared artifact roots, corruption and permission failures remain hard errors.
 
 An unsupported **home layout** is different: root-level configuration remains
 untouched and startup rejects it. Select a current-format `--home PATH` if

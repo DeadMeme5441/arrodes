@@ -142,6 +142,12 @@ async function archiveEntries(root: string): Promise<Record<string, Uint8Array>>
   return entries;
 }
 
+export async function writePayload(root: string, destination: string): Promise<void> {
+  // Bun.write(Archive) writes tar directly, bypassing the Archive's compression options.
+  const archive = new Bun.Archive(await archiveEntries(root), { compress: "gzip", level: 9 });
+  await Bun.write(destination, await archive.bytes());
+}
+
 async function main(): Promise<void> {
   if (process.versions.bun !== BUN_VERSION) throw new Error(`Release builds require Bun ${BUN_VERSION}; found ${process.versions.bun}`);
   const supportedArchitectures = SUPPORTED[process.platform];
@@ -177,7 +183,7 @@ async function main(): Promise<void> {
   mkdirSync(releaseRoot, { recursive: true });
 
   run(["clojure", "-Srepro", "-M:tui-build"], { cwd: root });
-  run(["clojure", "-Srepro", "-T:build", "rpc"], { cwd: root });
+  run(["clojure", "-Srepro", "-T:build", "rpc", ":platform", `:${process.platform}`, ":arch", `:${arch}`], { cwd: root });
 
   const javaRoot = join(payloadRoot, "java");
   run([
@@ -222,7 +228,7 @@ async function main(): Promise<void> {
   ];
   writeFileSync(join(payloadRoot, "BUILD-INFO.txt"), `${buildInfo.join("\n")}\n`);
 
-  await Bun.write(archivePath, new Bun.Archive(await archiveEntries(payloadRoot), { compress: "gzip", level: 9 }));
+  await writePayload(payloadRoot, archivePath);
   const payloadDigest = await sha256(archivePath);
   const filename = `arrodes-${platform}-${arch}${process.platform === "win32" ? ".exe" : ""}`;
   const executable = join(releaseRoot, filename);
@@ -251,9 +257,11 @@ async function main(): Promise<void> {
   process.stdout.write(`${executable}\n${executable}.sha256\n`);
 }
 
-try {
-  await main();
-} catch (error) {
-  process.stderr.write(`Release build failed: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
+if (import.meta.main) {
+  try {
+    await main();
+  } catch (error) {
+    process.stderr.write(`Release build failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  }
 }
