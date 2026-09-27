@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes target the current `0.1.x` release line, starting with `0.1.1`. The private `0.1.0` preview and unreleased development builds are not supported.
+Security fixes target the current `0.2.x` release line, starting with `0.2.0`. The private `0.1.0` preview and unreleased development builds are not supported.
 
 ## Reporting a vulnerability
 
