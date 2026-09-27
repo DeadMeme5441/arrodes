@@ -52,7 +52,9 @@ function compareVersion(a: string, b: string): number {
 
 async function stream(response: Response, limit: number, chunk: (bytes: Uint8Array) => void): Promise<void> {
   if (!response.ok || !response.body) throw new Error(`Release download failed (HTTP ${response.status})`);
-  const length = response.headers.get("content-length");
+  // Fetch decodes Content-Encoding; Content-Length still counts encoded transfer bytes.
+  const encoding = response.headers.get("content-encoding")?.trim().toLowerCase();
+  const length = !encoding || encoding === "identity" ? response.headers.get("content-length") : null;
   if (length && (!/^\d+$/.test(length) || Number(length) > limit)) throw new Error("Release download exceeds size limit");
   let size = 0;
   for await (const bytes of response.body) {

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.0
+
+- Fix self-update failures on HTTP-compressed release responses. Validate decoded
+  content against size limits and published asset sizes/checksums without comparing
+  it to the compressed transfer's `Content-Length`.
+
 ## 0.1.9
 
 - Update clojure-llm-sdk from 0.6.0 to 0.6.2, including OpenRouter structured
