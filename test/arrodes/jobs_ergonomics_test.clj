@@ -15,21 +15,63 @@
           _ (await! rt sid handle)
           compact (eval! rt sid "(jobs/inspect j)")
           detailed (eval! rt sid "(jobs/inspect j {:detailed? true})")]
-      (is (= #{:id :name :status :result-id :duration-ms :result-available?} (set (keys compact))))
       (is (= :completed (:status compact)))
       (is (:result-available? compact))
       (is (<= 0 (:duration-ms compact)))
       (is (:origin detailed))
       (is (:result detailed))
-      (is (< (count (pr-str compact)) 350))
-      (is (= [compact] (eval! rt sid "(jobs/list)")))
-      (is (= [detailed] (eval! rt sid "(jobs/list {:detailed? true})")))
-      (is (= compact (eval! rt sid "(jobs/wait j)")))
-      (is (= detailed (eval! rt sid "(jobs/wait j {:detailed? true})")))
       (is (= {:ratio 2/3 :payload (vec (range 1000))}
              (eval! rt sid "(jobs/result (first (jobs/list)))")))
       ;; The UI/RPC needs full provenance; the model's compact default does not strip it.
       (is (:origin (commands/dispatch! rt "job.inspect" {:session-id sid :job-id (:id handle)}))))))
+
+(deftest inspection-navigation-keeps-output-values-and-acknowledgement-distinct
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))
+          handle (eval! rt sid "(def release (promise)) (def entered (promise)) (def j (jobs/start! #(do (print \"working\") (deliver entered true) @release {:ratio 2/3}))) @entered j")]
+      (try
+        (let [running (eval! rt sid "(jobs/inspect j)")]
+          (is (nil? (get-in running [:next :value-and-ack])))
+          (is (= "working" (:text (eval! rt sid (get-in running [:next :output])))))
+          (eval! rt sid "(deliver release true)")
+          (is (= :completed (:status (eval! rt sid (get-in running [:next :wait]))))))
+        (let [completed (eval! rt sid "(jobs/inspect j)")
+              info (eval! rt sid (get-in completed [:next :result-info]))
+              other (:id (fixtures/create-session rt))]
+          (is (= {:ratio 2/3} (eval! rt sid (get-in info [:next :value]))))
+          (is (false? (:delivered? (store/job (:store rt) sid (:id handle)))))
+          (is (:error? (runtime/evaluate! rt other (get-in completed [:next :value-and-ack]))))
+          (is (= {:ratio 2/3} (eval! rt sid (get-in completed [:next :value-and-ack]))))
+          (is (:delivered? (store/job (:store rt) sid (:id handle))))
+          (is (every? #(not (contains? % :next)) (eval! rt sid "(jobs/list)"))))
+        (finally (eval! rt sid "(deliver release true)"))))))
+
+(deftest failure-navigation-does-not-present-a-successful-nil-value
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))
+          handle (eval! rt sid "(def j (jobs/start! #(throw (ex-info \"partial work\" {})))) j")]
+      (await! rt sid handle)
+      (let [inspection (eval! rt sid "(jobs/inspect j)")
+            info (eval! rt sid (get-in inspection [:next :result-info]))]
+        (is (nil? (get-in inspection [:next :value-and-ack])))
+        (is (nil? (get-in info [:next :value])))
+        (is (:error? (:details info)))
+        (is (= "failure" (:workflow (eval! rt sid (get-in info [:next :reconcile])))))
+        (is (false? (:delivered? (store/job (:store rt) sid (:id handle)))))))))
+
+(deftest inspection-does-not-offer-an-expired-live-job-value
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))
+          handle (eval! rt sid "(jobs/start! #(atom :live))")]
+      (await! rt sid handle)
+      (runtime/reload! rt sid)
+      (let [inspection (eval! rt sid (str "(jobs/inspect " (pr-str handle) ")"))
+            info (eval! rt sid (get-in inspection [:next :result-info]))]
+        (is (= :completed (:status inspection)))
+        (is (false? (:result-available? inspection)))
+        (is (nil? (get-in inspection [:next :value-and-ack])))
+        (is (false? (:available? info)))
+        (is (nil? (get-in info [:next :value])))))))
 
 (deftest cancellation-is-distinct-from-unrequested-interruption-and-retains-the-cause
   (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]

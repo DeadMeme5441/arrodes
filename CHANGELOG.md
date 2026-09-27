@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+## 0.1.7
+
+**Upgrade notice:** this release requires SQLite schema 5. Startup resets recognized
+incompatible Arrodes stores and their owned artifacts, losing their sessions/history.
+Export needed history with the previous compatible build before upgrading. Settings,
+credentials, foreign databases and unrelated files are preserved.
+
+- Add on-demand `help` recipes for background work, delegation, partial failures and
+  retained results; teach receipt reconciliation, deliberate observation and final
+  answers without duplicate peer reports.
+- Add inert, context-sensitive `:next` navigation to individual job, agent, delivery
+  and retained-result inspections. Preserve session/operation identity and distinguish
+  value retrieval from job-outcome acknowledgement.
+- Add reusable session/artifact-scoped continuation cursors to `artifact-page` and
+  RPC `artifact.read`, including after restart, without changing explicit offsets or
+  durable formats.
+- Unify REPL discovery under bounded, paged `help` for coding functions, jobs,
+  agents and value/workspace helpers. Keep full contracts explicit and preserve
+  last-expression evaluation semantics.
+- Default native agent inspection to compact paged data and bounded answer/error
+  previews; retain full native detail on explicit request instead of injecting
+  provider/configuration payloads into ordinary model context.
+- Link accepted message receipts atomically to the operations that incorporate
+  them; add `agents/delivery`, `agent.delivery` and receipt-aware managed waiting.
+
+- Add session-backed agents with independent persistent REPLs, durable addressed
+  messages and completion notices, managed waiting, operation-scoped results, and
+  explicit pause/resume and tree stop. Parent cancellation leaves accepted jobs and
+  child sessions running; routing resumes only on explicit user action after a stop.
+- Add `agent.*` RPC methods and a terminal `/agents` browser for team navigation,
+  messaging, results and stop/resume, with off-context indicators and honest
+  measured-token aggregates. Preserve the single-`repl` provider action and
+  session-owned jobs.
+- Use bounded schedulable operation admission and ordered durable event publication
+  for concurrent parent/child execution; preserve safe input boundaries and native
+  evaluator values.
+- Preserve accepted messages across tree stop and retry eligible wakes when capacity
+  is released by another team. Nested jobs stopping their own tree report stopping
+  without waiting on their own job ancestors.
+- Reject new jobs, agents, messages and resume actions from already-cancelled
+  invocations, without cancelling previously accepted independent background work.
+- Switch to SQLite schema 5. Startup automatically resets exclusively
+  owned incompatible **recognized Arrodes** session stores and their owned
+  artifacts; old sessions/history/results are lost without migration.
+  Foreign SQLite, credentials, settings and unrelated files remain intact;
+  RPC framing version 1 and session export format 1 remain.
+
 ## 0.1.5
 
 - Add session-owned background Clojure jobs with independent cancellation/output, owned child cleanup, retained native results, paged logs, and once-only completion delivery at model boundaries. Restart records interrupted work without replaying effects.

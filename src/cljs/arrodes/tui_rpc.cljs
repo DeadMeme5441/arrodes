@@ -182,7 +182,9 @@
     (safe-call (get-in client [:options :on-host-request])
                {:id (field message :id)
                 :request (field message :request)
-                :request-id (field message :request-id)})
+                :request-id (field message :request-id)
+                :session-id (field message :session-id)
+                :operation-id (field message :operation-id)})
 
     "host-cancel"
     (safe-call (get-in client [:options :on-host-cancel])

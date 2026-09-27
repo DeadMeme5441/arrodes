@@ -7,6 +7,7 @@
             [arrodes.tui-widgets :as w]
             [clojure.string :as str]
             [arrodes.tui.commands :as commands]
+            [arrodes.tui.agents :as agents]
             [arrodes.tui.jobs :as jobs]
             [arrodes.tui.context :as c]
             [arrodes.tui.inspection :as inspection]
@@ -84,6 +85,7 @@
           :commands (remove :alias? (commands/commands view))
           :themes (theme-picker/items view)
           :jobs (jobs/items view)
+          :agents (agents/items view)
           :sessions
           (mapv (fn [session]
                   {:label (or (:name session) "Untitled session")
@@ -273,10 +275,16 @@
             (.add (:command-menu view) row)))))))
 
 
+(defn- choice-label [overlay item i index]
+  (if (= :agents (:kind overlay))
+    (str (if (= i index) "› " "  ") (:label item))
+    (:label item)))
+
 (defn render-overlay! [view]
   (let [overlay (get-in (c/state view) [:ui :overlay])
         renderer (:renderer view)]
     (set! (.-visible (:command-menu view)) (= :commands (:kind overlay)))
+    (set! (.-visible (:agent-actions view)) (= :agents (:kind overlay)))
     (when (= :commands (:kind overlay)) (render-command-menu! view overlay))
     (set! (.-visible (:modal-shade view)) (and (some? overlay) (not= :commands (:kind overlay))))
     (if (or (nil? overlay) (= :commands (:kind overlay)))
@@ -323,13 +331,21 @@
                           (when models? (if (:refreshable? entry) "Provider discovery · F5 refreshes models"
                                                      "Configured / SDK catalog · No live listing endpoint")) "")))
         (w/content! (:modal-title view)
-                    (if models? (str "Models · " (or (some-> (:provider overlay) name) "All providers")
-                                     (when (= :providers (:pane overlay)) " · selecting provider")) (:title overlay)))
+                    (cond
+                      models? (str "Models · " (or (some-> (:provider overlay) name) "All providers")
+                                   (when (= :providers (:pane overlay)) " · selecting provider"))
+                      (= :agents (:kind overlay))
+                      (str "Agents · target "
+                           (or (:name (:agent-row (get items index))) "none"))
+                      :else (:title overlay)))
         (set! (.-visible (:provider-switch view)) models?)
         (set! (.-width (:provider-switch view)) (if (< width 60) 12 21))
         (w/content! (:provider-switch view) (if (< width 60) "Provider" "Change provider"))
         (w/content! (:modal-hint view)
-                    (str (:hint overlay) (when (:error overlay) (str "\nError: " (:error overlay)))))
+                    (str (:hint overlay)
+                         (when (= :agents (:kind overlay))
+                           (str "\n" (agents/usage-summary (get-in (c/state view) [:agents :agents]))))
+                         (when (:error overlay) (str "\nError: " (:error overlay)))))
         (set! (.-visible (:modal-input-frame view)) query?)
         (when (and (:secret? overlay)
                    (not= (:token overlay) (:modal-token @(:local view))))
@@ -369,19 +385,27 @@
             (empty? items)
             (.add (:modal-list view)
                   (w/text renderer
-                          (if (= :sessions (:kind overlay))
+                          (cond
+                            (= :sessions (:kind overlay))
                             (cond (:loading? overlay) "Loading sessions…"
                                   (:error overlay) "Could not load sessions. Close and reopen to retry."
                                   (str/blank? (:query overlay)) "No saved sessions."
                                   :else "No matching sessions.")
-                            "No matching items.")
+                            (= :agents (:kind overlay))
+                            (cond (:loading? overlay) "Loading agents…"
+                                  (:error overlay) "Could not load agents. F5 refreshes."
+                                  (not (get-in (c/state view) [:view :session :id])) "Open a session to manage agents."
+                                  (str/blank? (:query overlay)) "No agents in this team."
+                                  :else "No matching agents.")
+                            :else "No matching items.")
                           {:fg :text/secondary}))
             :else
             (doseq [[i item] (map-indexed vector items)]
               (let [row (w/box renderer {:id (str "choice-" i) :width "100%" :paddingX 1 :paddingY 0
                                          :marginBottom (if browser? 0 1) :backgroundColor (if (= i index) :surface/selected :surface/panel)})
-                    button (w/button renderer (:label item) (:choose item) {:id (str "choice-" i "-label") :width "100%"
-                                                                            :fg (if (= i index) :ui/accent :text/primary)})
+                    button (w/button renderer (choice-label overlay item i index) (:choose item)
+                                     {:id (str "choice-" i "-label") :width "100%"
+                                      :fg (if (= i index) :ui/accent :text/primary)})
                     description (w/text renderer (:description item) {:width "100%" :fg :text/secondary})]
                 (when browser?
                   (set! (.-flexDirection row) "row")
@@ -401,7 +425,9 @@
               (when-let [row (.findDescendantById (:modal-list view) (str "choice-" i))]
                 (w/paint! row :backgroundColor (if (= i index) :surface/selected :surface/panel))
                 (when-let [label (.findDescendantById row (str "choice-" i "-label"))]
-                  (w/paint! label :fg (if (= i index) :ui/accent :text/primary))))))
+                  (w/paint! label :fg (if (= i index) :ui/accent :text/primary))
+                  (when (= :agents (:kind overlay))
+                    (w/content! label (choice-label overlay (get items i) i index)))))))
           ;; Keep measured rows when selecting; scroll only after layout has settled.
           (swap! (:local view) assoc :modal-selection-signature selection-signature :modal-index index
                  :modal-scroll-choice
@@ -433,6 +459,10 @@
                                             "← → column edge · Tab pane · ↑↓ select · Enter configure")
                           browser? (if (< width 80) "↑↓ select · Enter manage · F5 refresh · Esc back"
                                         "Type to search · ↑↓ select · Enter manage · F5 refresh · Esc back")
+                          (= :agents (:kind overlay))
+                          (if (< width 80)
+                            "F7 message · F8 messages · Enter open · ↑↓ target"
+                            "Enter open · Ctrl+N new · F7 message · F8 messages · Ctrl+O result · Ctrl+K cancel · Ctrl+X stop · Ctrl+R resume · Alt+← parent · F5")
                           input? "Enter submit   Shift+Enter newline   Esc cancel"
                           body? "Esc back"
                           (= :pending (:kind overlay)) "Up/Down select   Enter edit   Delete drop   Esc back"
@@ -466,15 +496,25 @@
         envelope (first (:host-requests s))
         request (or (:request envelope) envelope)
         id (:id envelope)
-        kind (keyword (or (:kind request) "unknown"))]
+        kind (keyword (or (:kind request) "unknown"))
+        source-id (or (:session-id envelope) (:session-id request))
+        operation-id (or (:operation-id envelope) (:operation-id request))
+        source (or (:name (some #(when (= source-id (:session-id %)) %)
+                                (get-in s [:agents :agents])))
+                   (:name (some #(when (= source-id (:id %)) %) (:sessions s)))
+                   source-id)
+        attribution (when source
+                      (str source (when operation-id (str " · operation " operation-id))))]
     (when (and id (not= id (:handled-host @(:local view)))
                (not= id (get-in s [:ui :overlay :host-id])))
-      (let [title (or (:title request) (when (string? (:prompt request)) (:prompt request)) "Core interaction")
+      (let [title (str (when attribution (str attribution " asks · "))
+                       (or (:title request) (when (string? (:prompt request)) (:prompt request)) "Core interaction"))
             cancel {:label "Cancel request" :description "No approval or result is invented"
                     :choose #(respond-host! view id nil true)}]
         (case kind
           :notify
-          (do (c/notify! view (or (:message request) (:url request) (present/pretty (dissoc request :kind))))
+          (do (c/notify! view (str (when attribution (str attribution ": "))
+                                   (or (:message request) (:url request) (present/pretty (dissoc request :kind)))))
               (swap! (:local view) assoc :handled-host id)
               (c/fire! view :host-response {:id id :result nil}))
 
@@ -517,7 +557,8 @@
                                                                              false)})
                                                   (or (:items request) (:options request))) cancel)})
 
-          (open-overlay! view {:kind :confirm :host-id id :title "Unsupported host capability"
+          (open-overlay! view {:kind :confirm :host-id id
+                               :title (str (when attribution (str attribution " asks · ")) "Unsupported host capability")
                                :hint (str "No frontend implementation is registered for " (:name request)
                                           ". The core request is not approved or executed by this UI.")
                                :items [cancel]}))))))

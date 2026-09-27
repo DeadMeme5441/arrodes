@@ -1,6 +1,7 @@
 (ns arrodes.repl
   "Session-local Clojure evaluation. The caller owns serialization and retention."
   (:require [clojure.string :as str]
+            [arrodes.help :as help]
             [arrodes.platform :as util]
             [arrodes.value :as value])
   (:import (clojure.lang LineNumberingPushbackReader Var)
@@ -188,40 +189,52 @@
      :total-bindings (count bindings)
      :next-offset (when (< (+ offset limit) (count bindings)) (+ offset limit))}))
 
+(defn- result-inspection [descriptor]
+  (let [{:keys [id available? artifact-id details]} descriptor
+        output-id (get-in details [:artifact :id])]
+    (assoc descriptor :next
+           (cond-> {}
+             (and available? (not (:error? details)))
+             (assoc :value (str "(result " id ")"))
+             (and available? artifact-id)
+             (assoc :value-page (str "(artifact-page " (pr-str artifact-id) ")"))
+             output-id
+             (assoc :output (str "(artifact-page " (pr-str output-id) ")"))
+             (:error? details)
+             (assoc :reconcile "(help {:workflow \"failure\"})"
+                    :recent-results "(results {:limit 8})"
+                    :workspace "(workspace)")))))
+
 (defn install!
   "Install discoverable Clojure helpers. Evaluation itself is not a capability."
   [{:keys [namespace generation register! registered-implementation invoke-value!
-           registered-tools result-value result-info result-page artifact-value artifact-page]}]
+           selected-tools result-value result-info result-page artifact-value artifact-page]}]
   (let [owner (str "repl:" namespace)
         ns-object (the-ns namespace)]
     (intern ns-object (with-meta 'result {:doc "Return a native live result or its durable reconstructed value."})
             (fn [id] (result-value id)))
     (intern ns-object (with-meta 'artifact {:doc "Read a durable artifact by id up to the bounded REPL helper limit; page larger artifacts with artifact-page."})
             (fn [id] (artifact-value id)))
-    (intern ns-object (with-meta 'registered-tools {:doc "Return the current public capability catalog."})
+    (intern ns-object (with-meta 'help {:doc "Discover workflows with {:workflow name}, page a function group, or inspect one native contract."
+                                       :arglists '([] [selection] [name opts])})
             (fn
-              ([] (registered-tools))
-              ([selection]
-               (if (string? selection)
-                 (or (some #(when (= selection (:name %)) %) (registered-tools))
-                     (value/fail! :unknown-tool "No registered function with this name" {:name selection}))
-                 (do (value/check! (= {:brief? true} selection) :invalid-arguments
-                                    "Use a function name or {:brief? true}" {})
-                     (mapv #(select-keys % [:name :symbol :description]) (registered-tools)))))))
+              ([] (help/help namespace selected-tools))
+              ([selection] (help/help namespace selected-tools selection))
+              ([name opts] (help/help namespace selected-tools name opts))))
     (intern ns-object (with-meta 'workspace {:doc "Inspect live bindings without printing values or realizing lazy sequences. Optional {:query string :offset 0 :limit 50}."})
             (fn ([] (workspace-value namespace generation {}))
               ([opts] (workspace-value namespace generation opts))))
-    (intern ns-object (with-meta 'result-info {:doc "Inspect a retained descriptor, including durable failure details, availability and output artifact references; does not load its value."})
-            result-info)
+    (intern ns-object (with-meta 'result-info {:doc "Inspect retained details, availability and inert :next source strings without loading the value or acknowledging job delivery."})
+            (fn [id] (result-inspection (result-info id))))
     (intern ns-object (with-meta 'results {:doc "List retained result references newest first. Optional {:limit 20 :before-id n}; pass :next-before-id for the next page."})
             (fn ([] (result-page {})) ([opts] (result-page opts))))
-    (intern ns-object (with-meta 'artifact-page {:doc "Read a bounded artifact page: (artifact-page id {:offset 1 :limit 4096}). Text offsets count characters; binary offsets count bytes."})
+    (intern ns-object (with-meta 'artifact-page {:doc "Read bounded retained content. Continue with {:after (:cursor page) :limit 4096} while :cursor is non-nil. Reusable cursors are session/artifact-scoped; explicit 1-based :offset counts text characters or binary bytes."})
             (fn ([id] (artifact-page id {:limit 4096})) ([id opts] (artifact-page id opts))))
     (intern ns-object (with-meta 'invoke-tool {:doc "Invoke a registered function through hooks, validation, cancellation, and effect locks."})
             (fn [name arguments] (invoke-value! name arguments)))
     (intern ns-object (with-meta 'register-tool! {:doc "Add discovery metadata and invocation tracing to a function Var. Ordinary functions need no registration to be called."})
             (fn [var descriptor]
               (register-var! register! registered-implementation owner var descriptor)))
-    (doseq [sym '[result artifact registered-tools workspace result-info results artifact-page invoke-tool register-tool!]]
+    (doseq [sym '[result artifact help workspace result-info results artifact-page invoke-tool register-tool!]]
       (alter-meta! (ns-resolve ns-object sym) assoc :arrodes/helper true))
     nil))

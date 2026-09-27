@@ -16,6 +16,12 @@
                (c/action! :open-providers! view)
                (do (c/action! :close-overlay! view) (c/fire! view :new-session {})))}
    {:label "Sessions" :command "sessions" :icon "↶" :description "/sessions  Resume a previous conversation" :choose #(c/action! :open-sessions! view)}
+   {:label "Session agents" :command "agents" :icon "◎"
+    :description "/agents  Open the team roster, messages, native outcomes and controls"
+    :choose #(c/action! :open-agents! view)}
+   {:label "Parent agent" :command "parent"
+    :description "/parent  Return to the parent conversation without losing this draft"
+    :choose #(do (c/action! :close-overlay! view) (c/action! :agent-parent! view))}
    {:label "Background jobs" :command "jobs" :description "/jobs  Inspect results, output, and cancel background work"
     :choose #(c/action! :open-jobs! view)}
    {:label "History and branches" :description "/history" :choose #(c/action! :open-history! view)}
@@ -94,7 +100,7 @@
       (c/action! :open-overlay! view {:kind :help :title "Keyboard" :query ""
                            :hint "Enter sends or steers. Ctrl+Q queues a follow-up. Escape closes a view before cancelling work."
                            :items [{:label "Composer" :description "Shift+Enter newline | @ files | / commands | Up/Down prompt history" :choose #(c/action! :close-overlay! view)}
-                                   {:label "Navigation" :description "F2 sessions | F3 or Ctrl+P commands | F6 next pane | PgUp/PgDn scroll" :choose #(c/action! :close-overlay! view)}
+                                   {:label "Navigation" :description "F2 sessions | F4 agents | F7 message | F8 messages | Alt+Left parent | F3/Ctrl+P commands | F6 pane" :choose #(c/action! :close-overlay! view)}
                                    {:label "Conversation focus" :description "Up/Down select | Enter inspect | Space expand | End follow latest" :choose #(c/action! :close-overlay! view)}
                                    {:label "Inspector" :description "1 summary | 2 output | 3 value | 4 code | y copy | Esc back" :choose #(c/action! :close-overlay! view)}
                                    {:label "Selection and exit" :description "Drag selects text | Ctrl+C copies selection, otherwise stops work | Ctrl+D exits" :choose #(c/action! :close-overlay! view)}]}))}

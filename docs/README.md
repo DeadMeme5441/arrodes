@@ -8,6 +8,7 @@ development procedures. Keep each fact in its owning document and link to it els
 | What is Arrodes, and what is in scope? | [Product](PRODUCT.md) |
 | How do the parts fit together? | [Architecture](ARCHITECTURE.md) |
 | What persists, resets, branches, or recovers? | [Sessions](SESSIONS.md) |
+| How do session agents coordinate and communicate? | [Harness coordination](HARNESS_COORDINATION.md) |
 | How are providers and model settings handled? | [Providers](PROVIDERS.md) |
 | Where do settings and project resources live? | [Configuration](CONFIGURATION.md) |
 | How do extensions, MCP, skills, and packages work? | [Extensions](EXTENSIONS.md) |
@@ -24,3 +25,9 @@ development procedures. Keep each fact in its owning document and link to it els
 The machine-readable [scope](../resources/arrodes/scope.edn) records product domains and
 exclusions. [AGENTS.md](../AGENTS.md) gives source orientation and routes work to the
 project skills.
+
+## Implementation design
+
+[REPL-first harness coordination](HARNESS_COORDINATION.md) records the selected
+session-agent policies, invariants and implementation design. The owning contracts
+above specify observable product behavior.

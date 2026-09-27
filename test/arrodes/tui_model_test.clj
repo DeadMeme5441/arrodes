@@ -27,6 +27,62 @@
            (get-in decoded [:data :result :value])))
     (is (= :inline (get-in decoded [:data :result :kind])))))
 
+(deftest roster-snapshot-reconciles-only-events-newer-than-its-cursor
+  (let [root {:session-id "root" :root-id "root" :name "Main" :depth 0}
+        child {:session-id "child" :root-id "root" :parent-session-id "root"
+               :name "Parser" :depth 1 :operation {:id "op-1" :status :queued}}
+        past {:seq 18 :session-id "child" :operation-id "op-1"
+              :type :operation/failed :data {:session-id "child"}}
+        next {:seq 22 :session-id "child" :operation-id "op-1"
+              :type :operation/started :data {:session-id "child"}}
+        snapshot (model/agent-snapshot {:root-id "root" :cursor 20 :agents [root child]}
+                                       [past next])]
+    (is (= ["root" "child"] (mapv :session-id (:agents snapshot))))
+    (is (= :running (get-in snapshot [:agents 1 :operation :status])))
+    (is (= :completed
+           (get-in (model/agent-snapshot {:root-id "root" :cursor 22
+                                          :agents [root (assoc-in child [:operation :status] :completed)]}
+                                         [past next])
+                   [:agents 1 :operation :status])))))
+
+(deftest delivered-agent-message-remains-attributed-and-retains-native-inspection
+  (let [delivered (assoc (entry "agent-msg" nil :user "{:result {:message/provider-data ...}}")
+                         :data {:message/role :user
+                                :message/content "{:result {:message/provider-data SECRET}}"
+                                :message/agent {:id "msg-1" :from "child" :kind :completion
+                                                :operation-id "op-1"}
+                                :message/result {:id 42 :session-id "root" :kind :inline
+                                                 :value {:session-id "child" :operation-id "op-1"
+                                                         :status :completed
+                                                         :result {:message/role :assistant
+                                                                  :message/content [{:part/type :text :text "Ready: 42"}]
+                                                                  :message/provider-data {:sdk-response "SECRET"}}}}})
+        rows (model/rows (model/hydrate {:state {:session {:id "root" :head "agent-msg"}}
+                                         :entries [delivered] :cursor 3} []))
+        row (first rows)]
+    (is (= "child" (:agent-from row)))
+    (is (= :completion (:agent-kind row)))
+    (is (= "msg-1" (:agent-message-id row)))
+    (is (re-find #"Ready: 42" (:text row)))
+    (is (re-find #"completed" (:text row)))
+    (is (not (re-find #"SECRET|message/provider-data" (:text row))))
+    (is (= "SECRET" (get-in row [:result :value :result :message/provider-data :sdk-response])))))
+
+(deftest lengthy-agent-completion-previews-do-not-hide-full-native-result
+  (let [reply (apply str (repeat 5000 "x"))
+        delivered (assoc (entry "long-result" nil :user "serialized SDK payload")
+                         :data {:message/role :user :message/content "serialized SDK payload"
+                                :message/agent {:from "child" :kind :completion}
+                                :message/result {:id 9 :kind :inline
+                                                 :value {:status :completed
+                                                         :result {:message/content
+                                                                  [{:part/type :text :text reply}]}}}})
+        row (first (model/rows (model/hydrate {:session {:id "root" :head "long-result"}
+                                               :entries [delivered] :cursor 1} [])))]
+    (is (< (count (:text row)) 1500))
+    (is (re-find #"Preview truncated" (:text row)))
+    (is (= reply (get-in row [:result :value :result :message/content 0 :text])))))
+
 (deftest active-path-and-canonical-entry-identity-own-message-rows
   (let [root (entry "root" nil :user "question")
         selected (entry "selected" "root" :assistant "selected answer")

@@ -46,7 +46,7 @@
                         "thinking" "stream" "mode"}
                       (name key)))))
 
-(declare decode-wire apply-event put-activity event-presentation)
+(declare decode-wire apply-event put-activity event-presentation apply-agent-event)
 
 (defn- decode-map [m]
   (persistent!
@@ -116,6 +116,54 @@
    :queue []
    :operation nil
    :cursor 0})
+
+(defn agent-snapshot
+  "An authoritative roster at :cursor, followed only by newer buffered changes."
+  [snapshot buffered]
+  (let [snapshot (decode-wire snapshot)
+        cursor (or (:cursor snapshot) 0)
+        roster {:root-id (:root-id snapshot)
+                :agents (vec (:agents snapshot))
+                :cursor cursor}]
+    (reduce (fn [team event]
+              (let [event (decode-wire event)]
+                (if (or (nil? (:seq event)) (> (:seq event) cursor))
+                  (apply-agent-event team event)
+                  team)))
+            roster buffered)))
+
+(defn apply-agent-event
+  "Project live child operation changes without hydrating any child transcript."
+  [team raw-event]
+  (let [event (decode-wire raw-event)
+        data (:data event)
+        sid (or (:session-id data) (:session-id event))
+        type (:type event)
+        status (case type
+                 :operation/started :running
+                 :operation/cancelling :cancelling
+                 :operation/completed :completed
+                 :operation/failed :failed
+                 :operation/cancelled :cancelled
+                 :operation/interrupted :interrupted
+                 nil)
+        state (or (:state data) (:agent data))
+        phase (when (= type :operation/phase) (:phase data))]
+    (cond-> team
+      (or status state phase)
+      (update :agents
+              (fn [rows]
+                (mapv (fn [row]
+                        (if (= sid (:session-id row))
+                          (cond-> (merge row state)
+                            phase (assoc :phase phase)
+                            status (assoc :operation
+                                          (merge (:operation row) (:operation data)
+                                                 {:id (:operation-id event) :status status})
+                                          :phase (if (contains? #{:running :cancelling} status)
+                                                   status :idle)))
+                          row))
+                      rows))))))
 
 (defn- replace-by-id [items item]
   (let [id (:id item)
@@ -602,11 +650,28 @@
          (str/join ""))
     ""))
 
+(defn- completion-preview [message]
+  (let [native (field (field message :message/result) :value)
+        status (field native :status)
+        final (field (field native :result) :message/content)
+        error (field (field native :error) :message)
+        text (safe-text (text-content (or final error)))
+        limited (if (> (count text) 1200)
+                  (str (subs text 0 1200) "…\n[Preview truncated; inspect the full native result.]")
+                  text)
+        source (field (field message :message/agent) :from)]
+    (str "From " (safe-text (or source "agent"))
+         " · " (safe-text (if (keyword? status) (name status) (or status "unknown status")))
+         "\n\n" (if (str/blank? limited) "No final assistant text recorded." limited)
+         "\n\nSelect this row and press Enter to inspect its native result.")))
+
 (defn- message-rows [entry message]
   (let [id (:id entry)
         content (:message/content message)
-        reasoning (reasoning-content content)
-        text (text-content content)
+        agent (:message/agent message)
+        completion? (= :completion (:kind agent))
+        reasoning (if completion? "" (reasoning-content content))
+        text (if completion? (completion-preview message) (text-content content))
         role (:message/role message)]
     (cond-> []
       (not (str/blank? reasoning))
@@ -614,7 +679,9 @@
              :text (safe-text reasoning) :entry-id id})
       (or (not (str/blank? text)) (not= :assistant role))
       (conj {:kind :message :id (str "message:" id)
-             :role role :text (safe-text text) :entry-id id}))))
+             :role role :text (safe-text text) :entry-id id
+             :agent-from (:from agent) :agent-kind (:kind agent)
+             :agent-message-id (:id agent) :result (:message/result message)}))))
 
 (defn- activity-children [model id]
   (let [activities (:activities model)]

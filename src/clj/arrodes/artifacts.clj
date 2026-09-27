@@ -223,9 +223,24 @@
   (let [{:keys [offset start limit]} (page-request opts)
         start (min length start)
         end (+ start (min limit (- length start)))]
-    {:offset offset :start start :end end
+    {:offset offset :start start :end end :length length
      :next-offset (when (< end length) (inc end))
      :truncated? (< end length)}))
+
+(defn- artifact-page-options [sid id opts]
+  (value/check! (not (and (contains? opts :after) (contains? opts :offset)))
+               :invalid-artifact-page "Choose either an artifact offset or an after cursor" {})
+  (if (contains? opts :after)
+    (let [cursor (:after opts)]
+      (value/check! (and (map? cursor)
+                         (= #{:session-id :artifact-id :offset} (set (keys cursor)))
+                         (= sid (:session-id cursor))
+                         (= id (:artifact-id cursor))
+                         (integer? (:offset cursor))
+                         (<= 1 (:offset cursor) Long/MAX_VALUE))
+                    :invalid-artifact-cursor "Artifact cursor must belong to this session and artifact and have a positive offset" {})
+      (assoc (dissoc opts :after) :offset (:offset cursor)))
+    opts))
 
 (defn- verified-file-read [store descriptor read-content]
   ;; ponytail: integrity is O(n) I/O per page; use trusted digest metadata only if repeated paging proves costly.
@@ -294,12 +309,15 @@
     [bounds content]))
 
 (defn read!
-  "Reads a bounded artifact page. Text offsets are character-based; binary offsets are bytes."
+  "Reads a bounded artifact page. Text offsets are character-based; binary offsets are bytes.
+  Pass the returned :cursor as :after to continue without converting offsets."
   [store sid id opts]
-  (let [descriptor (get-artifact store sid id)]
+  (let [descriptor (get-artifact store sid id)
+        after? (contains? opts :after)
+        opts (artifact-page-options sid id opts)]
     (value/check! (:available? descriptor) :artifact-unavailable
                  "Artifact content is unavailable" {:artifact-id id :session-id sid})
-    (let [[{:keys [offset next-offset truncated?]} content]
+    (let [[{:keys [offset next-offset truncated? length]} content]
           (if (:memory? store)
             (let [bytes (memory-artifact-bytes store descriptor)]
               (value/check! bytes :artifact-unavailable "Artifact content is unavailable"
@@ -318,12 +336,16 @@
             (if (= :binary (:kind descriptor))
               (binary-file-page store descriptor opts)
               (text-file-page store descriptor opts)))]
+      (when after?
+        (value/check! (<= offset length) :invalid-artifact-cursor
+                     "Artifact cursor is beyond retained content" {}))
       (cond-> {:artifact descriptor
                :content (if (= :binary (:kind descriptor))
                           (.encodeToString (Base64/getEncoder) ^bytes content)
                           content)
                :offset offset
                :next-offset next-offset
+               :cursor (when next-offset {:session-id sid :artifact-id id :offset next-offset})
                :truncated? truncated?}
         (= :binary (:kind descriptor)) (assoc :encoding :base64)))))
 

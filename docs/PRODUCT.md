@@ -9,7 +9,15 @@ be able to work conversationally and inspect execution when useful.
 
 - Session-owned function jobs outlive their launching turn and retain inspectable outcomes.
 - One live evaluator per session; native values and definitions survive normal turns.
-- Durable history, operations, queues and retained results survive process restart.
+- A root session can delegate to independently evaluated, addressable child sessions,
+  exchange durable peer messages, and inspect operation-scoped outcomes. Delegation
+  preserves the single-`repl` provider interface; it does not turn function jobs into
+  agents or share live JVM values between sessions.
+- Durable history, operations, queues and retained results survive a normal
+  process restart **when the store is current-format**. An incompatible
+  recognized Arrodes SQLite store instead triggers a destructive fresh-store
+  reset; prior session data and owned artifacts are lost, not migrated.
+  Foreign SQLite databases are rejected intact.
 - Recovery records interrupted work and never automatically repeats external effects.
 - Branching selects conversation context and does not restore filesystem state.
 - Explicit connection, provider and model settings are understandable and inspectable.
@@ -18,10 +26,11 @@ be able to work conversationally and inspect execution when useful.
 
 ## Deliberate boundaries
 
-The current [scope](../resources/arrodes/scope.edn) excludes generalized workspaces,
-subagents, planning/todo management, process daemons, distributed execution,
-OS sandboxing and JVM checkpointing. Treat changes to these as product decisions,
-not incidental additions to another feature.
+The current [scope](../resources/arrodes/scope.edn) includes session-backed agents
+but excludes generalized workspaces, planning/todo management, process daemons,
+distributed execution, OS sandboxing and JVM checkpointing. Agent sessions share
+the checkout and process permissions; explicit ownership, not isolation, coordinates
+concurrent file edits. Treat changes to these exclusions as product decisions.
 
 The supported binary targets are macOS and glibc Linux, each on arm64 and x64.
 Windows remains experimental. Avoid declaring an untested target supported.

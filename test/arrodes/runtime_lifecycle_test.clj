@@ -341,28 +341,32 @@
         (runtime/close! rt)
         (fixtures/remove-directory! directory)))))
 
-(deftest terminal-publication-observes-released-foreground-snapshot
+(deftest terminal-publication-never-observes-its-old-foreground
   (let [directory (fixtures/temp-directory)
         rt (runtime/open! {:cwd directory :home (str directory "/home")
                            :data-dir (str directory "/data")
                            :complete-fn (fn [_ _] (answer "Done"))})
         sid (:id (create-test-session! rt {:config fixtures/config}))
         observed (promise)
+        seen (atom [])
         unsubscribe
         (runtime/subscribe!
          rt
          (fn [event]
+           (when (:seq event)
+             (swap! seen conj (:seq event)))
            (when (and (= sid (:session-id event))
                       (= :operation/completed (:type event)))
-             (deliver observed (runtime/session-view rt sid)))))]
+             (deliver observed {:event event :view (runtime/session-view rt sid)}))))]
     (try
-      (runtime/run! rt sid "Settle coherently")
-      (let [view (deref observed 10000 ::timeout)]
-        (is (map? view))
-        (is (= :idle (get-in view [:state :phase])))
-        (is (nil? (get-in view [:state :operation-id])))
-        (is (nil? (get-in view [:state :operation])))
-        (is (= :idle (get-in view [:state :session :status]))))
+      (let [operation (runtime/start! rt sid "Settle coherently")]
+        (is (= :completed (:status (runtime/wait! rt (:id operation) 10000))))
+        (let [{:keys [event view]} (deref observed 10000 ::timeout)]
+          (is (= (:id operation) (:operation-id event)))
+          (is (not= (:id operation) (get-in view [:state :operation-id])))
+          (is (not= (:id operation) (get-in view [:state :operation :id])))
+          (is (= @seen (vec (sort @seen))))
+          (is (= (count @seen) (count (distinct @seen))))))
       (finally
         (unsubscribe)
         (runtime/close! rt)
@@ -421,5 +425,156 @@
           (is (= "store-in-use" (:code contender))))
         (is (= :closed (:status (runtime/close! rt)))))
       (finally
+        (runtime/close! rt)
+        (fixtures/remove-directory! directory)))))
+
+(deftest cancellation-accepted-at-settlement-wins-over-successful-provider-return
+  (let [directory (fixtures/temp-directory)
+        rt (runtime/open! {:cwd directory :home (str directory "/home")
+                           :data-dir (str directory "/data")
+                           :complete-fn (fn [_ _] (answer "Successful result"))})
+        sid (:id (create-test-session! rt {:config fixtures/config}))
+        settle-var (ns-resolve 'arrodes.runtime 'settle-operation!)
+        settle @settle-var
+        entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)]
+    (try
+      (with-redefs-fn
+        {settle-var (fn [& args]
+                      (.countDown entered)
+                      (await-uninterruptibly! release)
+                      (apply settle args))}
+        (fn []
+          (let [operation (runtime/start! rt sid "Race with settlement")]
+            (await-latch! entered)
+            (is (= :cancelling (:status (runtime/cancel-operation! rt (:id operation)))))
+            (.countDown release)
+            (is (= :cancelled (:status (runtime/wait! rt (:id operation) 10000))))
+            (is (= :cancelled (:status (runtime/operation rt (:id operation))))))))
+      (let [next-operation (runtime/start! rt sid "A later operation")]
+        (is (= :completed (:status (runtime/wait! rt (:id next-operation) 10000))))
+        (is (= :completed (:status (runtime/cancel-operation! rt (:id next-operation)))))
+        (is (= :completed (:status (runtime/operation rt (:id next-operation))))))
+      (finally
+        (.countDown release)
+        (runtime/close! rt)
+        (fixtures/remove-directory! directory)))))
+
+(deftest parent-wait-does-not-occupy-a-child-worker-queue
+  (let [directory (fixtures/temp-directory)
+        runtime* (atom nil)
+        child* (atom nil)
+        child-result (promise)
+        provider (fn [request _]
+                   (if (= @child* (get-in request [:request/cache :scope-id]))
+                     (answer "Child finished")
+                     (let [child (runtime/start! @runtime* @child* "Child work")
+                           result (runtime/wait! @runtime* (:id child) 5000)]
+                       (deliver child-result result)
+                       (answer "Parent finished"))))
+        rt (runtime/open! {:cwd directory :home (str directory "/home")
+                           :data-dir (str directory "/data")
+                           :settings {:operation-limit 2}
+                           :complete-fn provider})
+        parent (:id (create-test-session! rt {:config fixtures/config}))
+        child (:id (create-test-session! rt {:config fixtures/config}))]
+    (try
+      (reset! runtime* rt)
+      (reset! child* child)
+      (let [operation (runtime/start! rt parent "Launch and wait")]
+        (is (= :completed (:status (runtime/wait! rt (:id operation) 10000))))
+        (is (= :completed (:status (deref child-result 1000 nil)))))
+      (finally
+        (runtime/close! rt)
+        (fixtures/remove-directory! directory)))))
+
+(deftest one-owner-load-and-close-retain-activating-resources
+  (let [directory (fixtures/temp-directory)
+        rt (runtime/open! {:cwd directory :home (str directory "/home")
+                           :data-dir (str directory "/data")
+                           :settings {:close-timeout-ms 50}})
+        sid (:id (create-test-session! rt {:config fixtures/config}))
+        activate-var (ns-resolve 'arrodes.resources 'activate!)
+        activate @activate-var
+        entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        calls (atom 0)]
+    (try
+      (with-redefs-fn
+        {activate-var (fn [& args]
+                        (swap! calls inc)
+                        (.countDown entered)
+                        (await-uninterruptibly! release)
+                        (apply activate args))}
+        (fn []
+          (let [owner (future (runtime/registry rt sid))]
+            (await-latch! entered)
+            (is (= :closing (:status (runtime/close! rt))))
+            (is (= 1 @calls))
+            (is (= sid (:id (runtime/session rt sid))))
+            (.countDown release)
+            (is (map? (deref owner 10000 ::timeout)))
+            (is (= :closed (:status (runtime/close! rt)))))))
+      (finally
+        (.countDown release)
+        (runtime/close! rt)
+        (fixtures/remove-directory! directory)))))
+
+(deftest simultaneous-registry-readers-share-one-activation
+  (let [directory (fixtures/temp-directory)
+        rt (runtime/open! {:cwd directory :home (str directory "/home")
+                           :data-dir (str directory "/data")})
+        sid (:id (create-test-session! rt {:config fixtures/config}))
+        activate-var (ns-resolve 'arrodes.resources 'activate!)
+        activate @activate-var
+        entered (CountDownLatch. 1)
+        release (CountDownLatch. 1)
+        calls (atom 0)]
+    (try
+      (with-redefs-fn
+        {activate-var (fn [& args]
+                        (swap! calls inc)
+                        (.countDown entered)
+                        (await-uninterruptibly! release)
+                        (apply activate args))}
+        (fn []
+          (let [owner (future (runtime/registry rt sid))]
+            (await-latch! entered)
+            (let [follower (future (runtime/registry rt sid))]
+              (is (= ::blocked (deref follower 50 ::blocked)))
+              (.countDown release)
+              (is (identical? (deref owner 10000 ::timeout)
+                              (deref follower 10000 ::timeout)))
+              (is (= 1 @calls))))))
+      (finally
+        (.countDown release)
+        (runtime/close! rt)
+        (fixtures/remove-directory! directory)))))
+
+(deftest reserved-child-capacity-rejects-before-launch-and-releases-cleanly
+  (let [directory (fixtures/temp-directory)
+        requests (atom 0)
+        rt (runtime/open! {:cwd directory :home (str directory "/home")
+                           :data-dir (str directory "/data")
+                           :settings {:operation-limit 1}
+                           :complete-fn (fn [_ _]
+                                          (swap! requests inc)
+                                          (answer "Accepted after release"))})
+        sid (:id (create-test-session! rt {:config fixtures/config}))
+        reservation (u/id)]
+    (try
+      (runtime/reserve! rt reservation)
+      (is (= "operation-limit"
+             (try (runtime/start! rt sid "Cannot execute behind reservation")
+                  nil
+                  (catch clojure.lang.ExceptionInfo error
+                    (:error/code (ex-data error))))))
+      (is (empty? (runtime/operations rt {:session-id sid})))
+      (runtime/release! rt reservation)
+      (let [operation (runtime/start! rt sid "Can now run")]
+        (is (= :completed (:status (runtime/wait! rt (:id operation) 10000))))
+        (is (= 1 @requests)))
+      (finally
+        (runtime/release! rt reservation)
         (runtime/close! rt)
         (fixtures/remove-directory! directory)))))

@@ -5,6 +5,7 @@
             [arrodes.tui-widgets :as w]
             [clojure.string :as str]
             [arrodes.tui.commands :as commands]
+            [arrodes.tui.agents :as agents]
             [arrodes.tui.context :as c]
             [arrodes.tui.inspection :as inspection]
             [arrodes.tui.jobs :as jobs]
@@ -146,10 +147,31 @@
             (do (inspection/cancel-job! view) true)
             (= name "f1") (do ((:choose (some #(when (= "Keyboard help" (:label %)) %) (commands/commands view)))) true)
             (= name "f2") (do (screens/open-sessions! view) true)
+            (= name "f4") (do (agents/open! view) true)
             (or (= name "f3") (and ctrl (= name "p")))
             (do (screens/open-overlay! view {:kind :commands :title "Commands" :query "" :hint "Search actions or slash commands."}) true)
             overlay
             (cond
+              (and (= :agents (:kind overlay)) (= name "f5"))
+              (do (c/fire! view :agents {}) true)
+              (and (= :agents (:kind overlay)) (= name "tab"))
+              (do (.focus (if shift (:modal-input view) (:modal-list view))) true)
+              (and (= :agents (:kind overlay)) alt (= name "left"))
+              (do (agents/parent! view) true)
+              (and (= :agents (:kind overlay)) ctrl (= name "n"))
+              (do (agents/start! view) true)
+              (and (= :agents (:kind overlay)) (= name "f7"))
+              (do (agents/compose! view (agents/selected view)) true)
+              (and (= :agents (:kind overlay)) (= name "f8"))
+              (do (agents/messages! view (agents/selected view)) true)
+              (and (= :agents (:kind overlay)) ctrl (= name "o"))
+              (do (agents/outcome! view (agents/selected view)) true)
+              (and (= :agents (:kind overlay)) ctrl (= name "k"))
+              (do (agents/cancel! view (agents/selected view)) true)
+              (and (= :agents (:kind overlay)) ctrl (= name "x"))
+              (do (agents/stop! view (agents/selected view)) true)
+              (and (= :agents (:kind overlay)) ctrl (= name "r"))
+              (do (agents/resume! view (agents/selected view)) true)
               (and (= :models (:kind overlay)) (not (or shift ctrl alt))
                    (contains? #{"left" "right"} name))
               (models/model-horizontal! view (if (= name "left") -1 1))
@@ -207,6 +229,8 @@
               (and (= name "delete") (= :pending (:kind overlay)))
               (do (when-let [drop (:drop (get (screens/overlay-items view overlay) (or (:index overlay) 0)))] (drop)) true)
               :else false)
+            (and alt (= name "left"))
+            (do (agents/parent! view) true)
             (= name "f6")
             (do (c/ui! view assoc :keyboard-navigation? true)
                 (focus! view (case focus :composer :transcript

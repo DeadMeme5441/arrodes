@@ -6,7 +6,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]])
   (:import (java.nio.file Files Path)
-           (java.nio.file.attribute FileAttribute)))
+           (java.nio.file.attribute FileAttribute PosixFilePermissions)))
 
 (def config
   {:provider :openai
@@ -367,3 +367,639 @@
       (is (= 2000 (:last-message-at (listed))))
       (is (= 3000 (:updated-at (listed))))
       (is (= 2000 (:last-message-at (first (store/list-sessions database {:cwd (System/getProperty "java.io.tmpdir")}))))))))
+
+(defn- create-child [database parent name]
+  (store/create-agent!
+   database parent {:id (util/id) :operation-id (util/id) :submission-id (util/id)
+                    :name name :cwd (System/getProperty "java.io.tmpdir")
+                    :config config :task "Inspect the retained evidence"
+                    :context "Use native Clojure."}))
+
+(defn- delivery-operation-id [database sid]
+  (if-let [operation (some (fn [operation]
+                             (when (and (contains? #{:queued :running} (:status operation))
+                                        (contains? #{:run :continue} (:kind operation)))
+                               operation))
+                           (store/operations database {:session-id sid}))]
+    (do
+      (when (= :queued (:status operation))
+        (store/commit! database sid {:operation {:id (:id operation) :status :running}}))
+      (:id operation))
+    (let [id (util/id)]
+      (store/commit! database sid {:operation {:id id :kind :continue :status :running}})
+      id)))
+
+(defn- deliver! [database sid]
+  (store/deliver-agent-messages! database sid (delivery-operation-id database sid)))
+
+(deftest agent-submissions-are-atomic-and-parent-completions-are-unique
+  (with-memory-store [database]
+    (let [root (:id (new-session database))
+          opts {:id (util/id) :operation-id (util/id) :submission-id (util/id)
+                :name "Reader" :cwd (System/getProperty "java.io.tmpdir")
+                :config config :task "Investigate" :context "Return native findings"}
+          first-launch (store/create-agent! database root opts)
+          child (get-in first-launch [:handle :session-id])
+          op (get-in first-launch [:handle :operation-id])]
+      (is (= (:handle first-launch) (store/agent-submission database root (:submission-id opts))))
+      (is (:existing? (store/create-agent! database root
+                                            (assoc opts :id (util/id) :operation-id (util/id)
+                                                   :origin {:operation-id (util/id)}))))
+      (is (= ["Context:\nReturn native findings\n\nInvestigate"]
+             (mapv :message/content (store/context-messages database child))))
+      (is (= [root child] (mapv :session-id (store/agent-team database root {}))))
+      (is (= [root child] (store/agent-descendants database root)))
+      (is (= 2 (count (store/agent-team database child {:limit 2 :offset 0}))))
+      (is (= 1 (count (store/agent-team database child {:limit 1 :offset 1}))))
+      (is (pos? (store/latest-event-seq database)))
+      (is (= :queued (:status (store/operation database op))))
+      (is (= "agent-submission-conflict"
+             (:error/code (ex-data
+                           (try (store/create-agent! database root
+                                                     (assoc opts :task "Different"))
+                                (catch clojure.lang.ExceptionInfo e e))))))
+      (let [result {:message/role :assistant
+                    :message/content [{:part/type :text :text "Done"
+                                       :part/provider-data {:internal "Never show this"}}]
+                    :message/provider-data {:response/provider :codex
+                                            :response/model "test-model"
+                                            :response/usage {:input-tokens 1}
+                                            :response/internal {:tools "Never show this"}}}
+            canonical {:message/role :assistant
+                       :message/content [{:part/type :text :text "Done"}]
+                       :message/provider-data {:response/provider :codex
+                                               :response/model "test-model"
+                                               :response/usage {:input-tokens 1}}}
+            _ (store/commit! database child {:operation {:id op :status :completed :result result}})
+            _ (store/commit! database child {:operation {:id op :status :completed :result result}})
+            messages (store/agent-messages database root {})]
+        (is (= 1 (count messages)))
+        (is (= :completion (:kind (first messages))))
+        (is (= op (:operation-id (store/agent-result database root child op))))
+        (is (= result (:result (store/agent-result database root child op))))
+        (is (= 1 (:pending-count (first (store/agent-team database root {})))))
+        (is (true? (store/agent-wake? database root)))
+        (let [delivery (deliver! database root)
+              descriptor (get-in delivery [:entries 0 :data :message/result])]
+          (is (= [(:id (first messages))] (:delivered delivery)))
+          (is (= canonical (get-in descriptor [:value :result])))
+          (is (str/includes? (get-in delivery [:entries 0 :data :message/content]) "Done"))
+          (is (not (str/includes? (get-in delivery [:entries 0 :data :message/content])
+                                  "Never show this")))
+          (is (= (:id descriptor)
+                 (get-in (first (store/context-messages database root)) [:message/result :id])))
+          (is (empty? (:entries (deliver! database root))))
+          (store/delete-session! database child)
+          (is (= canonical
+                 (get-in (artifacts/result database root (:id descriptor)) [:value :result])))
+          (let [imported (store/import-session! database (store/export-session database root)
+                                                {:name "Independent receipt"})]
+            (is (= canonical
+                   (get-in (artifacts/result database (:id imported) 1)
+                           [:value :result])))))))))
+
+(deftest agent-human-messages-preserve-attribution-and-pause-policy
+  (with-memory-store [database]
+    (let [root (:id (new-session database))
+          child (:session-id (:handle (create-child database root "Recipient")))
+          receipt (:receipt (store/send-agent-message! database root child "Please continue"
+                                                       {:kind :human :submission-id (util/id)
+                                                        :wake? true}))]
+      (store/set-agent-paused! database child true)
+      (is (false? (store/agent-wake? database child)))
+      (is (true? (store/pending-agent-messages? database child)))
+      (store/set-agent-paused! database child false)
+      (is (true? (store/agent-wake? database child)))
+      (let [entry (first (:entries (deliver! database child)))]
+        (is (= :human (get-in entry [:data :message/agent :kind])))
+        (is (= (:id receipt) (get-in entry [:data :message/agent :id])))
+        (is (= :delivered (get-in (first (store/agent-messages database root {}))
+                                  [:deliveries 0 :status])))))))
+
+(deftest stopped-agent-keeps-current-context-deliveries-pending
+  (with-memory-store [database]
+    (let [root (:id (new-session database))
+          child (:session-id (:handle (create-child database root "Stopped recipient")))
+          message-id (:id (:receipt (store/send-agent-message! database root child "Retain this"
+                                                              {:submission-id (util/id)})))]
+      (store/set-agent-stopped! database root true)
+      (is (empty? (:entries (deliver! database child))))
+      (is (= :pending (get-in (first (store/agent-messages database child {}))
+                              [:deliveries 0 :status])))
+      (store/set-agent-stopped! database root false)
+      (let [first-delivery (deliver! database child)]
+        (is (= [message-id] (:delivered first-delivery)))
+        (is (= "Retain this" (get-in first-delivery [:entries 0 :data :message/content])))
+        (is (empty? (:entries (deliver! database child))))))))
+
+(deftest automatic-wake-roots-scan-is-cross-team-and-nonconsuming
+  (with-memory-store [database]
+    (let [root-a (:id (new-session database))
+          root-b (:id (new-session database))
+          child-a (:session-id (:handle (create-child database root-a "A worker")))]
+      (store/send-agent-message! database root-a child-a "Wake child"
+                                 {:submission-id (util/id)})
+      (store/send-agent-message! database root-b root-b "Wake root"
+                                 {:submission-id (util/id) :wake? true})
+      (is (= (vec (sort [root-a root-b])) (store/agent-wake-roots database)))
+      (is (= 1 (count (store/agent-messages database child-a {}))))
+      (store/set-agent-paused! database child-a true)
+      (is (= [root-b] (store/agent-wake-roots database)))
+      (store/set-agent-paused! database child-a false)
+      (store/set-agent-stopped! database root-b true)
+      (is (= [root-a] (store/agent-wake-roots database)))
+      (deliver! database child-a)
+      (is (empty? (store/agent-wake-roots database)))
+      (is (= :pending (get-in (first (store/agent-messages database root-b {}))
+                              [:deliveries 0 :status]))))))
+
+(deftest agent-routing-branch-stop-and-native-transfer
+  (with-memory-store [database]
+    (let [root (:id (new-session database))
+          child (:session-id (:handle (create-child database root "Worker")))
+          native {:answer 3/7 :labels #{:a :b} :nested [:x {:flag true}]}
+          submission (util/id)
+          sent (store/send-agent-message! database root child native {:submission-id submission})
+          duplicate (store/send-agent-message! database root child native {:submission-id submission})
+          receipt (:receipt sent)]
+      (is (= receipt (:receipt duplicate)))
+      (is (= receipt (store/agent-submission database root submission)))
+      (is (= [child] (:recipients receipt)))
+      (is (true? (store/agent-wake? database child)))
+      (let [delivery (deliver! database child)
+            descriptor (get-in delivery [:entries 0 :data :message/result])
+            packet (store/export-session database child)
+            forked (store/clone! database child {:name "History only"})
+            imported (store/import-session! database packet {:name "Imported history"})]
+        (is (= native (:value (artifacts/result database child (:id descriptor)))))
+        (is (= native (get-in (artifacts/result database (:id forked) 1) [:value])))
+        (is (= native (get-in (artifacts/result database (:id imported) 1) [:value])))
+        (is (= (:id forked) (:root-id (store/agent-state database (:id forked)))))
+        (is (nil? (:parent-session-id (store/agent-state database (:id imported)))))
+        (is (not (contains? (:metadata imported) :agent/origin))))
+      (is (= "agent-descendants-exist"
+             (:error/code (ex-data
+                           (try (store/delete-session! database root)
+                                (catch clojure.lang.ExceptionInfo e e))))))
+      (store/set-agent-stopped! database root true)
+      (is (false? (store/agent-wake? database child)))
+      (is (= "agent-stopped"
+             (:error/code (ex-data
+                           (try (store/send-agent-message! database root child "blocked"
+                                                            {:submission-id (util/id)})
+                                (catch clojure.lang.ExceptionInfo e e))))))
+      (store/set-agent-stopped! database root false)
+      (let [head (:head (store/session database root))]
+        (store/branch! database root head {})
+        (is (= "agent-stale-context"
+               (:error/code (ex-data
+                             (try (store/send-agent-message! database child :parent "stale"
+                                                              {:submission-id (util/id)})
+                                  (catch clojure.lang.ExceptionInfo e e))))))))))
+
+(deftest agent-recovery-interrupts-without-launching-or-duplicating
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")]
+    (try
+      (let [database (store/open! {:path path})
+            root (:id (new-session database))
+            child (:session-id (:handle (create-child database root "Interrupted")))
+            oid (:id (first (store/operations database {:session-id child})))]
+        (store/close! database)
+        (let [reopened (store/open! {:path path})]
+          (try
+            (store/recover! reopened)
+            (is (= :interrupted (:status (store/operation reopened oid))))
+            (is (:paused? (store/agent-state reopened child)))
+            (is (false? (store/agent-wake? reopened root)))
+            (is (= 1 (count (store/agent-messages reopened root {}))))
+            (store/recover! reopened)
+            (is (= 1 (count (store/agent-messages reopened root {}))))
+            (finally (store/close! reopened)))))
+      (finally (remove-directory! directory)))))
+
+(deftest explicit-retained-value-crosses-ownership-without-sharing-live-values
+  (with-memory-store [database]
+    (let [root (:id (new-session database))
+          child (:session-id (:handle (create-child database root "Values")))
+          native {:ratio 8/13 :symbols '(a b) :nil nil}
+          retained (artifacts/put-result! database root
+                                          {:kind :inline :value native
+                                           :content "native" :details {}})
+          reference {:result/ref {:session-id root :id (:id retained)}}
+          receipt (:receipt (store/send-agent-message!
+                             database root child reference {:submission-id (util/id)}))
+          result (get-in (first (:entries (deliver! database child)))
+                         [:data :message/result])]
+      (is (= {:value native :source-result {:session-id root :id (:id retained)}}
+             (:value (artifacts/result database child (:id result)))))
+      (is (= :peer (:kind (first (store/agent-messages database child {})))))
+      (is (= (:id receipt)
+             (get-in (last (store/context-messages database child)) [:message/agent :id])))
+      (let [live (artifacts/put-result! database root {:kind :live :content "atom"
+                                                        :details {}})
+            error (try
+                    (store/send-agent-message! database root child
+                                               {:result/ref {:session-id root :id (:id live)}}
+                                               {:submission-id (util/id)})
+                    nil
+                    (catch clojure.lang.ExceptionInfo e e))]
+        (is (= "agent-result-unavailable" (:error/code (ex-data error)))))
+      (is (= 1 (count (store/agent-messages database child {})))))))
+
+(deftest branch-supersedes-pending-deliveries-without-consuming-user-queue
+  (with-memory-store [database]
+    (let [root (:id (new-session database))
+          child (:session-id (:handle (create-child database root "Branch")))
+          id (:id (:receipt (store/send-agent-message! database child root "old route"
+                                                       {:submission-id (util/id)})))]
+      (store/commit! database root
+                     {:queue-enqueue [{:id (util/id) :kind :follow-up
+                                       :content "human followup" :options {}}]})
+      (store/branch! database root nil {})
+      (is (= :superseded (get-in (first (store/agent-messages database root {}))
+                                [:deliveries 0 :status])))
+      (is (= id (:id (first (store/agent-messages database root {})))))
+      (is (empty? (:entries (deliver! database root))))
+      (is (= ["human followup"] (mapv :content (store/pending database root)))))))
+
+(deftest agent-receipts-bind-incorporating-operation-and-enforce-visibility
+  (with-memory-store [database]
+    (let [root (:id (new-session database))
+          child-a (:session-id (:handle (create-child database root "Reader A")))
+          child-b (:session-id (:handle (create-child database root "Reader B")))
+          foreign (:id (new-session database))
+          first-id (:id (:receipt (store/send-agent-message! database root child-a "First"
+                                                             {:submission-id (util/id)})))
+          second-id (:id (:receipt (store/send-agent-message! database root child-a "Second"
+                                                              {:submission-id (util/id)})))]
+      (is (= :pending (:status (store/agent-delivery database root first-id {}))))
+      (is (nil? (get-in (store/agent-delivery database root first-id {})
+                       [:deliveries 0 :operation-id])))
+      (let [queued-id (:id (first (store/operations database {:session-id child-a})))]
+        (is (= "invalid-agent-operation"
+               (:error/code
+                (ex-data (try (store/deliver-agent-messages! database child-a queued-id)
+                              (catch clojure.lang.ExceptionInfo error error))))))
+        (is (= :pending (:status (store/agent-delivery database root first-id {})))))
+      (is (= "operation-forbidden"
+             (:error/code
+              (ex-data (try (store/deliver-agent-messages!
+                             database child-a
+                             (:id (first (store/operations database {:session-id child-b}))))
+                            (catch clojure.lang.ExceptionInfo error error))))))
+      (let [op (delivery-operation-id database child-a)
+            delivery (store/deliver-agent-messages! database child-a op)
+            first-receipt (store/agent-delivery database root first-id {})
+            second-receipt (store/agent-delivery database child-a second-id {})]
+        (is (= 2 (count (:entries delivery))))
+        (is (= op (get-in first-receipt [:deliveries 0 :operation-id])
+               (get-in second-receipt [:deliveries 0 :operation-id])))
+        (is (= (mapv :id (:entries delivery))
+               [(get-in first-receipt [:deliveries 0 :entry-id])
+                (get-in second-receipt [:deliveries 0 :entry-id])]))
+        (is (not (contains? first-receipt :content)))
+        (is (= "First" (:content (store/agent-delivery database root first-id
+                                                      {:detailed? true}))))
+        (store/commit! database child-a {:operation {:id op :status :cancelled}})
+        (is (= :cancelled (get-in (store/agent-delivery database root first-id {})
+                                 [:deliveries 0 :operation-status])))
+        (doseq [viewer [child-b foreign]]
+          (is (= "agent-message-not-found"
+                 (:error/code
+                  (ex-data (try (store/agent-delivery database viewer first-id {})
+                                (catch clojure.lang.ExceptionInfo error error))))))))
+      (let [broadcast (:id (:receipt
+                            (store/send-agent-message! database child-a :all "Broadcast"
+                                                       {:submission-id (util/id)})))
+            pending (store/agent-delivery database child-a broadcast {:limit 1})
+            root-op (delivery-operation-id database root)
+            child-op (delivery-operation-id database child-b)]
+        (is (= 2 (:total-recipients pending)))
+        (is (= 1 (:next-offset pending)))
+        (is (= 1 (count (:deliveries (store/agent-delivery database child-a broadcast
+                                                          {:offset 1 :limit 1})))))
+        (is (= 2 (count (:deliveries
+                         (store/agent-delivery database child-a broadcast
+                                               {:internal? true :limit 500})))))
+        (store/deliver-agent-messages! database root root-op)
+        (is (= :partial (:status (store/agent-delivery database child-a broadcast {}))))
+        (store/deliver-agent-messages! database child-b child-op)
+        (let [receipt (store/agent-delivery database child-a broadcast {})
+              links (into {} (map (juxt :session-id :operation-id) (:deliveries receipt)))]
+          (is (= :delivered (:status receipt)))
+          (is (= {root root-op child-b child-op} links))
+          (let [page (store/agent-summaries database root {:limit 1})]
+            (is (= 3 (:total page)))
+            (is (= 1 (:next-offset page)))
+            (is (= 1 (count (:agents (store/agent-summaries database root
+                                                          {:offset 1 :limit 1}))))))
+          (is (= 1 (:total (store/agent-summaries database root {:target-id child-a}))))
+          (is (= child-a (get-in (store/agent-summaries database root {:target-id child-a})
+                                [:agents 0 :session-id])))
+          (is (= child-a (store/agent-target-id database root "Reader A")))
+          (is (= root (store/agent-target-id database child-a "Main")))
+          (is (= root (store/agent-target-id database root nil)))
+          (is (= "agent-target-forbidden"
+                 (:error/code (ex-data
+                               (try (store/agent-summaries database root
+                                                           {:target-id foreign})
+                                    (catch clojure.lang.ExceptionInfo error error))))))
+          (is (not-any? #(contains? (first (:agents (store/agent-summaries database root {}))) %)
+                        [:result :error :history :session :operation]))))
+      (let [stale (:id (:receipt (store/send-agent-message! database child-a root "Stale"
+                                                            {:submission-id (util/id)})))]
+        (store/branch! database root nil {})
+        (is (= :superseded (:status (store/agent-delivery database child-a stale {}))))
+        (is (nil? (get-in (store/agent-delivery database child-a stale {})
+                         [:deliveries 0 :operation-id])))))))
+
+(deftest delivery-links-persist-through-restart-and-unfinished-operation-recovery
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")]
+    (try
+      (let [database (store/open! {:path path})]
+        (try
+          (let [root (:id (new-session database))
+                child (:session-id (:handle (create-child database root "Persisted receipt")))
+                id (:id (:receipt (store/send-agent-message! database root child "Keep receipt"
+                                                             {:submission-id (util/id)})))
+                operation-id (delivery-operation-id database child)
+                entry-id (:id (first (:entries (store/deliver-agent-messages!
+                                                database child operation-id))))]
+            (store/close! database)
+            (let [reopened (store/open! {:path path})]
+              (try
+                (let [receipt (store/agent-delivery reopened root id {})]
+                  (is (= :delivered (:status receipt)))
+                  (is (= operation-id (get-in receipt [:deliveries 0 :operation-id])))
+                  (is (= entry-id (get-in receipt [:deliveries 0 :entry-id]))))
+                (store/recover! reopened)
+                (is (= :interrupted
+                       (get-in (store/agent-delivery reopened root id {})
+                               [:deliveries 0 :operation-status])))
+                (finally (store/close! reopened)))))
+          (finally (store/close! database))))
+      (finally (remove-directory! directory)))))
+
+(deftest schema-five-recreates-recognized-schema-four-store-without-touching-neighbor
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")
+        neighbor (util/path (str directory "/keep.txt"))]
+    (try
+      (let [database (store/open! {:path path})]
+        (try
+          (new-session database)
+          (finally (store/close! database))))
+      (Files/writeString neighbor "unrelated" (make-array java.nio.file.OpenOption 0))
+      (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
+                  statement (.createStatement connection)]
+        (.execute statement "PRAGMA user_version=4"))
+      (let [reopened (store/open! {:path path})]
+        (try
+          (is (empty? (store/list-sessions reopened {})))
+          (is (= "unrelated" (Files/readString neighbor)))
+          (store/store-read reopened
+            (fn [connection]
+              (with-open [statement (.createStatement connection)
+                          result (.executeQuery statement "PRAGMA user_version")]
+                (is (.next result))
+                (is (= 5 (.getInt result 1))))))
+          (finally (store/close! reopened))))
+      (finally (remove-directory! directory)))))
+
+(deftest malformed-current-agent-record-resets-without-touching-neighbors
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")
+        neighbor (util/path (str directory "/keep.edn"))]
+    (try
+      (let [database (store/open! {:path path})
+            root (:id (new-session database))
+            _ (create-child database root "Corrupt record")]
+        (store/close! database))
+      (Files/writeString neighbor "{:settings :preserved}"
+                         (make-array java.nio.file.OpenOption 0))
+      (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
+                  statement (.createStatement connection)]
+        (.executeUpdate statement "UPDATE agent_routes SET depth=-1 WHERE parent_session_id IS NOT NULL"))
+      (let [reopened (store/open! {:path path})]
+        (try
+          (is (empty? (store/list-sessions reopened {})))
+          (is (= "{:settings :preserved}" (Files/readString neighbor)))
+          (finally (store/close! reopened))))
+      (finally (remove-directory! directory)))))
+
+(deftest fresh-root-counts-toward-agent-cap-and-reserves-main-name
+  (with-memory-store [database]
+    (let [root (:id (new-session database))
+          opts {:id (util/id) :operation-id (util/id) :submission-id (util/id)
+                :name "Reader" :cwd (System/getProperty "java.io.tmpdir")
+                :config config :task "Inspect evidence"}]
+      (is (= "agent-limit"
+             (:error/code
+              (ex-data (try (store/create-agent! database root (assoc opts :limit 1))
+                            (catch clojure.lang.ExceptionInfo error error))))))
+      (is (= "agent-name-exists"
+             (:error/code
+              (ex-data (try (store/create-agent! database root
+                                                 (assoc opts :name "Main" :limit 2))
+                            (catch clojure.lang.ExceptionInfo error error))))))
+      (is (= [root] (mapv :session-id (store/agent-team database root {}))))
+      (is (empty? (store/operations database {:session-id root}))))))
+
+(deftest incompatible-store-second-owner-cannot-trigger-reset
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")
+        first-store (store/open! {:path path})]
+    (try
+      (let [sid (:id (new-session first-store))]
+        (store/store-read first-store
+          (fn [connection]
+            (with-open [statement (.createStatement connection)]
+              (.execute statement "PRAGMA user_version=3"))))
+        (let [error (try (store/open! {:path path}) nil
+                         (catch clojure.lang.ExceptionInfo failure failure))]
+          (is (= "store-in-use" (:error/code (ex-data error))))
+          (is (= sid (:id (store/session first-store sid)))))
+        (store/close! first-store)
+        (let [replacement (store/open! {:path path})]
+          (try
+            (is (empty? (store/list-sessions replacement {})))
+            (finally (store/close! replacement)))))
+      (finally
+        (store/close! first-store)
+        (remove-directory! directory)))))
+
+(deftest unsafe-artifact-symlink-prevents-destructive-reset
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")
+        outside (util/path (str directory "/unrelated"))
+        linked (util/path (str directory "/linked-artifacts"))]
+    (try
+      (let [database (store/open! {:path path})]
+        (new-session database)
+        (store/close! database))
+      (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
+                  statement (.createStatement connection)]
+        (.execute statement "PRAGMA user_version=3"))
+      (Files/createDirectory outside (make-array FileAttribute 0))
+      (Files/writeString (.resolve outside "untouched") "Keep this"
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/createSymbolicLink linked outside (make-array FileAttribute 0))
+      (let [before (Files/readAllBytes (util/path path))
+            error (try (store/open! {:path path :artifact-dir (str linked)}) nil
+                       (catch clojure.lang.ExceptionInfo failure failure))]
+        (is (= "insecure-database" (:error/code (ex-data error))))
+        (is (java.util.Arrays/equals before (Files/readAllBytes (util/path path))))
+        (is (= "Keep this" (Files/readString (.resolve outside "untouched")))))
+      (finally (remove-directory! directory)))))
+
+(deftest unrelated-sqlite-errors-do-not-delete-database
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")
+        bytes (.getBytes "not an SQLite database" java.nio.charset.StandardCharsets/UTF_8)]
+    (try
+      (Files/write (util/path path) bytes (make-array java.nio.file.OpenOption 0))
+      (is (thrown? Throwable (store/open! {:path path})))
+      (is (java.util.Arrays/equals bytes (Files/readAllBytes (util/path path))))
+      (finally (remove-directory! directory)))))
+
+(deftest foreign-sqlite-is-not-a-resettable-arrodes-store
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")]
+    (try
+      (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
+                  statement (.createStatement connection)]
+        (.execute statement "CREATE TABLE foreign_notes (content TEXT NOT NULL)")
+        (.execute statement "INSERT INTO foreign_notes(content) VALUES('retain')"))
+      (Files/setPosixFilePermissions (util/path path)
+                                     (PosixFilePermissions/fromString "rw-r--r--"))
+      (let [before (Files/readAllBytes (util/path path))
+            error (try (store/open! {:path path}) nil
+                       (catch clojure.lang.ExceptionInfo failure failure))]
+        (is (= "unrecognized-store" (:error/code (ex-data error))))
+        (is (java.util.Arrays/equals before (Files/readAllBytes (util/path path))))
+        (is (= "rw-r--r--"
+               (PosixFilePermissions/toString
+                (Files/getPosixFilePermissions (util/path path)
+                                               (make-array java.nio.file.LinkOption 0)))))
+        (is (false? (Files/exists (util/path (str path ".artifacts"))
+                                  (make-array java.nio.file.LinkOption 0)))))
+      (finally (remove-directory! directory)))))
+
+(deftest shared-artifact-root-cannot-delete-another-stores-content
+  (let [directory (temp-directory)
+        first-path (str directory "/first.sqlite")
+        second-path (str directory "/second.sqlite")
+        shared (str directory "/shared-artifacts")
+        first (store/open! {:path first-path :artifact-dir shared})]
+    (try
+      (let [sid (:id (new-session first))
+            descriptor (artifacts/put! first sid "Owned by first" {})
+            second (store/open! {:path second-path})]
+        (try
+          (new-session second)
+          (finally (store/close! second)))
+        (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" second-path))
+                    statement (.createStatement connection)]
+          (.execute statement "PRAGMA user_version=3"))
+        (let [error (try (store/open! {:path second-path :artifact-dir shared}) nil
+                         (catch clojure.lang.ExceptionInfo failure failure))]
+          (is (= "artifact-store-in-use" (:error/code (ex-data error))))
+          (is (= "Owned by first" (:content (artifacts/read! first sid (:id descriptor) {})))))
+        (store/close! first)
+        (let [error (try (store/open! {:path second-path :artifact-dir shared}) nil
+                         (catch clojure.lang.ExceptionInfo failure failure))]
+          (is (= "artifact-owner-conflict" (:error/code (ex-data error)))))
+        (let [reopened (store/open! {:path first-path :artifact-dir shared})]
+          (try
+            (is (= "Owned by first"
+                   (:content (artifacts/read! reopened sid (:id descriptor) {}))))
+            (finally (store/close! reopened)))))
+      (finally
+        (store/close! first)
+        (remove-directory! directory)))))
+
+(deftest hardlinked-database-alias-cannot-bypass-owner-lock
+  (let [directory (temp-directory)
+        path (util/path (str directory "/sessions.sqlite"))
+        alias (util/path (str directory "/alias.sqlite"))
+        original (store/open! {:path (str path)})]
+    (try
+      (let [sid (:id (new-session original))]
+        (Files/createLink alias path)
+        (let [error (try (store/open! {:path (str alias)}) nil
+                         (catch clojure.lang.ExceptionInfo failure failure))]
+          (is (= "insecure-database" (:error/code (ex-data error))))
+          (is (= sid (:id (store/session original sid)))))
+        (Files/delete alias))
+      (finally
+        (Files/deleteIfExists alias)
+        (store/close! original)
+        (remove-directory! directory)))))
+
+(deftest incomplete-reset-marker-retries-artifacts-before-fresh-schema
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")
+        database (store/open! {:path path})
+        sid (:id (new-session database))
+        artifact (artifacts/put! database sid "Old retained artifact" {})
+        content (util/path (str path ".artifacts/"
+                                (subs (:sha256 artifact) 0 2) "/" (:sha256 artifact)))]
+    (store/close! database)
+    (try
+      (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
+                  statement (.createStatement connection)]
+        (.execute statement "PRAGMA user_version=3"))
+      (let [target-var (get (ns-interns 'arrodes.store) 'reset-file!)
+            original @target-var
+            error (try
+                    (when-let [unexpected (with-redefs-fn
+                                            {target-var (fn [target]
+                                                          (if (= (:sha256 artifact)
+                                                                 (str (.getFileName (util/path target))))
+                                                            (throw (ex-info "Simulated artifact unlink failure" {}))
+                                                            (original target)))}
+                                            #(store/open! {:path path}))]
+                      (store/close! unexpected))
+                    nil
+                    (catch clojure.lang.ExceptionInfo failure failure))]
+        (is (= "Simulated artifact unlink failure" (ex-message error)))
+        (is (Files/exists (util/path path) (make-array java.nio.file.LinkOption 0)))
+        (is (Files/exists content (make-array java.nio.file.LinkOption 0)))
+        (is (Files/exists (util/path (str path ".reset"))
+                          (make-array java.nio.file.LinkOption 0))))
+      ;; Model a process crash immediately after the old database is unlinked.
+      (Files/delete (util/path path))
+      (let [fresh (store/open! {:path path})]
+        (try
+          (is (empty? (store/list-sessions fresh {})))
+          (is (false? (Files/exists content (make-array java.nio.file.LinkOption 0))))
+          (is (false? (Files/exists (util/path (str path ".reset"))
+                                    (make-array java.nio.file.LinkOption 0))))
+          (finally (store/close! fresh))))
+      (finally (remove-directory! directory)))))
+
+(deftest unmarked-prior-arrodes-signature-is-recognized-for-reset
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")
+        old (store/open! {:path path})]
+    (try
+      (new-session old)
+      (store/close! old)
+      (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
+                  statement (.createStatement connection)]
+        (doseq [sql ["DROP TABLE agent_deliveries"
+                     "DROP TABLE agent_messages"
+                     "DROP TABLE agent_submissions"
+                     "DROP TABLE agent_routes"
+                     "PRAGMA application_id=0"
+                     "PRAGMA user_version=3"]]
+          (.execute statement sql)))
+      (let [current (store/open! {:path path})]
+        (try
+          (is (empty? (store/list-sessions current {})))
+          (finally (store/close! current))))
+      (finally
+        (store/close! old)
+        (remove-directory! directory)))))

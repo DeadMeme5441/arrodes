@@ -69,8 +69,9 @@
       (reset! (:row record) row)
       (let [a (present/activity row)
             text (or (present/inline-content row expanded) "")
-            user? (= :user (:role row))
-            assistant? (= :assistant (:role row))
+            agent? (boolean (:agent-kind row))
+            user? (and (not agent?) (= :user (:role row)))
+            assistant? (and (not agent?) (= :assistant (:role row)))
             activity? (not (:message? record))
             turn-start? (:turn-start? row)
             execution (when a (present/execution (:view s) a))
@@ -89,18 +90,18 @@
         (set! (.-paddingBottom (:root record)) 0)
         (set! (.-marginLeft (:root record)) 0)
         (set! (.-marginLeft (:artifact record)) (if activity? 2 0))
-        (set! (.-marginBottom (:header record)) (if (or user? assistant?) 1 0))
+        (set! (.-marginBottom (:header record)) (if (or user? assistant? agent?) 1 0))
         (set! (.-visible (:header record)) (or activity? turn-start? selected (:streaming? row)))
         (set! (.-visible (:turn-heading record)) (and turn-start? (= :assistant (:turn-role row)) (not assistant?)))
         (set! (.-visible (:inspect record)) selected)
         (set! (.-visible (:label record)) (or activity? turn-start? selected))
-        (set! (.-visible (:role-mark record)) (and turn-start? (or user? assistant?)))
-        (w/content! (:role-mark record) (if user? "◇" "✦"))
-        (w/paint! (:role-mark record) :fg (if user? :user/heading :assistant/heading))
+        (set! (.-visible (:role-mark record)) (and turn-start? (or user? assistant? agent?)))
+        (w/content! (:role-mark record) (cond agent? "◎" user? "◇" :else "✦"))
+        (w/paint! (:role-mark record) :fg (cond agent? :ui/accent user? :user/heading :else :assistant/heading))
         (set! (.-visible (:heading-rule record)) (boolean turn-start?))
-        (w/paint! (:heading-rule record) :borderColor (if user? :user/heading :assistant/heading))
+        (w/paint! (:heading-rule record) :borderColor (cond agent? :ui/accent user? :user/heading :else :assistant/heading))
         (set! (.-border (:heading-rule record)) #js ["bottom"])
-        (set! (.-visible (:heading-space record)) (or user? assistant?))
+        (set! (.-visible (:heading-space record)) (or user? assistant? agent?))
         (set! (.-visible (:status record)) (or activity? (:streaming? row)))
         (set! (.-flexGrow (:label record)) (if (or user? assistant?) 0 1))
         (set! (.-width (:label record)) (if (or user? assistant?) 9 "auto"))
@@ -108,14 +109,17 @@
         (set! (.-visible (:output-label record))
               (boolean (and activity? (not= :reasoning (:kind row)) (seq text))))
         (when source (w/code-content! (:source record) (present/lines-preview source 20)))
-        (w/content! (:label record) (cond user? "You" assistant? "Arrodes" :else (present/row-title row)))
-        (w/paint! (:label record) :fg (cond user? :user/heading
+        (w/content! (:label record) (cond agent? (present/row-title row)
+                                          user? "You" assistant? "Arrodes"
+                                          :else (present/row-title row)))
+        (w/paint! (:label record) :fg (cond agent? :ui/accent
+                                               user? :user/heading
                                                assistant? :assistant/heading
                                                (= :running (:status a)) :ui/accent
                                                (present/failed? a) :status/error
                                                (contains? #{:reasoning :read-group} (:kind row)) :text/secondary
                                                :else :execution/heading))
-        (w/style! (:label record) (cond user? :user/heading assistant? :assistant/heading :else :execution/heading))
+        (w/style! (:label record) (cond agent? :execution/heading user? :user/heading assistant? :assistant/heading :else :execution/heading))
         (w/paint! (:toggle record) :fg :text/secondary)
         (w/content! (:toggle record) (if expanded "⌄" "›"))
         (w/content! (:status record)

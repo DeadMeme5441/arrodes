@@ -51,6 +51,13 @@
   (let [s (c/state view) renderer (:renderer view)
         width (.-terminalWidth renderer) height (.-terminalHeight renderer)
         session (get-in s [:view :session]) config (:config session)
+        sid (:id session)
+        roster (get-in s [:agents :agents])
+        member (some #(when (= sid (:session-id %)) %) roster)
+        parent (some #(when (= (:parent-session-id member) (:session-id %)) %) roster)
+        children (remove #(= (:root-id %) (:session-id %)) roster)
+        active-agents (count (filter #(contains? #{:queued :running :cancelling}
+                                                 (get-in % [:operation :status])) children))
         selected-model (some #(when (and (= (:id %) (:model config))
                                          (= (catalog/provider-id %) (some-> (:provider config) keyword))) %) (:models s))
         usage (run/latest-usage (vec (get-in s [:view :entries])))
@@ -86,7 +93,15 @@
                       notice)]
     (doseq [node [(:composer-box view) (:footer view) (:metadata view)]]
       (set! (.-visible node) true))
-    (w/content! (:session-title view) (or (:name session) "Untitled session"))
+    (w/content! (:session-title view)
+                (str (when parent (str (or (:name parent) "Parent") " › "))
+                     (or (:name session) "Untitled session")))
+    (set! (.-visible (:parent-agent view)) (boolean parent))
+    (w/content! (:footer-agents view)
+                (if (< width 65)
+                  (str "◎ " active-agents "/" (count children))
+                  (str "Agents " active-agents " active / " (count children))))
+    (set! (.-width (:footer-agents view)) (if (< width 65) 8 22))
     (expire-notice! view notice)
     (w/content! (:footer-status view)
                 (str (or (:model config) "Choose a model") " · "

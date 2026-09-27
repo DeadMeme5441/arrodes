@@ -1,6 +1,6 @@
 (ns arrodes.repl-ergonomics-test
   (:require [arrodes.artifacts :as artifacts]
-            [arrodes.provider-repl :as wire]
+            [arrodes.help :as help]
             [arrodes.runtime :as runtime]
             [arrodes.runtime-test :as fixtures]
             [clojure.string :as str]
@@ -20,9 +20,12 @@
                             '{:texts (mapv #(read {:path (:path %)}) (:entries files))
                               :hits hits :files files :listing (ls {:path "src" :limit 1})
                               :page (read {:path "src/one.clj" :offset 2 :limit 1 :detailed true})
-                              :catalog (registered-tools) :brief (registered-tools {:brief? true})
-                              :help (registered-tools "grep")})
-            {:keys [texts hits files listing page catalog brief help]} (:value result)
+                              :overview (help) :page-of-help (help {:group "coding" :query "grep"})
+                              :help (help "grep") :full-help (help 'grep {:detailed? true})
+                              :agent-help (help 'agents/start!) :job-help (help "jobs/start!")
+                              :workspace-help (help 'workspace)})
+            {:keys [texts hits files listing page overview page-of-help help full-help
+                    agent-help job-help workspace-help]} (:value result)
             match (first (:matches hits))]
         (is (false? (:error? result)))
         (is (= ["before\nneedle *e\nafter" "second"] texts))
@@ -36,10 +39,100 @@
         (is (= 2 (:total-count listing)))
         (is (= {:text "needle *e" :offset 2 :lines 1 :next-offset 3 :eof? false}
                (dissoc page :path)))
-        (is (every? #(string? (get-in % [:returns :description])) catalog))
-        (is (every? #(not (contains? % :parameters)) brief))
-        (is (seq (:examples help))))
+        (is (< (count (pr-str overview)) 1600))
+        (is (pos? (:count (first (:groups overview)))))
+        (is (= ["grep"] (mapv :name (:entries page-of-help))))
+        (is (<= (count (pr-str page-of-help)) 6000))
+        (is (= ["[arguments]"] (:arities help)))
+        (is (seq (:examples help)))
+        (is (contains? full-help :parameters))
+        (is (= "agents/start!" (:name agent-help)))
+        (is (some #(= "[opts]" %) (:arities agent-help)))
+        (is (some #(= "[opts f]" %) (:arities job-help)))
+        (is (= "workspace" (:name workspace-help)))
+        (is (<= (count (pr-str agent-help)) 6000))
+        (is (nil? (:value (evaluate rt sid '(resolve 'registered-tools))))))
       (is (:error? (evaluate rt sid '(find {:pattern "*" :format "legacy"})))))))
+
+(deftest help-pages-live-selected-tools-and-bounds-extension-descriptors
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))]
+      (runtime/configure! rt sid {:config {:tools ["grep"]}})
+      (let [overview (:value (evaluate rt sid '(help)))
+            coding (:value (evaluate rt sid '(help {:group "coding"})))
+            hidden (evaluate rt sid '(help "read"))]
+        (is (= 1 (:count (some #(when (= "coding" (:group %)) %) (:groups overview)))))
+        (is (= ["grep"] (mapv :name (:entries coding))))
+        (is (:error? hidden)))
+      (evaluate rt sid '(defn echo [{:keys [value]}] value)
+                '(register-tool! #'echo {:name "echo" :description "Return the supplied value"
+                                         :parameters {:type "object" :properties {:value {:type "integer"}}
+                                                      :required ["value"]}
+                                         :returns {:description "The supplied integer"}}))
+      (is (:error? (evaluate rt sid '(help "echo"))))
+      (runtime/configure! rt sid {:config {:tools ["grep" "echo"]}})
+      (is (= "echo" (:name (:value (evaluate rt sid '(help "echo"))))))
+      (is (= {:type "integer"} (get-in (:value (evaluate rt sid '(help "echo" {:detailed? true})))
+                                       [:parameters :properties :value])))
+      (is (= "jobs/result" (:name (:value (evaluate rt sid '(help 'jobs/result))))))
+      (is (= "agents/resume!" (:name (:value (evaluate rt sid '(help 'agents/resume! {:detailed? true}))))))
+      (is (= ["[target]"] (:arities (:value (evaluate rt sid '(help 'agents/resume!))))))))
+  (let [huge (apply str (repeat 30000 "x"))
+        descriptor {:name "ext" :symbol "ext" :description huge
+                    :parameters {:properties (into {} (map #(vector (str "field" %)
+                                                             {:type "string" :description huge})
+                                                           (range 50)))}
+                    :returns {:description huge} :examples [{:source huge} {:source huge} {:source huge}]}
+        selection #(into [descriptor] (map (fn [n] (assoc descriptor :name (str "ext" n)
+                                                         :symbol (str "ext" n))) (range 25)))
+        overview (help/help 'clojure.core selection)
+        page (help/help 'clojure.core selection {:group "coding"})
+        named (help/help 'clojure.core selection "ext")
+        full (help/help 'clojure.core selection "ext" {:detailed? true})]
+    (is (< (count (pr-str overview)) 1600))
+    (is (= 8 (count (:entries page))))
+    (is (= 8 (:next-offset page)))
+    (is (<= (count (pr-str page)) 6000))
+    (is (<= (count (pr-str (help/help 'clojure.core selection {:group "coding" :limit 20}))) 6000))
+    (is (<= (count (pr-str named)) 6000))
+    (is (= 42 (:omitted-arguments (:parameters named))))
+    (is (= 1 (:omitted-examples named)))
+    (is (= huge (:description full)))))
+
+(deftest workflow-help-is-bounded-selected-and-isolated
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))
+          root (:value (evaluate rt sid '(help)))]
+      (is (= #{"background" "delegation" "failure" "results"}
+             (set (map :workflow (:workflows root)))))
+      (is (every? #(and (string? (:purpose %)) (not (contains? % :steps)))
+                  (:workflows root)))
+      (is (= ["[id]"] (:arities (:value (evaluate rt sid '(help 'agents/submission))))))))
+  (let [selection (constantly [])
+        root (help/help 'clojure.core selection)]
+    (is (empty? (:workflows root)))
+    (is (= "unavailable-workflow"
+           (:error/code (ex-data (try (help/help 'clojure.core selection {:workflow "background"})
+                                      (catch clojure.lang.ExceptionInfo error error))))))
+    (doseq [options [{:workflow nil}
+                     {:workflow 4}
+                     {:workflow "background" :group "jobs"}
+                     {:workflow "background" :limit 8}]]
+      (is (= "invalid-arguments"
+             (:error/code (ex-data (try (help/help 'clojure.core selection options)
+                                        (catch clojure.lang.ExceptionInfo error error)))))))
+    (is (= "unknown-workflow"
+           (:error/code (ex-data (try (help/help 'clojure.core selection {:workflow "not-installed"})
+                                      (catch clojure.lang.ExceptionInfo error error))))))))
+
+(deftest registered-tools-do-not-masquerade-as-native-workflows
+  (let [tool-names ["jobs/start!" "jobs/inspect" "jobs/wait" "jobs/output" "jobs/result" "jobs/cancel!"]
+        selected #(mapv (fn [name] {:name name :symbol name :description "Extension, not a native job helper"})
+                        tool-names)]
+    (is (empty? (:workflows (help/help 'clojure.core selected))))
+    (is (= "unavailable-workflow"
+           (:error/code (ex-data (try (help/help 'clojure.core selected {:workflow "background"})
+                                      (catch clojure.lang.ExceptionInfo error error))))))))
 
 (deftest workspace-describes-bindings-without-running-their-values
   (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
@@ -73,12 +166,9 @@
           failed (evaluate rt sid '(def effects (atom [])) '(swap! effects conj :before)
                            '(throw (ex-info "original failure" {:probe 42}))
                            '(swap! effects conj :after))
-          id (get-in failed [:result :id])
-          rendered (:message/content (first (wire/messages [(wire/result-message failed)])))]
+          id (get-in failed [:result :id])]
       (is (:error? failed))
       (is (= [:before] (:value (evaluate rt sid '@effects))))
-      (is (str/includes? rendered (str "(result-info " id ")")))
-      (is (not (str/includes? rendered (str "(result " id ")"))))
       (evaluate rt sid '(/ 1 0))
       (runtime/reload! rt sid)
       (let [info (:value (evaluate rt sid (list 'result-info id)))
@@ -87,11 +177,7 @@
         (is (= 2 (:completed-forms data)))
         (is (= 3 (:form-index data)))
         (is (= :evaluating (:phase data)))
-        (is (not (contains? info :value))))
-      (let [nil-result (evaluate rt sid nil)
-            text (:message/content (first (wire/messages [(wire/result-message nil-result)])))]
-        (is (false? (:error? nil-result)))
-        (is (str/includes? text "Use (result "))))))
+        (is (not (contains? info :value)))))))
 
 (deftest result-pages-are-stable-and-artifacts-are-readable-without-reexecution
   (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]

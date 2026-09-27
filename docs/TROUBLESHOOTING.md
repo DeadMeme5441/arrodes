@@ -62,12 +62,22 @@ Another live runtime owns the same data directory. Close the other Arrodes proce
 
 If you deliberately need another store, pass a distinct `--data-dir PATH`. This creates a separate history; it is not a shared-runtime mode.
 
-### Unsupported store format or home layout
+### Incompatible store format or unsupported home layout
 
-Arrodes reads only its current SQLite schema (3) and home layout. It does not migrate
-older stores or root-level configuration. An incompatible store remains untouched;
-use a fresh `--data-dir PATH` for a new history. If the home layout is unsupported,
-select a current-format `--home PATH`. Current settings belong in `HOME/config/`.
+Schema 5 is current. If the selected, exclusively owned **recognized Arrodes**
+SQLite session store has an incompatible format (including schemas 3 and 4), startup
+automatically resets that store and its owned retained artifacts. **Old sessions,
+history, jobs and results in that store are permanently lost.** There is no
+migration or backup; export needed history using a compatible earlier build
+before starting this one. Foreign/unrecognized SQLite databases are rejected
+unchanged rather than deleted. Credentials, settings and unrelated neighboring
+files remain intact. `store-in-use` prevents a competing process from resetting
+the store. Corrupt SQLite, unsafe paths, shared artifact directories and
+permission errors are reported rather than treated as permission to delete data.
+
+An unsupported **home layout** is different: root-level configuration remains
+untouched and startup rejects it. Select a current-format `--home PATH` if
+needed. Current settings belong in `HOME/config/`.
 
 ### Where is this project's state?
 

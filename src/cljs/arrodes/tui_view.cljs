@@ -7,6 +7,7 @@
             [clojure.string :as str]
             [arrodes.tui.chrome :as chrome]
             [arrodes.tui.context :as c]
+            [arrodes.tui.agents :as agents]
             [arrodes.tui.input :as input]
             [arrodes.tui.inspection :as inspection]
             [arrodes.tui.models :as models]
@@ -131,6 +132,9 @@
                                 :border false})
         session-title (w/text renderer "Untitled session" {:id "session-title" :flexGrow 1 :flexShrink 1 :height 1
                                                             :fg :text/secondary :truncate true :wrapMode "none"})
+        parent-agent (w/button renderer "← Parent" #(agents/parent! @view-ref)
+                               {:id "parent-agent" :visible false :height 1 :width 10
+                                :fg :ui/accent})
         header-gap (w/box renderer {:id "header-gap" :width "100%" :height (:region-gap w/layout)})
         body (w/box renderer {:width "100%" :flexDirection "row" :flexGrow 1 :flexShrink 1 :minHeight 1 :overflow "hidden"})
         conversation (w/box renderer {:flexGrow 1 :flexShrink 1 :minWidth 1 :height "100%"})
@@ -238,6 +242,9 @@
         footer (w/box renderer {:id "model-footer" :width "100%" :height 1 :paddingX (:gutter w/layout) :flexDirection "row" :backgroundColor :surface/panel})
         footer-status (w/button renderer "" (fn [] (models/open-models! @view-ref)) {:id "footer-model" :flexShrink 1 :minWidth 1 :height 1 :truncate true :wrapMode "none"})
         provider-status (w/text renderer "" {:id "footer-provider" :maxWidth 16 :height 1 :truncate true :wrapMode "none" :fg :text/dim})
+        footer-agents (w/button renderer "Agents" #(agents/open! @view-ref)
+                                {:id "footer-agents" :height 1 :width 18
+                                 :truncate true :wrapMode "none" :fg :text/secondary})
         footer-space (w/box renderer {:flexGrow 1 :minWidth 2})
         context-status (w/text renderer "" {:id "footer-context" :height 1 :fg :text/secondary :wrapMode "none"})
         metadata (w/box renderer {:id "project-footer" :width "100%" :height 1 :paddingX 2 :flexDirection "row"})
@@ -251,7 +258,7 @@
         modal (w/box renderer {:id "active-screen" :position "absolute" :width "100%" :height "100%" :paddingX 2 :paddingY 1
                                :border false :backgroundColor :surface/base})
         modal-header (w/box renderer {:width "100%" :height 2 :flexDirection "row"})
-        modal-title (w/text renderer "" {:height 1 :flexGrow 1 :flexShrink 1 :fg :ui/accent :truncate true :wrapMode "none"})
+        modal-title (w/text renderer "" {:id "dialog-title" :height 1 :flexGrow 1 :flexShrink 1 :fg :ui/accent :truncate true :wrapMode "none"})
         provider-switch (w/button renderer "Change provider"
                                   (fn []
                                     (let [previous (get-in (c/state @view-ref) [:ui :overlay])]
@@ -301,6 +308,24 @@
         browser-status (w/text renderer "" {:id "browser-status" :width "100%" :height 1 :visible false
                                            :fg :ui/accent :truncate true :wrapMode "none"})
         modal-footer (w/text renderer "" {:width "100%" :height 1 :fg :text/dim :wrapMode "none" :truncate true})
+        agent-actions (w/box renderer {:id "agent-actions" :visible false :width "100%"
+                                       :height 3 :flexDirection "column"})
+        agent-primary (w/box renderer {:width "100%" :height 1 :flexDirection "row"})
+        agent-secondary (w/box renderer {:width "100%" :height 1 :flexDirection "row"})
+        agent-buttons
+        (mapv (fn [[label action]]
+                (w/button renderer label
+                          (fn [] (action @view-ref))
+                          {:id (str "agent-action-" (str/replace (str/lower-case label) #"\s+" "-"))
+                           :height 1 :width "25%" :truncate true :wrapMode "none" :fg :ui/accent}))
+              [["New" agents/start!]
+               ["Message" #(agents/compose! % (agents/selected %))]
+               ["Messages" #(agents/messages! % (agents/selected %))]
+               ["Result" #(agents/outcome! % (agents/selected %))]
+               ["Cancel" #(agents/cancel! % (agents/selected %))]
+               ["Stop tree" #(agents/stop! % (agents/selected %))]
+               ["Resume" #(agents/resume! % (agents/selected %))]
+               ["Parent" agents/parent!]])
         view {
               :actions {:open-theme! theme-picker/open!
                         :close-overlay! screens/close-overlay!
@@ -310,6 +335,8 @@
                         :inspect! inspection/inspect!
                         :open-files! screens/open-files!
                         :open-history! screens/open-history!
+                        :open-agents! agents/open!
+                        :agent-parent! agents/parent!
                         :open-jobs! jobs/open!
                         :open-models! models/open-models!
                         :open-overlay! screens/open-overlay!
@@ -322,7 +349,7 @@
                         :schedule! schedule!}
               :themes theme-manager :app application :renderer renderer :root root :local local :closed? closed?
               :syntax (w/syntax-style renderer) :records (atom {})
-              :header header :session-title session-title
+              :header header :session-title session-title :parent-agent parent-agent
               :body body :conversation conversation :transcript transcript :welcome welcome
               :welcome-title welcome-title :welcome-hint welcome-hint :recent-sessions recent-sessions
               :metadata metadata :project-status project-status :command-menu command-menu :spacer spacer
@@ -333,17 +360,17 @@
               :pending pending :pending-items pending-items :pending-more pending-more :new-activity new-activity
               :widget-box widget-box :widget-items widget-items
               :notice-box notice-box :notice-text notice-text :notice-detail notice-detail :notice-close notice-close :composer-box composer-box :composer composer
-              :attachment-row attachment-row :attachment-items attachment-items :footer footer :footer-status footer-status :footer-keys footer-keys :provider-status provider-status :context-status context-status
+              :attachment-row attachment-row :attachment-items attachment-items :footer footer :footer-status footer-status :footer-agents footer-agents :footer-keys footer-keys :provider-status provider-status :context-status context-status
               :provider-switch provider-switch :modal-shade modal-shade :modal modal :modal-title modal-title :modal-hint modal-hint
               :modal-input-frame modal-input-frame :modal-input modal-input :modal-mask modal-mask
-              :modal-list modal-list :modal-footer modal-footer :modal-sidebar modal-sidebar
+              :modal-list modal-list :modal-footer modal-footer :modal-sidebar modal-sidebar :agent-actions agent-actions
               :model-settings model-settings :model-layout model-layout :modal-content modal-content :browser-status browser-status
               :on-quit (or (:on-quit options) (fn [] (-> (app/close! application) (.finally (fn [] (.destroy renderer))))))}
         key-handler (fn [event] (input/key! view event))
         frame-handler (fn [_] (frame! view))
         resize-handler (fn [& _] (transcript/remember-anchor! view) (schedule! view))]
     (reset! view-ref view)
-    (w/add! header session-title)
+    (w/add! header session-title parent-agent)
     (w/add! conversation transcript)
     (w/add! welcome welcome-title welcome-hint recent-sessions welcome-help)
     (w/add! inspector-header inspector-title inspector-close)
@@ -357,13 +384,16 @@
     (w/add! notice-box notice-text notice-detail notice-close)
     (w/add! attachment-row attach-button attachment-items)
     (w/add! composer-box composer attachment-row)
-    (w/add! footer footer-status provider-status footer-space context-status)
+    (w/add! footer footer-status provider-status footer-space footer-agents context-status)
     (w/add! metadata project-status footer-keys)
     (w/add! modal-header modal-title provider-switch modal-close)
     (w/add! modal-input-frame modal-input modal-mask)
     (w/add! modal-content modal-sidebar modal-list)
     (w/add! model-layout modal-content model-settings)
-    (w/add! modal modal-header modal-hint modal-input-frame model-layout browser-status modal-footer)
+    (doseq [button (take 4 agent-buttons)] (.add agent-primary button))
+    (doseq [button (drop 4 agent-buttons)] (.add agent-secondary button))
+    (w/add! agent-actions agent-primary agent-secondary)
+    (w/add! modal modal-header modal-hint modal-input-frame model-layout browser-status agent-actions modal-footer)
     (w/add! modal-shade modal)
     (w/add! root header header-gap welcome body spacer new-activity pending widget-box notice-box command-menu composer-gap composer-box footer metadata modal-shade)
     (.add (.-root renderer) root)
