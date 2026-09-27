@@ -19,6 +19,7 @@ CANCEL = object()
 class FixtureProvider(BaseHTTPRequestHandler):
     requests = []
     source = ""
+    answer = "Verified the repository repair: 42."
 
     def log_message(self, *_):
         pass
@@ -37,7 +38,7 @@ class FixtureProvider(BaseHTTPRequestHandler):
         assert self.headers.get("Authorization") == "Bearer local-release-check"
         assert request["model"] == "fixture-model", request["model"]
         if any(message["role"] == "tool" and message.get("tool_call_id") == "repair" for message in request["messages"]):
-            delta = {"content": "Verified the repository repair: 42."}
+            delta = {"content": self.answer}
             finish = "stop"
         else:
             delta = {"tool_calls": [{"index": 0, "id": "repair", "type": "function", "function": {
@@ -325,7 +326,10 @@ def terminal_smoke(executable, home, project, environment):
         os.write(master, b"\r")
         wait_for(b"Enter API key")
         os.write(master, b"\x1b")
-        wait_for(b"Sign-in cancelled")
+        # Full-screen browsers obscure footer notices. Wait for reconciled
+        # provider state and completed catalog work before the next interaction.
+        wait_for("○ Release fixture".encode())
+        wait_for(b"Connecting provider", absent=True)
         os.write(master, b"\r")
         wait_for(b"Connect provider")
         os.write(master, b"\r")
@@ -334,25 +338,27 @@ def terminal_smoke(executable, home, project, environment):
         wait_for("••".encode())
         assert b"local-release-check" not in capture, "API key appeared in terminal output"
         os.write(master, b"\r")
-        wait_for(b"Provider connected")
+        wait_for("● Release fixture".encode())
+        wait_for(b"Connecting provider", absent=True)
         os.write(master, b"\r")
         wait_for(b"Browse models")
         os.write(master, b"\r")
         wait_for(b"fixture-model")
         wait_for(b"Discovering models", absent=True)
         os.write(master, b"\r")
-        wait_for(b"Reasoning")
+        # Model effort and apply controls are inline, not successive dialogs.
+        os.write(master, b"\t")
+        wait_for("› Apply as default".encode())
         os.write(master, b"\r")
-        wait_for(b"Make default for new conversations")
-        os.write(master, b"\r")
-        wait_for(b"Make default for new conversations", absent=True)
+        wait_for(b"Models", absent=True)
         wait_for(b"fixture-model")
-        wait_for(b"Idle")
+        # Selecting a default does not create a session; the first send does.
+        os.write(master, b"Start a terminal session.\r")
+        wait_for(b"Terminal session ready.")
         os.write(master, b"/eval\r")
         wait_for(b"Clojure")
         os.write(master, b"(+ 20 22)\r")
         wait_for(b"42")
-        wait_for(b"Idle")
         os.write(master, b"\x04")
         deadline = time.monotonic() + 20
         while process.poll() is None and time.monotonic() < deadline:
@@ -434,6 +440,8 @@ def main():
             terminal_home = root / "terminal home"
             (terminal_home / "config").mkdir(parents=True)
             (terminal_home / "config" / "settings.edn").write_text(fixture_settings)
+            FixtureProvider.source = "{:terminal-ready true}"
+            FixtureProvider.answer = "Terminal session ready."
             terminal = terminal_smoke(installed, terminal_home, project, environment)
             assert not Path(environment["ARRODES_HOME"]).exists(), "--home did not override ARRODES_HOME"
             profile = {str(path.relative_to(environment["HOME"])) for path in Path(environment["HOME"]).rglob("*")}

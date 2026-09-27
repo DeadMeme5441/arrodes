@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Update the optional packaged-release diagnostic to follow reconciled provider
+  state, inline model settings and first-send session creation instead of obsolete
+  dialogs and transient notification wording.
+
 ## 0.1.7
 
 **Upgrade notice:** this release requires SQLite schema 5. Startup resets recognized
