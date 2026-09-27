@@ -23,3 +23,9 @@ candidate; do not replace assets in the existing candidate.
 The tag, version, platform, architecture, checksum, and draft assets identify the candidate.
 Published release assets are immutable. Compatibility and rollback behavior follows
 [the compatibility contract](COMPATIBILITY.md).
+
+The optional `python3 scripts/verify-release.py PATH` diagnostic exercises the exact
+candidate outside the checkout without developer runtimes on `PATH`. Its terminal
+probe waits for reconciled provider state, applies inline model settings, and sends
+the first message before evaluating in that session. Transient footer notices are
+not completion signals. This diagnostic does not replace human candidate acceptance.
