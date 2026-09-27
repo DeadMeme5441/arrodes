@@ -50,7 +50,11 @@
                                :streams :operation :snapshot-cursor])]
     (if (= source (:model-source @(:local view)))
       (:rows @(:local view))
-      (let [rows (turns/annotate (model/rows m))]
+      (let [rows (mapv (fn [row]
+                         (if (:agent-kind row)
+                           (assoc row :turn-role :agent :turn-start? true :turn-id (:id row))
+                           row))
+                       (turns/annotate (model/rows m)))]
         (swap! (:local view) assoc :model-source source :rows rows)
         rows))))
 

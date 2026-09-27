@@ -80,7 +80,11 @@
      (swap! (:state app)
             (fn [state]
               (cond-> (assoc state :hydrating {:token token :session-id sid :events []})
-                switching? (assoc :navigation-generation navigation))))
+                switching? (assoc :navigation-generation navigation)
+                (and switching?
+                     (not-any? #(= sid (:session-id %)) (get-in state [:agents :agents])))
+                (update :agents merge {:root-id nil :agents [] :cursor 0 :token nil
+                                       :loading? false :buffer [] :requested-sid nil}))))
      (-> (client/call! app "session.view" {:session-id sid})
          (.then
           (fn [wire-snapshot]
@@ -185,6 +189,8 @@
                                                    {:title/source :user})
                                        :cwd (client/workspace app) :config config})
                          :history nil :hydrating nil :notice nil)
+                  (update :agents merge {:root-id nil :agents [] :cursor 0 :token nil
+                                         :loading? false :buffer [] :requested-sid nil})
                   ;; Boot may finish after the user opens a screen or types.
                   ;; Only an explicit New action owns resetting their UI state.
                   (cond-> (not initializing?)

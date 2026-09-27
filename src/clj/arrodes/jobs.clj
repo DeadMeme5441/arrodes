@@ -219,6 +219,7 @@
         parent-id (:job-id context)
         bindings (get-thread-bindings)]
     (locking (:lock manager)
+      (util/check-cancelled! (:cancelled? context))
       (value/check! (and (not @(:closed? manager)) (not (contains? @(:blocked manager) sid)))
                     :jobs-unavailable "Session jobs are shutting down or the evaluator is being replaced" {})
       (value/check! (< (count @(:slots manager)) (:limit manager)) :job-limit
@@ -325,18 +326,31 @@
     (value/check! (= (:session-id registry) (:session-id handle)) :job-not-found "Job belongs to another session" {}))
   (if (map? handle) (:id handle) handle))
 
+(defn- inspection [record detailed?]
+  (let [handle (pr-str (select-keys record [:id :session-id]))
+        retained (:result record)]
+    (assoc (if detailed? record (summary record))
+           :next (cond-> {:output (str "(jobs/output " handle ")")}
+                   (:result-id record)
+                   (assoc :result-info (str "(result-info " (:result-id record) ")"))
+                   (and (= :completed (:status record)) (:available? retained))
+                   (assoc :value-and-ack (str "(jobs/result " handle ")"))
+                   (not (terminal? record))
+                   (assoc :wait (str "(jobs/wait " handle " {:timeout-ms 1000})")
+                          :cancel! (str "(jobs/cancel! " handle ")"))))))
+
 (defn start!
   "Start a zero-argument function without waiting. Returns a session-owned handle. Optional {:name string}."
   ([f] (start! {} f))
   ([opts f] (let [[manager registry context] (environment)] (start-job! manager registry opts f context))))
 (defn inspect
-  "Compact status by default. Pass {:detailed? true} for origin, diagnostics, and retained descriptors."
+  "Compact status and inert :next source strings. Reading inspection does not acknowledge delivery. Pass {:detailed? true} for diagnostics."
   ([handle] (inspect handle {}))
   ([handle opts]
    (let [detailed? (detailed-option! opts #{:detailed?})
          [manager registry] (environment)
          record (inspect-job manager (:session-id registry) (job-id registry handle))]
-     (if detailed? record (summary record)))))
+     (inspection record detailed?))))
 (defn list
   "List compact statuses newest first. Options: :limit, :before, :detailed? (default false)."
   ([] (list {}))
@@ -363,7 +377,7 @@
   ([handle] (output handle {}))
   ([handle opts] (let [[manager registry] (environment)] (output-job manager (:session-id registry) (job-id registry handle) opts))))
 (defn result
-  "Return a successful job's native value without waiting. Failed/cancelled/unfinished jobs throw."
+  "Return a successful job's native value and acknowledge its outcome delivery, without waiting. Failed/cancelled/unfinished jobs throw."
   [handle]
   (let [[manager registry] (environment) sid (:session-id registry) id (job-id registry handle)
         record (store/job (:store manager) sid id)]

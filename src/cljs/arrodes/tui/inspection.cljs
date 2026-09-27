@@ -75,7 +75,7 @@
 
 (defn request-inspection! [view row]
   (let [selection (:id row)
-        id (model/field (:result (present/activity row)) :id)
+        id (model/field (or (:result row) (:result (present/activity row))) :id)
         previous-output (when (:job-id row) (get-in (c/state view) [:ui :inspection :job-output]))]
     (c/ui! view assoc :inspection (when (or id (:job-id row))
                                    (cond-> {:selection-id selection}

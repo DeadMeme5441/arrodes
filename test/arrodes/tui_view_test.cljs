@@ -2,10 +2,14 @@
   "TUI regression entry point: real RPC lifecycle followed by native screen rendering."
   (:require [arrodes.tui-app :as app]
             [arrodes.tui-app-test :as app-test]
+            [arrodes.tui-agents-test :as agents-test]
             [arrodes.jobs-ui-test :as jobs-ui]
             [arrodes.catalog-flow-test :as catalog-flow]
             [arrodes.tui-model :as model]
             [arrodes.tui-view :as view]
+            [arrodes.tui.agents :as agents]
+            [arrodes.tui.context :as c]
+            [arrodes.tui.input :as key-input]
             [arrodes.tui.screens :as screens]
             [arrodes.theme-ui-test :as theme-test]
             [clojure.string :as str]))
@@ -401,9 +405,8 @@
 (defn- transcript-hierarchy! [application terminal]
   (.resize terminal 150 55)
   (-> (until! terminal
-              #(and (= "Provider experience" (.-plainText (node terminal "session-title")))
-                     (= 1 (alength (.getChildren (.-parent (node terminal "session-title"))))))
-              "The app header must contain only the session title")
+              #(= "Provider experience" (.-plainText (node terminal "session-title")))
+              "The header must identify the focused conversation")
       (.then (fn [_]
                (until! terminal
                        #(and (= "You" (.-plainText (node terminal "heading:message:question")))
@@ -928,6 +931,172 @@
               "Session rows must show local message timestamps and an explicit empty state")
       (.then (fn [_] (println "Session timestamps passed: recorded message date and empty state.")))))
 
+(defn- agent-browser! [application terminal]
+  (let [input (.-mockInput terminal)
+        root {:session-id "root" :root-id "root" :name "Main" :depth 0
+              :session {:config {:model "astra" :provider :codex-backend}}
+              :usage-total 110 :usage-measured-calls 1}
+        child {:session-id "child" :root-id "root" :parent-session-id "root"
+               :name "Parser" :depth 1 :operation {:id "agent-op" :status :running}
+               :session {:config {:model "luna" :provider :codex-backend}}
+               :usage-total nil :usage-unmeasured-calls 1}]
+    (swap! (:state application)
+           #(-> %
+                (assoc :agents {:root-id "root" :agents [root child] :cursor 3}
+                       :view (assoc (model/empty-state)
+                                    :session {:id "root" :name "Main" :cwd (.cwd js/process)})
+                       :notice nil)
+                (assoc-in [:ui :draft] "keep this parent draft")
+                (assoc-in [:ui :overlay] {:kind :agents :title "Agents" :token "agents-native"
+                                          :query "" :index 0})))
+    (-> (until! terminal
+                #(let [frame (.captureCharFrame terminal)]
+                   (and (str/includes? frame "Parser")
+                        (str/includes? frame "astra")
+                        (str/includes? frame "luna")
+                        (str/includes? (.-plainText (node terminal "footer-agents")) "Agents 1 active / 1")
+                        (str/includes? frame "Measured tokens 110 · 1 unmeasured calls")
+                        (str/includes? frame "running")))
+                "The team browser or live agent footer was not visible")
+        (.then (fn [_] (.resize terminal 58 18)
+                 (until! terminal
+                         #(and (screen-fits? terminal)
+                               (str/includes? (.captureCharFrame terminal) "Parser")
+                               (str/includes? (.-plainText (node terminal "footer-agents")) "◎ 1/1"))
+                         "A narrow terminal must keep the roster and agent count visible")))
+        (.then (fn [_] (.resize terminal 120 40)
+                 (.pressArrow input "down")
+                 (until! terminal #(= 1 (get-in @(:state application) [:ui :overlay :index]))
+                         "Keyboard selection did not reach the child")))
+        (.then (fn [_]
+                 (until! terminal
+                         #(and (= :agents (get-in @(:state application) [:ui :overlay :kind]))
+                               (.-visible (node terminal "agent-actions"))
+                               (.-visible (node terminal "agent-action-message")))
+                         "Agent controls must stay mounted inside the full-terminal roster")))
+        (.then (fn [_]
+                 (let [button (node terminal "agent-action-message")]
+                   (.click (.-mockMouse terminal) (+ 1 (.-screenX button)) (.-screenY button)))
+                 (until! terminal
+                         #(and (= :input (get-in @(:state application) [:ui :overlay :kind]))
+                               (str/includes? (.captureCharFrame terminal) "Message to Parser"))
+                         "Addressed-message composition did not open")))
+        (.then (fn [_]
+                 (when-not (= "keep this parent draft" (get-in @(:state application) [:ui :draft]))
+                   (throw (js/Error. "Agent message compose replaced the parent conversation draft")))
+                 (.pressEscape input)
+                 (until! terminal #(and (= :agents (get-in @(:state application) [:ui :overlay :kind]))
+                                        (= "keep this parent draft" (get-in @(:state application) [:ui :draft])))
+                         "Dismissing agent compose must return to roster without losing the draft"))))))
+
+(defn- agent-selection-controls! [application mounted terminal]
+  (let [input (.-mockInput terminal)
+        sent (atom [])]
+    (swap! (:state application)
+           #(-> %
+                (assoc-in [:view :session :id] "child")
+                (assoc-in [:ui :overlay] nil)))
+    (with-redefs [c/invoke! (fn [_ action _]
+                             (when-not (= :agents action)
+                               (throw (js/Error. "Unexpected request in roster navigation test")))
+                             (js/Promise.resolve {}))]
+      (agents/open! mounted))
+    (-> (until! terminal
+                #(and (= 1 (get-in @(:state application) [:ui :overlay :index]))
+                      (= "child" (:session-id (agents/selected mounted)))
+                      (= "Agents · target Parser" (some-> (node terminal "dialog-title") .-plainText)))
+                "Reopening from a child must select that child's controls")
+        (.then (fn [_]
+                 (.pressArrow input "up")
+                 (until! terminal
+                         #(and (= "root" (:session-id (agents/selected mounted)))
+                               (str/starts-with? (.-plainText (node terminal "choice-0-label")) "› ")
+                               (str/includes? (.-plainText (node terminal "choice-1-label")) "[current]"))
+                         "Keyboard selection must differ visibly from the currently focused transcript")))
+        (.then (fn [_]
+                 (.pressArrow input "down")
+                 (until! terminal
+                         #(and (= "child" (:session-id (agents/selected mounted)))
+                               (str/starts-with? (.-plainText (node terminal "choice-1-label")) "› "))
+                         "Target indicator did not follow the selected child")))
+        (.then (fn [_]
+                 (with-redefs [app/command! (fn [_ action data]
+                                              (swap! sent conj [action data])
+                                              (js/Promise.resolve data))]
+                   (key-input/key! mounted #js {:eventType "press" :name "r" :ctrl true
+                                                 :preventDefault (fn []) :stopPropagation (fn [])}))
+                 (when-not (= [[:agent-resume {:id "child"}]] @sent)
+                   (throw (js/Error. (str "Ctrl+R targeted a different agent: " (pr-str @sent)))))))
+        (.then (fn [_]
+                 (key-input/key! mounted #js {:eventType "press" :name "f7"
+                                               :preventDefault (fn []) :stopPropagation (fn [])})
+                 (until! terminal
+                         #(and (= :input (get-in @(:state application) [:ui :overlay :kind]))
+                               (= "Message to Parser" (some-> (node terminal "dialog-title") .-plainText)))
+                         "F7 must compose to the selected child without opening its conversation")))
+        (.then (fn [_]
+                 (.pressEscape input)
+                 (until! terminal
+                         #(= :agents (get-in @(:state application) [:ui :overlay :kind]))
+                         "Dismissing F7 compose must return to the roster")))
+        (.then (fn [_]
+                 (with-redefs [app/command! (fn [_ action data]
+                                              (swap! sent conj [action data])
+                                              (js/Promise.resolve
+                                               {:messages [{:id "note" :from "child"
+                                                            :recipients ["root"] :content "Recorded reply"}]}))]
+                   (key-input/key! mounted #js {:eventType "press" :name "f8"
+                                                 :preventDefault (fn []) :stopPropagation (fn [])}))
+                 (until! terminal
+                         #(and (= [:agent-messages {}] (last @sent))
+                               (= :notice (get-in @(:state application) [:ui :overlay :kind]))
+                               (= "Messages · Parser" (some-> (node terminal "dialog-title") .-plainText)))
+                         "F8 must inspect the selected child's messages without triggering Enter"))))))
+
+(defn- agent-transcript! [application terminal]
+  (let [peer {:id "peer" :session-id "root" :kind :message
+              :data {:message/role :user :message/content "Peer note"
+                     :message/agent {:id "msg-peer" :from "child" :kind :peer}}}
+        human {:id "human" :parent-id "peer" :session-id "root" :kind :message
+               :data {:message/role :user :message/content "Human note"
+                      :message/agent {:id "msg-human" :from "root" :kind :human}}}
+        task {:id "task" :parent-id "human" :session-id "root" :kind :message
+              :data {:message/role :user :message/content "Delegate this task"
+                     :message/agent {:id "msg-task" :from "root" :kind :task}}}
+        entry {:id "agent-done" :parent-id "task" :session-id "root" :kind :message
+               :data {:message/role :user
+                      :message/content "{:result {:message/provider-data SECRET}}"
+                      :message/agent {:id "notice-1" :from "child" :kind :completion
+                                      :operation-id "op-1"}
+                      :message/result {:id 42 :kind :inline :session-id "root"
+                                       :value {:session-id "child" :operation-id "op-1"
+                                               :status :completed
+                                               :result {:message/role :assistant
+                                                        :message/content [{:part/type :text :text "Ready: 42"}]
+                                                        :message/provider-data {:sdk-response "SECRET"}}}}}}]
+    (swap! (:state application)
+           #(-> %
+                (assoc :view (assoc (model/empty-state)
+                                    :session {:id "root" :name "Main" :head "agent-done"
+                                              :cwd (.cwd js/process)}
+                                    :entries [peer human task entry]))
+                (assoc-in [:ui :overlay] nil)
+                (assoc-in [:ui :selected] nil)
+                (assoc-in [:ui :inspector?] false)))
+    (until! terminal
+            #(let [heading (node terminal "heading:message:agent-done")
+                   frame (.captureCharFrame terminal)]
+               (and heading
+                    (= "Peer · child" (some-> (node terminal "heading:message:peer") .-plainText))
+                    (= "Human addressed message · root" (some-> (node terminal "heading:message:human") .-plainText))
+                    (= "Delegated task · root" (some-> (node terminal "heading:message:task") .-plainText))
+                    (= "Agent completion · child" (.-plainText heading))
+                    (str/includes? frame "Ready: 42")
+                    (str/includes? frame "completed")
+                    (not (str/includes? frame "SECRET"))
+                    (not (str/includes? frame "◇ You"))))
+            "The delivered completion must be attributed and show only its bounded final reply")))
+
 (defn- exercise! [terminal]
   (let [application (app/create! {:runtime-root (.cwd js/process) :cwd (.cwd js/process)
                                   :setup? false})
@@ -985,6 +1154,9 @@
         (.then (fn [_] (streaming-layout! application mounted terminal)))
         (.then (fn [_] (sessions-loading! application mounted terminal)))
         (.then (fn [_] (session-timestamps! application terminal)))
+        (.then (fn [_] (agent-browser! application terminal)))
+        (.then (fn [_] (agent-selection-controls! application mounted terminal)))
+        (.then (fn [_] (agent-transcript! application terminal)))
         (.then (fn [_] (assistant-turn-ownership! application terminal)))
         (.then (fn [] (println "Native TUI passed: full-screen layout, inspector selection ownership, session widgets, render/editor requests and cancelled overlay cleanup.")))
         (.finally (fn []
@@ -998,7 +1170,8 @@
               (js/Promise.resolve nil)
               (-> (catalog-flow/exercise!)
                   (.then (fn [] (app-test/exercise!)))
-                  (.then (fn [] (jobs-ui/exercise!)))))
+                  (.then (fn [] (jobs-ui/exercise!)))
+                  (.then (fn [] (agents-test/exercise!)))))
             (.then (fn []
                      ((aget js/globalThis "ARRODES_CREATE_TEST_RENDERER")
                       #js {:width 120 :height 40 :kittyKeyboard true :consoleMode "disabled"})))

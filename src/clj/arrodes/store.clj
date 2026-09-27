@@ -15,9 +15,11 @@
            (java.util.concurrent.locks ReentrantLock)))
 
 (defrecord Store [^Connection connection ^ReentrantLock lock closed? path artifact-dir memory? opened-at
-                  ^FileChannel owner-channel ^FileLock owner-lock owner-path])
+                  ^FileChannel owner-channel ^FileLock owner-lock owner-path
+                  ^FileChannel artifact-channel ^FileLock artifact-lock])
 
-(def ^:private schema-version 3)
+(def ^:private schema-version 5)
+(def ^:private application-id 0x4152524f)
 (def ^:private entry-kinds
   #{:message :config :compaction :branch-summary :custom :custom-context :label :evaluation})
 (def ^:private statuses #{:idle :running :failed :interrupted})
@@ -25,6 +27,9 @@
 (def ^:private operation-statuses
   #{:queued :running :cancelling :completed :failed :cancelled :interrupted})
 (def ^:private max-transfer-artifact-bytes (* 256 1024 1024))
+(def ^:private max-agent-content-bytes (* 256 1024))
+(def ^:private max-agent-completion-bytes (* 16 1024 1024))
+(def ^:private max-agent-preview 1200)
 (def ^:private max-durable-nodes 100000)
 
 (defn- bounded-edn-shape? [value]
@@ -261,6 +266,17 @@
         (when owner-channel
           (.close ^FileChannel owner-channel))))))
 
+(defn- single-link! [path]
+  (when (Files/exists (util/path path)
+                      (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+    (let [links (try
+                  (long (Files/getAttribute (util/path path) "unix:nlink"
+                                            (into-array LinkOption [LinkOption/NOFOLLOW_LINKS])))
+                  (catch UnsupportedOperationException _ nil))]
+      (value/check! (or (nil? links) (= 1 links)) :insecure-database
+                    "Store files cannot have hard-linked aliases"
+                    {:path (str path) :links links}))))
+
 (defn- prepare-database-file! [path]
   (let [target (util/path path)]
     (ensure-parent! path)
@@ -272,32 +288,375 @@
                                       (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
                  :insecure-database "Session database path must be a regular file"
                  {:path (str target)})
+    (single-link! target)
     (doseq [sidecar [(util/path (str path "-wal")) (util/path (str path "-shm"))]]
       (value/check! (not (Files/isSymbolicLink sidecar)) :insecure-database
-                   "SQLite sidecar cannot be a symbolic link" {:path (str sidecar)}))
-    (util/private-file! path)))
+                   "SQLite sidecar cannot be a symbolic link" {:path (str sidecar)})
+      (single-link! sidecar))
+    target))
 
 (defn- tighten-store-files! [store]
   (when-let [path (:path store)]
     (doseq [candidate (map util/path [path (str path "-wal") (str path "-shm")])]
       (value/check! (not (Files/isSymbolicLink candidate)) :insecure-database
                    "SQLite storage file cannot be a symbolic link" {:path (str candidate)})
+      (single-link! candidate)
       (when (Files/isRegularFile candidate
                                  (into-array java.nio.file.LinkOption
                                              [java.nio.file.LinkOption/NOFOLLOW_LINKS]))
         (util/private-file! candidate)))))
 
+
+(defn- safe-reset-path! [path]
+  (let [candidate (.toAbsolutePath (util/path path))]
+    (loop [parts (iterator-seq (.iterator candidate))
+           parent (.getRoot candidate)]
+      (when-let [part (first parts)]
+        (value/check! (not= ".." (str part)) :insecure-database
+                      "Destructive reset refuses path traversal" {:path (str candidate)})
+        (let [current (.resolve parent ^java.nio.file.Path part)
+              symlink? (Files/isSymbolicLink current)
+              trusted-parent? (when symlink?
+                                (let [real-parent (.toRealPath parent
+                                                               (make-array LinkOption 0))
+                                      permissions (Files/getPosixFilePermissions
+                                                   real-parent (make-array LinkOption 0))]
+                                  (and (= "root" (str (Files/getOwner
+                                                       real-parent (make-array LinkOption 0))))
+                                       (not (contains? permissions
+                                                       java.nio.file.attribute.PosixFilePermission/GROUP_WRITE))
+                                       (not (contains? permissions
+                                                       java.nio.file.attribute.PosixFilePermission/OTHERS_WRITE)))))]
+          (value/check! (or (not symlink?) trusted-parent?) :insecure-database
+                        "Destructive reset refuses untrusted symbolic links"
+                        {:path (str current)})
+          (recur (next parts) current))))))
+
+(defn- reset-file! [path]
+  (safe-reset-path! path)
+  (let [target (util/path path)]
+    (when (Files/exists target (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+      (value/check! (Files/isRegularFile target
+                                        (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+                    :insecure-database "Reset target is not a regular file"
+                    {:path (str target)})
+      (single-link! target)
+      (Files/delete target))))
+
+(defn- artifact-reset-plan [artifact-dir]
+  (when artifact-dir
+    (safe-reset-path! artifact-dir)
+    (let [root (util/path artifact-dir)]
+      (when (Files/exists root (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+        (value/check! (Files/isDirectory root
+                                         (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+                      :insecure-directory "Artifact storage is not a directory"
+                      {:path (str root)})
+        (with-open [walk (Files/walk root (make-array java.nio.file.FileVisitOption 0))]
+          (let [paths (vec (iterator-seq (.iterator walk)))
+                content (transient [])
+                directories (transient [])]
+            (doseq [path paths]
+              (safe-reset-path! path)
+              (let [relative (.relativize root path)
+                    segments (mapv str (iterator-seq (.iterator relative)))]
+                (cond
+                  (Files/isDirectory path
+                                     (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+                  (when (and (= 1 (count segments))
+                             (re-matches #"[0-9a-f]{2}" (first segments)))
+                    (conj! directories path))
+
+                  (Files/isRegularFile path
+                                       (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+                  (when (and (= 2 (count segments))
+                             (re-matches #"[0-9a-f]{2}" (first segments))
+                             (re-matches #"[0-9a-f]{64}" (second segments))
+                             (= (first segments) (subs (second segments) 0 2)))
+                    (conj! content path))
+
+                  :else
+                  (value/fail! :insecure-directory
+                               "Artifact storage contains an unsafe filesystem entry"
+                               {:path (str path)}))))
+            {:root root :files (persistent! content)
+             :directories (persistent! directories)}))))))
+
+(defn- empty-directory? [path]
+  (with-open [stream (Files/list path)]
+    (not (.isPresent (.findAny stream)))))
+
+(defn- release-artifact-owner! [{:keys [artifact-channel artifact-lock]}]
+  (when artifact-lock
+    (try
+      (when (.isValid ^FileLock artifact-lock)
+        (.release ^FileLock artifact-lock))
+      (finally
+        (.close ^FileChannel artifact-channel)))))
+
+(defn- acquire-artifact-owner! [artifact-dir db-path]
+  (safe-reset-path! artifact-dir)
+  (private-dir! artifact-dir)
+  (let [root (util/path artifact-dir)
+        lock-path (.resolve root ".lock")
+        marker (.resolve root ".arrodes-owner")]
+    (create-owner-file! lock-path)
+    (value/check! (and (not (Files/isSymbolicLink lock-path))
+                       (Files/isRegularFile lock-path
+                                            (into-array LinkOption [LinkOption/NOFOLLOW_LINKS])))
+                  :insecure-directory "Artifact ownership lock is unsafe"
+                  {:path (str lock-path)})
+    (single-link! lock-path)
+    (let [channel (FileChannel/open lock-path
+                                    (into-array OpenOption
+                                                [StandardOpenOption/WRITE
+                                                 LinkOption/NOFOLLOW_LINKS]))]
+      (try
+        (let [lock (try (.tryLock channel)
+                        (catch OverlappingFileLockException _ nil))]
+          (value/check! lock :artifact-store-in-use
+                        "Artifact storage is owned by another open store"
+                        {:path artifact-dir})
+          (try
+            (if (Files/exists marker (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+              (do
+                (value/check! (and (not (Files/isSymbolicLink marker))
+                                   (Files/isRegularFile marker
+                                                        (into-array LinkOption [LinkOption/NOFOLLOW_LINKS])))
+                              :insecure-directory "Artifact owner marker is unsafe"
+                              {:path (str marker)})
+                (single-link! marker)
+                (value/check! (<= (Files/size marker) 16384)
+                              :artifact-owner-conflict "Artifact ownership marker is invalid"
+                              {:path (str marker)})
+                (value/check! (= {:database db-path} (decode (Files/readString marker)))
+                              :artifact-owner-conflict
+                              "Artifact storage belongs to another database"
+                              {:path artifact-dir}))
+              (let [owned-hashes
+                    (when (Files/exists (util/path db-path)
+                                        (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+                      (with-open [connection (DriverManager/getConnection
+                                              (str "jdbc:sqlite:" db-path))]
+                        (when (scalar connection
+                                      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='artifacts'"
+                                      [])
+                          (set (query-sql connection "SELECT sha256 FROM artifacts"
+                                          [] #(.getString ^ResultSet % "sha256"))))))
+                    plan (artifact-reset-plan artifact-dir)]
+                (value/check! (every? #(contains? owned-hashes
+                                                  (str (.getFileName ^java.nio.file.Path %)))
+                                      (:files plan))
+                              :artifact-owner-unknown
+                              "Unmarked artifact files are not recorded by this database"
+                              {:path artifact-dir})
+                (let [temp (Files/createTempFile root ".owner-" ".tmp"
+                                                 (make-array FileAttribute 0))]
+                  (try
+                    (Files/write temp (.getBytes (encode {:database db-path}) "UTF-8")
+                                 (into-array OpenOption [StandardOpenOption/WRITE]))
+                    (util/private-file! temp)
+                    (Files/move temp marker (make-array StandardCopyOption 0))
+                    (finally (Files/deleteIfExists temp))))))
+            (util/private-file! lock-path)
+            {:artifact-channel channel :artifact-lock lock}
+            (catch Throwable error
+              (.release ^FileLock lock)
+              (throw error))))
+        (catch Throwable error
+          (.close channel)
+          (throw error))))))
+
+(defn- reset-incompatible-store! [db-path artifact-plan]
+  (doseq [target (map util/path [db-path (str db-path "-wal") (str db-path "-shm")])]
+    (safe-reset-path! target)
+    (when (Files/exists target (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+      (value/check! (Files/isRegularFile target
+                                        (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+                    :insecure-database "SQLite reset target is not a regular file"
+                    {:path (str target)})
+      (single-link! target)))
+  ;; The incompatible database is the retry marker until every owned artifact
+  ;; and sidecar has been removed. Remove it last, never before cleanup succeeds.
+  (doseq [path (:files artifact-plan)]
+    (reset-file! path))
+  (doseq [path (:directories artifact-plan)]
+    (safe-reset-path! path)
+    (when (and (Files/isDirectory path
+                                  (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+               (empty-directory? path))
+      (Files/delete path)))
+  (when-let [root (:root artifact-plan)]
+    (safe-reset-path! root)
+    (when (and (Files/isDirectory root
+                                  (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+               (empty-directory? root))
+      (Files/delete root)))
+  (reset-file! (str db-path "-wal"))
+  (reset-file! (str db-path "-shm"))
+  (reset-file! db-path))
+(declare check-schema!)
+
+(defn- reset-marker [db-path]
+  (util/path (str db-path ".reset")))
+
+(defn- read-reset-marker [db-path]
+  (let [marker (reset-marker db-path)]
+    (safe-reset-path! marker)
+    (when (Files/exists marker (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+      (value/check! (and (Files/isRegularFile marker
+                                              (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+                         (<= (Files/size marker) 16384))
+                    :insecure-database "Store reset marker is unsafe"
+                    {:path (str marker)})
+      (single-link! marker)
+      (let [record (decode (Files/readString marker))]
+        (value/check! (and (map? record)
+                           (= #{:database :artifacts} (set (keys record)))
+                           (string? (:database record))
+                           (string? (:artifacts record)))
+                      :insecure-database "Store reset marker is malformed"
+                      {:path (str marker)})
+        record))))
+
+(defn- begin-reset! [db-path artifact-dir]
+  (let [expected {:database db-path :artifacts artifact-dir}
+        marker (reset-marker db-path)]
+    (if-let [existing (read-reset-marker db-path)]
+      (value/check! (= expected existing) :insecure-database
+                    "An incomplete reset belongs to another storage path"
+                    {:path (str marker)})
+      (let [temp (Files/createTempFile (.getParent marker) ".reset-" ".tmp"
+                                       (make-array FileAttribute 0))]
+        (try
+          (Files/write temp (.getBytes (encode expected) "UTF-8")
+                       (into-array OpenOption [StandardOpenOption/WRITE]))
+          (util/private-file! temp)
+          (Files/move temp marker (make-array StandardCopyOption 0))
+          (finally (Files/deleteIfExists temp)))))))
+
+(defn- resume-reset! [db-path artifact-dir]
+  (when-let [marker (read-reset-marker db-path)]
+    (value/check! (= marker {:database db-path :artifacts artifact-dir})
+                  :insecure-database "An incomplete reset belongs to another storage path"
+                  {:path (str (reset-marker db-path))})
+    (when (Files/exists (util/path db-path)
+                        (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
+      (prepare-database-file! db-path)
+      (with-open [connection (DriverManager/getConnection (str "jdbc:sqlite:" db-path))]
+        ;; A replacement at this pathname must never be mistaken for the owned
+        ;; database whose reset was interrupted.
+        (try
+          (check-schema! connection)
+          (catch clojure.lang.ExceptionInfo error
+            (when-not (= "unsupported-store-format" (:error/code (ex-data error)))
+              (throw error))))))
+    (reset-incompatible-store! db-path (artifact-reset-plan artifact-dir))
+    (prepare-database-file! db-path)))
+
 (defn- execute-script! [^Connection connection statements]
   (with-open [statement (.createStatement connection)]
     (doseq [sql statements] (.executeUpdate statement sql))))
 
+(def ^:private arrodes-table-signature
+  {"sessions" #{"base_config" "fork_entry" "labels"}
+   "entries" #{"session_id" "parent_id" "data"}
+   "queue" #{"session_id" "options"}
+   "operations" #{"session_id" "result" "error"}
+   "events" #{"session_id" "operation_id" "data"}
+   "artifacts" #{"session_id" "sha256" "content"}
+   "results" #{"session_id" "descriptor"}
+   "jobs" #{"session_id" "record"}})
+
+(defn- arrodes-owned? [connection tables]
+  (and (set/subset? (set (keys arrodes-table-signature)) tables)
+       (every? (fn [[table columns]]
+                 (set/subset? columns
+                              (set (query-sql connection
+                                              (str "PRAGMA table_info(" table ")")
+                                              [] #(.getString ^ResultSet % "name")))))
+               arrodes-table-signature)))
+
 (defn- check-schema! [^Connection connection]
   (let [current (long (or (scalar connection "PRAGMA user_version" []) 0))
-        fresh? (and (zero? current)
-                    (zero? (long (scalar connection "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'" []))))]
+        marker (long (or (scalar connection "PRAGMA application_id" []) 0))
+        tables (set (query-sql connection
+                               "SELECT name FROM sqlite_master WHERE type='table'"
+                               [] #(.getString ^ResultSet % "name")))
+        fresh? (and (zero? current) (zero? marker)
+                    (zero? (long (scalar connection
+                                             "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+                                             []))))]
+    (when-not fresh?
+      (value/check! (or (= marker application-id)
+                        (and (zero? marker) (arrodes-owned? connection tables)))
+                    :unrecognized-store
+                    "An unrelated SQLite database cannot be reset as an Arrodes store"
+                    {:found current :application-id marker}))
     (value/check! (or fresh? (= current schema-version)) :unsupported-store-format
-                  "Unsupported store format. This version requires a current-format store; select a fresh --data-dir. Existing data was not migrated."
+                  "Unsupported store format. An incompatible file-backed store is reset on open; no migration is available."
                   {:found current :required schema-version})
+    (when-not fresh?
+      (let [required #{"sessions" "entries" "queue" "operations" "events"
+                       "artifacts" "results" "jobs" "agent_routes"
+                       "agent_submissions" "agent_messages" "agent_deliveries"}]
+        (value/check! (set/subset? required tables) :unsupported-store-format
+                      "Current store is missing required tables"
+                      {:found current :required schema-version
+                       :missing (vec (sort (set/difference required tables)))}))
+      (doseq [row (query-sql connection
+                             "SELECT session_id,root_id,parent_session_id,context_id,parent_context_id,depth,paused,stopped FROM agent_routes"
+                             [] (fn [^ResultSet rs]
+                                  {:sid (.getString rs "session_id")
+                                   :root (.getString rs "root_id")
+                                   :parent (.getString rs "parent_session_id")
+                                   :context (.getString rs "context_id")
+                                   :parent-context (.getString rs "parent_context_id")
+                                   :depth (.getInt rs "depth")
+                                   :paused (.getInt rs "paused")
+                                   :stopped (.getInt rs "stopped")}))]
+        (value/check! (and (uuid? (:sid row)) (uuid? (:root row))
+                           (uuid? (:context row)) (not (neg? (:depth row)))
+                           (contains? #{0 1} (:paused row))
+                           (contains? #{0 1} (:stopped row))
+                           (if (:parent row)
+                             (and (uuid? (:parent row)) (uuid? (:parent-context row))
+                                  (pos? (:depth row)))
+                             (and (= (:sid row) (:root row))
+                                  (zero? (:depth row))
+                                  (nil? (:parent-context row)))))
+                      :unsupported-store-format "Malformed agent routing record"
+                      {:session-id (:sid row)}))
+      (value/check!
+       (contains? (set (query-sql connection "PRAGMA table_info(agent_deliveries)"
+                                  [] #(.getString ^ResultSet % "name"))) "operation_id")
+       :unsupported-store-format "Current store is missing agent delivery operation linkage"
+       {:found current :required schema-version})
+      (doseq [row (query-sql connection
+                             (str "SELECT d.status,d.entry_id,d.operation_id,d.recipient_id,"
+                                  "e.session_id AS entry_session,o.session_id AS operation_session,"
+                                  "o.kind AS operation_kind FROM agent_deliveries d "
+                                  "LEFT JOIN entries e ON e.id=d.entry_id "
+                                  "LEFT JOIN operations o ON o.id=d.operation_id")
+                             [] (fn [^ResultSet rs]
+                                  {:status (.getString rs "status")
+                                   :entry-id (.getString rs "entry_id")
+                                   :operation-id (.getString rs "operation_id")
+                                   :recipient-id (.getString rs "recipient_id")
+                                   :entry-session (.getString rs "entry_session")
+                                   :operation-session (.getString rs "operation_session")
+                                   :operation-kind (.getString rs "operation_kind")}))]
+        (value/check!
+         (case (:status row)
+           "delivered" (and (uuid? (:entry-id row))
+                            (uuid? (:operation-id row))
+                            (= (:recipient-id row) (:entry-session row) (:operation-session row))
+                            (contains? #{"run" "continue"} (:operation-kind row)))
+           ("pending" "superseded") (and (nil? (:entry-id row))
+                                        (nil? (:operation-id row)))
+           false)
+         :unsupported-store-format "Malformed agent delivery link"
+         {:status (:status row) :recipient-id (:recipient-id row)})))
     fresh?))
 
 (defn- initialize-schema! [^Connection connection]
@@ -319,8 +678,15 @@
             "CREATE INDEX artifacts_session_created ON artifacts(session_id, created_at)"
             "CREATE TABLE results (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, id INTEGER NOT NULL, kind TEXT NOT NULL, descriptor TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(session_id, id))"
             "CREATE TABLE jobs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, status TEXT NOT NULL, created_at INTEGER NOT NULL, delivered INTEGER NOT NULL DEFAULT 0, record TEXT NOT NULL)"
-            "CREATE INDEX jobs_session_created ON jobs(session_id, created_at DESC, id)"])
-        (execute-command! connection "PRAGMA user_version = 3")
+            "CREATE INDEX jobs_session_created ON jobs(session_id, created_at DESC, id)"
+            "CREATE TABLE agent_routes (session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, root_id TEXT NOT NULL REFERENCES sessions(id), parent_session_id TEXT REFERENCES sessions(id), name TEXT NOT NULL, context_id TEXT NOT NULL, parent_context_id TEXT, depth INTEGER NOT NULL, paused INTEGER NOT NULL DEFAULT 0, stopped INTEGER NOT NULL DEFAULT 0, origin TEXT NOT NULL, UNIQUE(root_id,name))"
+            "CREATE INDEX agent_routes_parent ON agent_routes(parent_session_id)"
+            "CREATE TABLE agent_submissions (source_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, submission_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(source_id,submission_id))"
+            "CREATE TABLE agent_messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, root_id TEXT NOT NULL, sender_id TEXT, kind TEXT NOT NULL, content TEXT NOT NULL, source_operation_id TEXT, created_at INTEGER NOT NULL, wake INTEGER NOT NULL DEFAULT 0, UNIQUE(source_operation_id,kind))"
+            "CREATE TABLE agent_deliveries (message_id TEXT NOT NULL REFERENCES agent_messages(id) ON DELETE CASCADE, recipient_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, context_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', entry_id TEXT, operation_id TEXT REFERENCES operations(id), PRIMARY KEY(message_id,recipient_id))"
+            "CREATE INDEX agent_deliveries_recipient ON agent_deliveries(recipient_id,status,message_id)"])
+        (execute-command! connection (str "PRAGMA user_version = " schema-version))
+        (execute-command! connection (str "PRAGMA application_id = " application-id))
         (.commit connection)
         (catch Throwable error (.rollback connection) (throw error))
         (finally (.setAutoCommit connection old-auto))))))
@@ -339,22 +705,63 @@
                   [(encode (assoc descriptor :available? false)) session-id id])))
 
 
+(defn- open-current-connection! [memory? db-path requested-db-path
+                                 requested-artifact-dir artifact-dir artifact-owner*]
+  (let [url (if memory? "jdbc:sqlite::memory:" (str "jdbc:sqlite:" db-path))
+        connection (DriverManager/getConnection url)]
+    (try
+      (check-schema! connection)
+      (when (and artifact-dir (nil? @artifact-owner*))
+        (reset! artifact-owner*
+                (acquire-artifact-owner! artifact-dir db-path)))
+      connection
+      (catch Throwable error
+        (.close connection)
+        (if (and db-path (= "unsupported-store-format" (:error/code (ex-data error))))
+          (do
+            (safe-reset-path! requested-db-path)
+            (when requested-artifact-dir
+              (safe-reset-path! requested-artifact-dir))
+            (when-not @artifact-owner*
+              (reset! artifact-owner*
+                      (acquire-artifact-owner! artifact-dir db-path)))
+            (begin-reset! db-path artifact-dir)
+            (reset-incompatible-store! db-path (artifact-reset-plan artifact-dir))
+            (prepare-database-file! db-path)
+            (let [fresh (DriverManager/getConnection url)]
+              (try
+                (check-schema! fresh)
+                fresh
+                (catch Throwable reopen-error
+                  (.close fresh)
+                  (throw reopen-error)))))
+          (throw error))))))
+
 (defn open!
   "Opens an independent memory store or exclusively owns a canonical file store."
   [{:keys [path memory? artifact-dir]}]
   (Class/forName "org.sqlite.JDBC")
   (let [memory? (or memory? (nil? path))
         db-path (when-not memory? (canonical-database-path path))
-        owner (when db-path (acquire-owner! db-path))]
+        owner (when db-path (acquire-owner! db-path))
+        artifact-owner* (atom nil)]
     (try
-      (when db-path (prepare-database-file! db-path))
-      (let [url (if memory? "jdbc:sqlite::memory:" (str "jdbc:sqlite:" db-path))
-            connection (DriverManager/getConnection url)
-            lock (ReentrantLock.)
-            closed? (atom false)
+      (let [requested-artifact-dir artifact-dir
             artifact-dir (when-not memory?
                            (util/canonical-path
                             (or artifact-dir (str db-path ".artifacts"))))
+            _ (when (and db-path (read-reset-marker db-path))
+                (safe-reset-path! path)
+                (when requested-artifact-dir (safe-reset-path! requested-artifact-dir))
+                (reset! artifact-owner*
+                        (acquire-artifact-owner! artifact-dir db-path))
+                (resume-reset! db-path artifact-dir))
+            _ (when db-path (prepare-database-file! db-path))
+            connection (open-current-connection! memory? db-path path
+                                                 requested-artifact-dir artifact-dir
+                                                 artifact-owner*)
+            lock (ReentrantLock.)
+            closed? (atom false)
             store (map->Store
                    (merge {:connection connection
                            :lock lock
@@ -363,7 +770,7 @@
                            :artifact-dir artifact-dir
                            :memory? memory?
                            :opened-at (util/now)}
-                          owner))]
+                          owner @artifact-owner*))]
         (try
           (check-schema! connection)
           (execute-command! connection "PRAGMA foreign_keys = ON")
@@ -378,12 +785,14 @@
           (tighten-store-files! store)
           (when db-path (util/private-file! db-path))
           (when artifact-dir (private-dir! artifact-dir))
+          (when db-path (Files/deleteIfExists (reset-marker db-path)))
           store
           (catch Throwable error
             (try (.close connection) (catch Throwable _))
             (throw error))))
       (catch Throwable error
-        (try (release-owner! owner) (catch Throwable _))
+        (try (release-artifact-owner! @artifact-owner*)
+             (finally (release-owner! owner)))
         (throw error)))))
 
 (defn close!
@@ -400,7 +809,8 @@
               (try
                 (.close ^Connection (:connection store))
                 (finally
-                  (release-owner! store))))))
+                  (try (release-artifact-owner! store)
+                       (finally (release-owner! store))))))))
         nil
         (finally (.unlock lock))))))
 
@@ -653,6 +1063,100 @@
      :data data
      :time time}))
 
+(defn- route-row [^ResultSet rs]
+  {:session-id (.getString rs "session_id")
+   :root-id (.getString rs "root_id")
+   :parent-session-id (.getString rs "parent_session_id")
+   :name (.getString rs "name")
+   :context-id (.getString rs "context_id")
+   :parent-context-id (.getString rs "parent_context_id")
+   :depth (.getInt rs "depth")
+   :paused? (pos? (.getInt rs "paused"))
+   :stopped? (pos? (.getInt rs "stopped"))
+   :origin (decode (.getString rs "origin"))})
+
+(defn- route [connection sid]
+  (or (first (query-sql connection "SELECT * FROM agent_routes WHERE session_id=?" [sid] route-row))
+      (let [snapshot (require-session connection sid)]
+        {:session-id sid :root-id sid :parent-session-id nil :name "Main"
+         :context-id sid :parent-context-id nil :depth 0 :paused? false
+         :stopped? false :origin {} :session-name (:name snapshot)})))
+
+(defn- public-route [row]
+  (select-keys row [:session-id :root-id :parent-session-id :name :context-id
+                    :parent-context-id :depth :paused? :stopped?]))
+
+(defn- ensure-root-route! [connection sid]
+  (when-not (scalar connection "SELECT 1 FROM agent_routes WHERE session_id=?" [sid])
+    (execute-sql! connection
+                  "INSERT INTO agent_routes(session_id,root_id,parent_session_id,name,context_id,parent_context_id,depth,paused,stopped,origin) VALUES(?,?,?,?,?,?,?,0,0,?)"
+                  [sid sid nil "Main" sid nil 0 (encode {})]))
+  (route connection sid))
+
+(defn- routing-event! [connection root sid type data]
+  (insert-event! connection root
+                 {:type type :data (merge {:root-id root :session-id sid} data)}))
+
+(defn- checked-agent-content
+  ([content] (checked-agent-content content max-agent-content-bytes))
+  ([content limit]
+   (let [serialized (encode content)]
+     (value/check! (<= (count (.getBytes ^String serialized "UTF-8")) limit)
+                   :agent-content-too-large "Agent content exceeds the durable size limit"
+                   {:limit limit})
+     serialized)))
+
+(defn- canonical-assistant-result [result]
+  (when (= :assistant (:message/role result))
+    (let [content (:message/content result)
+          content (if (vector? content)
+                    (mapv #(if (map? %)
+                             (dissoc % :part/provider-data)
+                             %) content)
+                    content)
+          metadata (select-keys (:message/provider-data result)
+                                [:response/provider :response/model :response/usage
+                                 :response/cost :response/finish-reason])]
+      (cond-> {:message/role :assistant :message/content content}
+        (seq metadata) (assoc :message/provider-data metadata)))))
+
+(defn- completion-content [operation child-name]
+  (checked-agent-content {:session-id (:session-id operation)
+                          :name child-name
+                          :operation-id (:id operation) :status (:status operation)
+                          :result (canonical-assistant-result (:result operation))
+                          :error (select-keys (:error operation)
+                                              [:code :message :error/code])}
+                         max-agent-completion-bytes))
+
+(defn- completion! [connection operation]
+  (when (contains? #{:completed :failed :cancelled :interrupted} (:status operation))
+    (when-let [child (first (query-sql connection
+                                      "SELECT * FROM agent_routes WHERE session_id=? AND parent_session_id IS NOT NULL"
+                                      [(:session-id operation)] route-row))]
+      (let [parent (:parent-session-id child)
+            parent-route (route connection parent)
+            content (completion-content operation (:name child))]
+        (when (and (= (:parent-context-id child) (:context-id parent-route))
+                   (not (scalar connection
+                                "SELECT 1 FROM agent_messages WHERE source_operation_id=? AND kind='completion'"
+                                [(:id operation)])))
+          (let [id (util/id)]
+            (execute-sql! connection
+                          "INSERT INTO agent_messages(id,root_id,sender_id,kind,content,source_operation_id,created_at,wake) VALUES(?,?,?,?,?,?,?,1)"
+                          [id (:root-id child) (:session-id operation) "completion" content
+                           (:id operation) (util/now)])
+            (execute-sql! connection
+                          "INSERT INTO agent_deliveries(message_id,recipient_id,context_id,status) VALUES(?,?,?,'pending')"
+                          [id parent (:context-id parent-route)])
+            [(routing-event! connection (:root-id child) parent :agent/message
+                             {:message-id id :from (:session-id operation) :kind :completion})]))))))
+
+(defn- supersede-deliveries! [connection sid]
+  (execute-sql! connection
+                "UPDATE agent_deliveries SET status='superseded' WHERE recipient_id=? AND status='pending'"
+                [sid]))
+
 (def job-terminal-statuses #{:completed :failed :cancelled :interrupted})
 
 (defn- job-row [^ResultSet rs]
@@ -838,17 +1342,28 @@
                           (let [prior (when-let [oid (:id raw)] (find-operation connection oid))]
                             (upsert-operation! connection (normalize-operation sid prior raw))))
               _ (update-session! connection updated)
-              entry-events
-              (mapv #(insert-event! connection sid
-                                    {:type :entry/committed :data {:entry %}})
-                    committed)
-              events
-              (into entry-events
-                    (map #(insert-event! connection sid %)
-                         (or (:events command) [])))]
+              branch? (or (:agent-branch? command)
+                          (and (contains? (or (:session command) {}) :head)
+                               (not= (:head current) (:head changes))
+                               (not (seq committed))))
+              _ (when branch?
+                  (ensure-root-route! connection sid)
+                  (execute-sql! connection "UPDATE agent_routes SET context_id=? WHERE session_id=?"
+                                [(util/id) sid])
+                  (supersede-deliveries! connection sid))
+              entry-events (mapv #(insert-event! connection sid
+                                                {:type :entry/committed :data {:entry %}})
+                                 committed)
+              events (into entry-events
+                           (concat (map #(insert-event! connection sid %)
+                                        (or (:events command) []))
+                                   (when branch?
+                                     [(routing-event! connection (:root-id (route connection sid))
+                                                      sid :agent/changed {:reason :branch})])))
+              completion-events (when operation (completion! connection operation))]
           {:session (public-session updated)
            :entries committed
-           :events events
+           :events (into events completion-events)
            :operation operation})))))
 
 (defn configure!
@@ -893,6 +1408,7 @@
         session-changes (cond-> {:config (:config selection) :status :idle}
                           (empty? boundary) (assoc :head leaf))]
     (commit! store sid {:expected-revision (or (:expected-revision opts) (:revision selection))
+                        :agent-branch? true
                         :entries boundary
                         :session session-changes
                         :events [{:type :session/branched :data {:entry-id leaf}}]})))
@@ -1104,7 +1620,8 @@
                         :config config
                         :status :idle
                         :created-at now
-                        :metadata (or (:metadata opts) (:metadata source-row))
+                        :metadata (dissoc (or (:metadata opts) (:metadata source-row))
+                                          :agent/origin)
                         :labels (remap-labels (:labels source-row) id-map)
                         :parent-id (:id source-row)
                         :fork-entry (:source-leaf opts)}))
@@ -1189,6 +1706,13 @@
   (transact! store
     (fn [connection]
       (require-session connection sid)
+      (value/check! (nil? (scalar connection
+                                  "SELECT 1 FROM agent_routes WHERE parent_session_id=? LIMIT 1"
+                                  [sid])) :agent-descendants-exist
+                    "Delete linked child sessions first" {:session-id sid})
+      (execute-sql! connection "DELETE FROM agent_deliveries WHERE recipient_id=?" [sid])
+      (execute-sql! connection "DELETE FROM agent_submissions WHERE source_id=?" [sid])
+      (execute-sql! connection "DELETE FROM agent_routes WHERE session_id=?" [sid])
       (execute-sql! connection "DELETE FROM sessions WHERE id = ?" [sid])
       {:deleted sid})))
 
@@ -1411,15 +1935,26 @@
                               [(:id entry) sid (:parent-id entry) (:seq entry) "message" (encode (:data entry)) now])
                 (vreset! final-head (:id entry))))
             (doseq [op ops]
-              (execute-sql! connection "UPDATE operations SET status='interrupted',finished_at=?,error=? WHERE id=?"
-                            [now (encode {:code "interrupted" :message "Process restarted before the operation completed"}) (:id op)])
-              (vswap! events conj! (insert-event! connection sid
-                                           {:operation-id (:id op)
-                                            :type :operation/interrupted
-                                            :data {:reason :restart}
-                                            :time now})))
+              (let [interrupted (assoc op :status :interrupted :finished-at now
+                                      :error {:code "interrupted"
+                                              :message "Process restarted before the operation completed"})]
+                (execute-sql! connection "UPDATE operations SET status='interrupted',finished_at=?,error=? WHERE id=?"
+                              [now (encode (:error interrupted)) (:id op)])
+                (vswap! events conj! (insert-event! connection sid
+                                                    {:operation-id (:id op)
+                                                     :type :operation/interrupted
+                                                     :data {:reason :restart}
+                                                     :time now}))
+                (doseq [event (completion! connection interrupted)]
+                  (vswap! events conj! event))))
             (update-session! connection (assoc snapshot :head @final-head :status :interrupted
                                                :revision (inc (:revision snapshot)) :updated-at now))))
+        (execute-sql! connection "UPDATE agent_routes SET paused=1" [])
+        (doseq [op (query-sql connection
+                              "SELECT o.* FROM operations o JOIN agent_routes r ON r.session_id=o.session_id WHERE r.parent_session_id IS NOT NULL AND o.status IN ('completed','failed','cancelled','interrupted')"
+                              [] operation-row)]
+          (doseq [event (completion! connection op)]
+            (vswap! events conj! event)))
         (persistent! @events)))))
 
 (defn- export-artifact-row [store connection ^ResultSet rs]
@@ -1739,7 +2274,8 @@
                        :config (session-model/normalize-config (:config source-row))
                        :status :idle
                        :created-at now
-                       :metadata (or (:metadata opts) (:metadata source-row))
+                       :metadata (dissoc (or (:metadata opts) (:metadata source-row))
+                                         :agent/origin)
                        :labels (remap-labels (:labels source-row) id-map)})
                      (assoc :head final-head))
         copied-source (mapv (fn [entry]
@@ -1856,3 +2392,648 @@
                           [new-sid (:id descriptor) (name (:kind descriptor))
                            (encode descriptor) now]))
           snapshot)))))
+
+(defn- route-ancestors [connection sid]
+  (loop [current (route connection sid), visited #{}, rows []]
+    (value/check! (not (contains? visited (:session-id current))) :invalid-agent-route
+                  "Agent ancestry contains a cycle" {:session-id sid})
+    (let [rows (conj rows current)]
+      (if-let [parent (:parent-session-id current)]
+        (recur (route connection parent) (conj visited (:session-id current)) rows)
+        rows))))
+
+(defn- active-route! [connection sid]
+  (let [ancestors (route-ancestors connection sid)]
+    (value/check! (not-any? :stopped? ancestors) :agent-stopped
+                  "Agent tree is stopped" {:session-id sid})
+    (doseq [[child parent] (partition 2 1 ancestors)]
+      (value/check! (= (:parent-context-id child) (:context-id parent))
+                    :agent-stale-context "Agent belongs to a previous parent context"
+                    {:session-id (:session-id child) :parent-session-id (:session-id parent)}))
+    (first ancestors)))
+
+(defn agent-state [store sid]
+  (store-read store #(public-route (route % sid))))
+
+(defn- agent-descendants* [connection sid]
+  (require-session connection sid)
+  (loop [front (conj clojure.lang.PersistentQueue/EMPTY sid), seen #{}, result []]
+    (if-let [current (peek front)]
+      (if (contains? seen current)
+        (recur (pop front) seen result)
+        (let [children (query-sql connection
+                                  "SELECT session_id FROM agent_routes WHERE parent_session_id=? ORDER BY name,session_id"
+                                  [current] #(.getString ^ResultSet % "session_id"))]
+          (recur (into (pop front) children) (conj seen current) (conj result current))))
+      result)))
+
+(defn agent-descendants [store sid]
+  (store-read store #(agent-descendants* % sid)))
+
+(defn- page-limit [limit default-limit]
+  (let [limit (or limit default-limit)]
+    (value/check! (and (integer? limit) (<= 1 limit 500)) :invalid-arguments
+                  "Page limit must be between 1 and 500" {:limit limit})
+    limit))
+
+(defn- compact-agent-page [opts]
+  (let [limit (or (:limit opts) 8)
+        offset (or (:offset opts) 0)]
+    (value/check! (and (integer? limit) (<= 1 limit 20)) :invalid-arguments
+                  "Page limit must be between 1 and 20" {:limit limit})
+    (value/check! (and (integer? offset) (not (neg? offset))) :invalid-arguments
+                  "Page offset must be non-negative" {:offset offset})
+    [limit offset]))
+
+(defn agent-summaries [store sid opts]
+  (store-read store
+    (fn [connection]
+      (let [root (:root-id (route connection sid))
+            target-id (:target-id opts)
+            _ (when target-id
+                (value/check! (= root (:root-id (route connection target-id)))
+                              :agent-target-forbidden "Cannot inspect a foreign team" {}))
+            [limit offset] (compact-agent-page opts)
+            total (if target-id 1
+                      (max 1 (long (or (scalar connection
+                                               "SELECT COUNT(*) FROM agent_routes WHERE root_id=?"
+                                               [root]) 0))))
+            rows (query-sql
+                  connection
+                  (str "SELECT s.id AS session_id,COALESCE(r.name,'Main') AS agent_name,"
+                       "r.parent_session_id,r.parent_context_id,"
+                       "COALESCE(r.context_id,s.id) AS context_id,"
+                       "r.paused,r.stopped,s.config,s.status AS session_status,"
+                       "o.id AS operation_id,o.status AS operation_status,"
+                       "(SELECT COUNT(*) FROM agent_deliveries d "
+                       "WHERE d.recipient_id=s.id AND d.status='pending' "
+                       "AND d.context_id=COALESCE(r.context_id,s.id)) AS pending_count "
+                       "FROM sessions s LEFT JOIN agent_routes r ON r.session_id=s.id "
+                       "LEFT JOIN operations o ON o.id=(SELECT latest.id FROM operations latest "
+                       "WHERE latest.session_id=s.id ORDER BY latest.created_at DESC,latest.rowid DESC LIMIT 1) "
+                       "WHERE (r.root_id=? OR (s.id=? AND r.session_id IS NULL)) "
+                       (when target-id "AND s.id=? ")
+                       "ORDER BY CASE WHEN s.id=? THEN 0 ELSE 1 END,r.depth,s.id LIMIT ? OFFSET ?")
+                  (cond-> [root root] target-id (conj target-id)
+                    true (into [root limit offset]))
+                  (fn [^ResultSet rs]
+                    (let [config (decode (.getString rs "config"))]
+                      {:session-id (.getString rs "session_id")
+                       :name (.getString rs "agent_name")
+                       :parent-session-id (.getString rs "parent_session_id")
+                       :context-id (.getString rs "context_id")
+                       :parent-context-id (.getString rs "parent_context_id")
+                       :paused? (pos? (.getInt rs "paused"))
+                       :stopped? (pos? (.getInt rs "stopped"))
+                       :provider (:provider config)
+                       :model (:model config)
+                       :status (keyword (.getString rs "session_status"))
+                       :operation-id (.getString rs "operation_id")
+                       :operation-status (some-> (.getString rs "operation_status") keyword)
+                       :pending-count (.getLong rs "pending_count")})))]
+        {:root-id root :agents rows :total total
+         :next-offset (when (< (+ offset (count rows)) total) (+ offset (count rows)))}))))
+
+(defn agent-team [store sid opts]
+  (store-read store
+    (fn [connection]
+      (let [root (:root-id (route connection sid))
+            limit (page-limit (:limit opts) 100)
+            offset (or (:offset opts) 0)]
+        (value/check! (and (integer? offset) (not (neg? offset))) :invalid-arguments
+                      "Page offset must be non-negative" {:offset offset})
+        (mapv (fn [id]
+                (let [state (route connection id)]
+                  (merge (public-route state)
+                         {:session (public-session (require-session connection id))
+                          :operation (first (query-sql connection
+                                                        "SELECT * FROM operations WHERE session_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1"
+                                                        [id] operation-row))
+                          :pending-count (long (or (scalar connection
+                                                           "SELECT COUNT(*) FROM agent_deliveries WHERE recipient_id=? AND status='pending' AND context_id=?"
+                                                           [id (:context-id state)]) 0))})))
+              (if (scalar connection "SELECT 1 FROM agent_routes WHERE session_id=?" [root])
+                (query-sql connection
+                           "SELECT session_id FROM agent_routes WHERE root_id=? ORDER BY depth,session_id LIMIT ? OFFSET ?"
+                           [root limit offset] #(.getString ^ResultSet % "session_id"))
+                (if (zero? offset) [root] [])))))))
+
+(defn- submission-row [connection sid submission-id]
+  (first (query-sql connection
+                    "SELECT kind,payload,receipt FROM agent_submissions WHERE source_id=? AND submission_id=?"
+                    [sid submission-id]
+                    (fn [^ResultSet rs] {:kind (keyword (.getString rs "kind"))
+                                         :payload (decode (.getString rs "payload"))
+                                         :receipt (decode (.getString rs "receipt"))}))))
+
+(defn agent-submission [store source-sid submission-id]
+  (require-uuid! submission-id :submission-id)
+  (store-read store
+    (fn [connection]
+      (require-session connection source-sid)
+      (:receipt (submission-row connection source-sid submission-id)))))
+
+(defn- save-submission! [connection sid submission-id kind payload receipt]
+  (execute-sql! connection
+                "INSERT INTO agent_submissions(source_id,submission_id,kind,payload,receipt) VALUES(?,?,?,?,?)"
+                [sid submission-id (name kind) (encode payload) (encode receipt)]))
+
+(defn- existing-submission! [connection sid submission-id kind payload]
+  (when-let [saved (submission-row connection sid submission-id)]
+    (value/check! (and (= kind (:kind saved)) (= payload (:payload saved)))
+                  :agent-submission-conflict
+                  "Submission ID was already used with different content"
+                  {:session-id sid :submission-id submission-id})
+    saved))
+
+(defn create-agent! [store parent-sid opts]
+  (let [{:keys [id operation-id submission-id name cwd config task context origin limit max-depth]} opts
+        payload (select-keys opts [:name :cwd :config :task :context])]
+    (require-uuid! submission-id :submission-id)
+    (value/check! (and (string? name) (not (str/blank? name)) (<= (count name) 100))
+                  :invalid-agent-name "Agent name must contain 1..100 characters" {})
+    (value/check! (and (string? task) (not (str/blank? task))) :invalid-agent-task
+                  "Agent task must be nonblank text" {})
+    (value/check! (or (nil? context) (string? context)) :invalid-agent-context
+                  "Agent context must be text" {})
+    (checked-agent-content {:task task :context context})
+    (value/check! (or (nil? origin) (map? origin)) :invalid-agent-origin
+                  "Agent origin must be a map" {})
+    (transact! store
+      (fn [connection]
+        (let [parent (route connection parent-sid)
+              existing (existing-submission! connection parent-sid submission-id :spawn payload)]
+          (if existing
+            (let [handle (:receipt existing)]
+              {:session (public-session (require-session connection (:session-id handle)))
+               :operation (find-operation connection (:operation-id handle))
+               :handle handle :events [] :existing? true})
+            (let [parent (active-route! connection parent-sid)
+                  root (:root-id parent)
+                  depth (inc (:depth parent))
+                  limit (or limit 100)
+                  max-depth (or max-depth 8)
+                  _ (value/check! (and (integer? limit) (pos? limit)
+                                       (integer? max-depth) (pos? max-depth))
+                                  :invalid-arguments "Agent limits must be positive" {})
+                  _ (value/check! (<= depth max-depth) :agent-depth-limit
+                                  "Agent nesting limit reached" {:depth depth :max-depth max-depth})
+                  _ (ensure-root-route! connection root)
+                  _ (value/check! (< (long (or (scalar connection
+                                                       "SELECT COUNT(*) FROM agent_routes WHERE root_id=?"
+                                                       [root]) 0)) limit)
+                                  :agent-limit "Agent team limit reached" {:limit limit})
+                  _ (value/check! (nil? (scalar connection
+                                                "SELECT 1 FROM agent_routes WHERE root_id=? AND name=?"
+                                                [root name])) :agent-name-exists
+                                  "Agent name already exists in this team" {:name name})
+                  _ (require-uuid! id :session-id)
+                  _ (require-uuid! operation-id :operation-id)
+                  _ (value/check! (nil? (find-session connection id)) :session-exists
+                                  "Session ID already exists" {:session-id id})
+                  _ (value/check! (nil? (find-operation connection operation-id))
+                                  :operation-exists "Operation ID already exists" {:operation-id operation-id})
+                  snapshot (session-model/new-snapshot
+                            (prepare-session-options {:id id :name name :cwd cwd
+                                                      :config config
+                                                      :metadata {:agent/origin origin
+                                                                 :title/source :user}}))
+                  _ (insert-session! connection snapshot (:config snapshot))
+                  context-id (util/id)
+                  _ (execute-sql! connection
+                                  "INSERT INTO agent_routes(session_id,root_id,parent_session_id,name,context_id,parent_context_id,depth,paused,stopped,origin) VALUES(?,?,?,?,?,?,?,0,0,?)"
+                                  [id root parent-sid name context-id (:context-id parent) depth
+                                   (encode (or origin {}))])
+                  initial (str (when (seq context) (str "Context:\n" context "\n\n"))
+                               task)
+                  now (util/now)
+                  entry {:id (util/id) :session-id id :parent-id nil :seq 1 :kind :message
+                         :data {:message/role :user :message/content initial
+                                :message/agent {:kind :task :from parent-sid}}
+                         :created-at now}
+                  _ (execute-sql! connection
+                                  "INSERT INTO entries(id,session_id,parent_id,seq,kind,data,created_at) VALUES(?,?,?,?,?,?,?)"
+                                  [(:id entry) id nil 1 "message" (encode (:data entry)) now])
+                  snapshot (assoc snapshot :head (:id entry) :revision 1 :updated-at now)
+                  _ (update-session! connection snapshot)
+                  operation (upsert-operation! connection
+                                               (normalize-operation id nil {:id operation-id
+                                                                             :kind :run :status :queued}))
+                  handle {:session-id id :operation-id operation-id :submission-id submission-id}
+                  _ (save-submission! connection parent-sid submission-id :spawn payload handle)
+                  events [(insert-event! connection id {:type :entry/committed :data {:entry entry}})
+                          (routing-event! connection root id :agent/changed
+                                          {:reason :created :operation-id operation-id})]]
+              {:session (public-session snapshot) :operation operation :handle handle
+               :events events :existing? false})))))))
+
+(defn- resolve-agent-target [connection source target]
+  (let [root (:root-id source)
+        target (if (string? target)
+                 (case target
+                   "parent" :parent
+                   "all" :all
+                   target)
+                 target)]
+    (if (= target :all)
+      (query-sql connection
+                 "SELECT * FROM agent_routes WHERE root_id=? AND session_id<>? ORDER BY depth,session_id"
+                 [root (:session-id source)] route-row)
+      (let [id (cond
+                 (= :parent target) (:parent-session-id source)
+                 (and (string? target) (uuid? target)) target
+                 (string? target) (scalar connection
+                                          "SELECT session_id FROM agent_routes WHERE root_id=? AND name=?"
+                                          [root target])
+                 :else nil)]
+        (value/check! id :agent-target-not-found "Agent target does not exist"
+                      {:target target})
+        (let [resolved (route connection id)]
+          (value/check! (= root (:root-id resolved)) :agent-target-forbidden
+                        "Agent target belongs to another team" {:target target})
+          [resolved])))))
+
+(defn agent-target-id [store viewer-sid target]
+  (store-read store
+    (fn [connection]
+      (let [viewer (route connection viewer-sid)]
+        (cond
+          (or (nil? target) (= target :self) (= target "self"))
+          viewer-sid
+
+          (or (= target :all) (= target "all"))
+          (value/fail! :agent-target-not-found "Expected a single agent target" {:target target})
+
+          (or (= target :main) (= target "Main"))
+          (:root-id viewer)
+
+          :else
+          (:session-id (first (resolve-agent-target connection viewer target))))))))
+
+(defn- portable-message-content [connection source content]
+  (if (and (map? content) (contains? content :result/ref))
+    (let [{:keys [session-id id]} (:result/ref content)
+          _ (value/check! (= session-id (:session-id source)) :agent-result-forbidden
+                          "Only this session's retained values may be sent" {})
+          result (first (query-sql connection
+                                   "SELECT descriptor FROM results WHERE session_id=? AND id=?"
+                                   [session-id id] #(decode (.getString ^ResultSet % "descriptor"))))]
+      (value/check! (and result (= :inline (:kind result)) (:available? result))
+                    :agent-result-unavailable "Only durable inline results can cross sessions"
+                    {:session-id session-id :result-id id})
+      {:value (:value result) :source-result {:session-id session-id :id id}})
+    content))
+
+(defn send-agent-message! [store source-sid target content opts]
+  (let [{:keys [submission-id wake? kind]} opts
+        _ (require-uuid! submission-id :submission-id)
+        _ (value/check! (or (nil? wake?) (instance? Boolean wake?)) :invalid-arguments
+                        "Wake policy must be boolean" {})
+        kind (or kind :peer)
+        _ (value/check! (contains? #{:peer :human} kind) :invalid-agent-message
+                        "Message kind must be peer or human" {:kind kind})
+        payload {:target target :content content :kind kind :wake? (boolean wake?)}]
+    (checked-agent-content content)
+    (transact! store
+      (fn [connection]
+        (let [source (route connection source-sid)
+              existing (existing-submission! connection source-sid submission-id :send payload)]
+          (if existing
+            {:receipt (:receipt existing) :events []}
+            (let [source (active-route! connection source-sid)
+                  targets (resolve-agent-target connection source target)
+                  _ (value/check! (seq targets) :agent-target-not-found
+                                  "No agents are available for this message" {:target target})
+                  _ (doseq [{:keys [session-id]} targets] (active-route! connection session-id))
+                  content (portable-message-content connection source content)
+                  serialized (checked-agent-content content)
+                  id (util/id)
+                  now (util/now)
+                  recipients (mapv :session-id targets)
+                  receipt {:id id :submission-id submission-id :from source-sid
+                           :recipients recipients :status :accepted}
+                  _ (execute-sql! connection
+                                  "INSERT INTO agent_messages(id,root_id,sender_id,kind,content,source_operation_id,created_at,wake) VALUES(?,?,?,?,?,?,?,?)"
+                                  [id (:root-id source) source-sid (name kind) serialized nil now
+                                   (if wake? 1 0)])
+                  _ (doseq [recipient targets]
+                      (execute-sql! connection
+                                    "INSERT INTO agent_deliveries(message_id,recipient_id,context_id,status) VALUES(?,?,?,'pending')"
+                                    [id (:session-id recipient) (:context-id recipient)]))
+                  _ (save-submission! connection source-sid submission-id :send payload receipt)
+                  events (mapv #(routing-event! connection (:root-id source) %
+                                                :agent/message {:message-id id :from source-sid :kind kind})
+                               recipients)]
+              {:receipt receipt :events events})))))))
+
+(defn- message-row [^ResultSet rs]
+  {:id (.getString rs "id")
+   :seq (.getLong rs "seq")
+   :root-id (.getString rs "root_id")
+   :from (.getString rs "sender_id")
+   :kind (keyword (.getString rs "kind"))
+   :content (decode (.getString rs "content"))
+   :operation-id (.getString rs "source_operation_id")
+   :created-at (.getLong rs "created_at")
+   :wake? (pos? (.getInt rs "wake"))})
+
+(defn- delivery-row [^ResultSet rs]
+  {:session-id (.getString rs "recipient_id")
+   :context-id (.getString rs "context_id")
+   :status (keyword (.getString rs "status"))
+   :entry-id (.getString rs "entry_id")
+   :operation-id (.getString rs "operation_id")})
+
+(defn agent-delivery
+  "Receipt page. :internal? permits up to 500 recipients for managed waits; public callers cap at 20."
+  [store viewer-sid message-id opts]
+  (require-uuid! message-id :message-id)
+  (store-read store
+    (fn [connection]
+      (let [viewer (route connection viewer-sid)
+            [limit offset] (if (:internal? opts)
+                             (let [limit (page-limit (:limit opts) 8)
+                                   offset (or (:offset opts) 0)]
+                               (value/check! (and (integer? offset) (not (neg? offset)))
+                                             :invalid-arguments "Page offset must be non-negative" {})
+                               [limit offset])
+                             (compact-agent-page opts))
+            message (first
+                     (query-sql
+                      connection
+                      (str "SELECT m.sender_id,m.kind"
+                           (when (:detailed? opts) ",m.content")
+                           " FROM agent_messages m WHERE m.id=? AND m.root_id=? "
+                           "AND (m.sender_id=? OR EXISTS (SELECT 1 FROM agent_deliveries d "
+                           "WHERE d.message_id=m.id AND d.recipient_id=?))")
+                      [message-id (:root-id viewer) viewer-sid viewer-sid]
+                      (fn [^ResultSet rs]
+                        (cond-> {:from (.getString rs "sender_id")
+                                 :kind (keyword (.getString rs "kind"))}
+                          (:detailed? opts) (assoc :content (decode (.getString rs "content")))))))
+            _ (value/check! message :agent-message-not-found
+                            "Agent message is not available" {:message-id message-id})
+            counts (first (query-sql connection
+                                     (str "SELECT COUNT(*) AS total,"
+                                          "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending,"
+                                          "SUM(CASE WHEN status='delivered' THEN 1 ELSE 0 END) AS delivered,"
+                                          "SUM(CASE WHEN status='superseded' THEN 1 ELSE 0 END) AS superseded "
+                                          "FROM agent_deliveries WHERE message_id=?")
+                                     [message-id]
+                                     (fn [^ResultSet rs]
+                                       {:total (.getLong rs "total")
+                                        :pending (.getLong rs "pending")
+                                        :delivered (.getLong rs "delivered")
+                                        :superseded (.getLong rs "superseded")})))
+            total (:total counts)
+            deliveries (query-sql
+                        connection
+                        (str "SELECT d.recipient_id,d.status,d.entry_id,d.operation_id,"
+                             "o.status AS operation_status FROM agent_deliveries d "
+                             "LEFT JOIN operations o ON o.id=d.operation_id "
+                             "WHERE d.message_id=? ORDER BY d.recipient_id LIMIT ? OFFSET ?")
+                        [message-id limit offset]
+                        (fn [^ResultSet rs]
+                          {:session-id (.getString rs "recipient_id")
+                           :status (keyword (.getString rs "status"))
+                           :entry-id (.getString rs "entry_id")
+                           :operation-id (.getString rs "operation_id")
+                           :operation-status (some-> (.getString rs "operation_status") keyword)}))]
+        (merge {:id message-id :from (:from message) :kind (:kind message)
+                :status (cond (= total (:delivered counts)) :delivered
+                              (= total (:superseded counts)) :superseded
+                              (= total (:pending counts)) :pending
+                              :else :partial)
+                :deliveries deliveries :total-recipients total
+                :next-offset (when (< (+ offset (count deliveries)) total)
+                               (+ offset (count deliveries)))}
+               (select-keys message [:content]))))))
+
+(defn agent-messages [store viewer-sid opts]
+  (store-read store
+    (fn [connection]
+      (let [viewer (route connection viewer-sid)
+            sid (or (:session-id opts) viewer-sid)
+            selected (route connection sid)
+            _ (value/check! (= (:root-id viewer) (:root-id selected))
+                            :agent-target-forbidden "Cannot inspect a foreign team" {})
+            before (or (:before opts) Long/MAX_VALUE)
+            limit (page-limit (:limit opts) 50)
+            _ (value/check! (and (integer? before) (pos? before)) :invalid-arguments
+                            "Message cursor must be a positive sequence" {})]
+        (mapv (fn [message]
+                (assoc (select-keys message [:id :seq :from :kind :content :created-at :operation-id])
+                       :recipients (query-sql connection
+                                              "SELECT recipient_id FROM agent_deliveries WHERE message_id=? ORDER BY recipient_id"
+                                              [(:id message)] #(.getString ^ResultSet % "recipient_id"))
+                       :deliveries (query-sql connection
+                                              "SELECT * FROM agent_deliveries WHERE message_id=? ORDER BY recipient_id"
+                                              [(:id message)] delivery-row)))
+              (query-sql connection
+                         (str "SELECT m.* FROM agent_messages m WHERE m.seq<? AND m.root_id=? "
+                              "AND (m.sender_id=? OR EXISTS (SELECT 1 FROM agent_deliveries d "
+                              "WHERE d.message_id=m.id AND d.recipient_id=?)) ORDER BY m.seq DESC LIMIT ?")
+                         [before (:root-id viewer) sid sid limit] message-row))))))
+
+(defn- pending-deliveries [connection sid limit]
+  (query-sql connection
+             (str "SELECT m.* FROM agent_messages m JOIN agent_deliveries d ON d.message_id=m.id "
+                  "WHERE d.recipient_id=? AND d.status='pending' ORDER BY m.seq LIMIT ?")
+             [sid limit] message-row))
+
+(defn pending-agent-messages? [store sid]
+  (store-read store
+    (fn [connection]
+      (let [state (route connection sid)]
+        (boolean
+         (and (try (active-route! connection sid) true
+                   (catch clojure.lang.ExceptionInfo _ false))
+              (scalar connection
+                      "SELECT 1 FROM agent_deliveries WHERE recipient_id=? AND status='pending' AND context_id=? LIMIT 1"
+                      [sid (:context-id state)])))))))
+
+(defn- eligible-wake-route [connection sid]
+  (let [state (route connection sid)
+        valid? (try (active-route! connection sid) true
+                    (catch clojure.lang.ExceptionInfo _ false))]
+    (when (and valid? (not (:paused? state))
+               (scalar connection
+                       (str "SELECT 1 FROM agent_deliveries d JOIN agent_messages m ON m.id=d.message_id "
+                            "WHERE d.recipient_id=? AND d.context_id=? AND d.status='pending' "
+                            "AND (m.kind='completion' OR m.wake=1 OR ?=1) LIMIT 1")
+                       [sid (:context-id state) (if (:parent-session-id state) 1 0)]))
+      state)))
+
+(defn agent-wake? [store sid]
+  (store-read store #(boolean (eligible-wake-route % sid))))
+
+(defn agent-wake-roots [store]
+  (store-read store
+    (fn [connection]
+      (let [candidates (query-sql
+                        connection
+                        (str "SELECT DISTINCT d.recipient_id FROM agent_deliveries d "
+                             "JOIN agent_messages m ON m.id=d.message_id "
+                             "WHERE d.status='pending' AND "
+                             "(m.kind='completion' OR m.wake=1 OR EXISTS "
+                             "(SELECT 1 FROM agent_routes r WHERE r.session_id=d.recipient_id "
+                             "AND r.parent_session_id IS NOT NULL))")
+                        [] #(.getString ^ResultSet % "recipient_id"))]
+        (vec (into (sorted-set)
+                   (keep #(some-> (eligible-wake-route connection %) :root-id))
+                   candidates))))))
+
+(defn- agent-preview
+  ([content] (agent-preview content :peer))
+  ([content kind]
+   (let [text (if (= :completion kind)
+                (let [reply (get-in content [:result :message/content])
+                      answer (if (string? reply)
+                               reply
+                               (str/join "\n" (keep #(when (= :text (:part/type %)) (:text %)) reply)))
+                      error (get-in content [:error :message])]
+                  (str "Agent " (:name content) " " (name (:status content))
+                       (when (seq answer) (str ": " answer))
+                       (when (and (not (seq answer)) (seq error)) (str ": " error))))
+                (if (string? content) content (pr-str content)))]
+     (if (<= (count text) max-agent-preview)
+       text
+       (str (subs text 0 max-agent-preview)
+            "\n[Preview shortened; read the recipient-owned result for full content.]")))))
+
+(defn deliver-agent-messages! [store sid operation-id]
+  (require-uuid! operation-id :operation-id)
+  (transact! store
+    (fn [connection]
+      (let [operation (or (find-operation connection operation-id)
+                          (value/fail! :operation-not-found
+                                       "Delivery operation does not exist" {:operation-id operation-id}))
+            _ (value/check! (= sid (:session-id operation)) :operation-forbidden
+                            "Delivery operation belongs to another session" {:operation-id operation-id})
+            _ (value/check! (and (contains? #{:run :continue} (:kind operation))
+                                 (= :running (:status operation)))
+                            :invalid-agent-operation
+                            "Agent messages require a running run or continue operation"
+                            {:operation-id operation-id})
+            state (route connection sid)
+            active-state (try (active-route! connection sid) :active
+                              (catch clojure.lang.ExceptionInfo error
+                                (case (:error/code (ex-data error))
+                                  "agent-stopped" :stopped
+                                  "agent-stale-context" :stale
+                                  (throw error))))
+            messages (pending-deliveries connection sid 100)
+            snapshot (require-session connection sid)
+            seq* (volatile! (long (or (scalar connection
+                                             "SELECT MAX(seq) FROM entries WHERE session_id=?"
+                                             [sid]) 0)))
+            result* (volatile! (long (or (scalar connection
+                                                "SELECT MAX(id) FROM results WHERE session_id=?"
+                                                [sid]) 0)))
+            head* (volatile! (:head snapshot))
+            entries (volatile! [])
+            delivered (volatile! [])
+            events (volatile! [])]
+        (doseq [message messages]
+          (let [scope-current? (= (:context-id state)
+                                  (scalar connection
+                                          "SELECT context_id FROM agent_deliveries WHERE message_id=? AND recipient_id=?"
+                                          [(:id message) sid]))]
+            (if (and (= :active active-state) scope-current?)
+              (let [result-id (vswap! result* inc)
+                    content (:content message)
+                    preview (agent-preview content (:kind message))
+                    descriptor {:id result-id :session-id sid :kind :inline
+                                :value content :content preview
+                                :details {:agent/message-id (:id message)
+                                          :agent/from (:from message)
+                                          :agent/kind (:kind message)}
+                                :available? true}
+                    entry {:id (util/id) :session-id sid :parent-id @head*
+                           :seq (vswap! seq* inc) :kind :message
+                           :data {:message/role :user
+                                  :message/content preview
+                                  :message/agent (cond-> {:id (:id message) :from (:from message)
+                                                          :kind (:kind message)}
+                                                   (:operation-id message)
+                                                   (assoc :operation-id (:operation-id message)))
+                                  :message/result descriptor}
+                           :created-at (util/now)}]
+                (execute-sql! connection
+                              "INSERT INTO results(session_id,id,kind,descriptor,created_at) VALUES(?,?,?,?,?)"
+                              [sid result-id "inline" (encode descriptor) (:created-at entry)])
+                (execute-sql! connection
+                              "INSERT INTO entries(id,session_id,parent_id,seq,kind,data,created_at) VALUES(?,?,?,?,?,?,?)"
+                              [(:id entry) sid @head* (:seq entry) "message"
+                               (encode (:data entry)) (:created-at entry)])
+                (execute-sql! connection
+                              "UPDATE agent_deliveries SET status='delivered',entry_id=?,operation_id=? WHERE message_id=? AND recipient_id=?"
+                              [(:id entry) operation-id (:id message) sid])
+                (vreset! head* (:id entry))
+                (vswap! entries conj entry)
+                (vswap! delivered conj (:id message))
+                (vswap! events conj (insert-event! connection sid
+                                                    {:type :entry/committed :data {:entry entry}}))
+                (vswap! events conj (routing-event! connection (:root-id state) sid
+                                                    :agent/message
+                                                    {:message-id (:id message)
+                                                     :status :delivered})))
+              (when (or (= :stale active-state) (not scope-current?))
+                (execute-sql! connection
+                              "UPDATE agent_deliveries SET status='superseded' WHERE message_id=? AND recipient_id=?"
+                              [(:id message) sid])
+                (vswap! events conj (routing-event! connection (:root-id state) sid
+                                                    :agent/message
+                                                    {:message-id (:id message)
+                                                     :status :superseded}))))))
+        (when (seq @entries)
+          (update-session! connection (assoc snapshot :head @head*
+                                             :revision (inc (:revision snapshot))
+                                             :updated-at (util/now))))
+        {:entries @entries :events @events :delivered @delivered}))))
+
+(defn set-agent-paused! [store sid paused?]
+  (value/check! (instance? Boolean paused?) :invalid-arguments
+                "Pause state must be boolean" {})
+  (transact! store
+    (fn [connection]
+      (let [state (ensure-root-route! connection sid)]
+        (execute-sql! connection "UPDATE agent_routes SET paused=? WHERE session_id=?"
+                      [(if paused? 1 0) sid])
+        {:state (public-route (route connection sid))
+         :events [(routing-event! connection (:root-id state) sid
+                                  :agent/changed {:reason :pause :paused? paused?})]}))))
+
+(defn set-agent-stopped! [store sid stopped?]
+  (value/check! (instance? Boolean stopped?) :invalid-arguments
+                "Stop state must be boolean" {})
+  (transact! store
+    (fn [connection]
+      (let [state (ensure-root-route! connection sid)
+            members (agent-descendants* connection sid)]
+        (execute-sql! connection "UPDATE agent_routes SET stopped=? WHERE session_id=?"
+                      [(if stopped? 1 0) sid])
+        {:state (public-route (route connection sid))
+         :events (mapv #(routing-event! connection (:root-id state) % :agent/changed
+                                        {:reason :stop :stopped? stopped?})
+                       members)}))))
+
+(defn agent-result [store viewer-sid target-sid operation-id]
+  (require-uuid! operation-id :operation-id)
+  (store-read store
+    (fn [connection]
+      (let [viewer (route connection viewer-sid)
+            target (route connection target-sid)
+            _ (value/check! (= (:root-id viewer) (:root-id target))
+                            :agent-target-forbidden "Agent belongs to another team" {})
+            op (or (find-operation connection operation-id)
+                   (value/fail! :operation-not-found "Operation does not exist"
+                                {:operation-id operation-id}))]
+        (value/check! (= (:session-id op) target-sid) :operation-forbidden
+                      "Operation does not belong to target agent"
+                      {:operation-id operation-id})
+        (assoc (select-keys op [:session-id :status :result :error :finished-at :created-at])
+               :operation-id operation-id)))))
+
+(defn latest-event-seq [store]
+  (store-read store #(long (or (scalar % "SELECT MAX(seq) FROM events" []) 0))))

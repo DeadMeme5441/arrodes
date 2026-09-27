@@ -6,6 +6,7 @@
             [arrodes.tui.controller.attachments :as attachments]
             [arrodes.tui.controller.catalog :as catalog]
             [arrodes.tui.controller.client :as client]
+            [arrodes.tui.controller.agents :as agents]
             [arrodes.tui.controller.sessions :as sessions]
             [arrodes.tui.controller.submission :as submission]))
 
@@ -27,6 +28,7 @@
 
 (defn event! [app wire-event]
   (let [event (client/decode wire-event)]
+    (agents/observe-event! app event)
     (when (contains? #{:operation/completed :operation/failed :operation/cancelled} (:type event))
       (refresh-project! app))
     (swap! (:state app)
@@ -60,9 +62,12 @@
 
 
 (defn host-request! [app envelope]
-  (let [request {:id (:id envelope)
+  (let [payload (client/decode (:request envelope))
+        request {:id (:id envelope)
                  :request-id (:request-id envelope)
-                 :request (client/decode (:request envelope))}]
+                 :session-id (or (:session-id payload) (:session-id envelope))
+                 :operation-id (or (:operation-id payload) (:operation-id envelope))
+                 :request payload}]
     (swap! (:state app) update :host-requests
            (fn [requests]
              (if (some #(= (:id request) (:id %)) requests)
@@ -152,7 +157,11 @@
 (defn boot-sessions! [app preferred-session-id]
   (-> (sessions/load-sessions! app)
       (.then #(sessions/select-start-session! app % preferred-session-id))
-      (.then (fn [_] (refresh-project! app) (catalog/refresh-catalog! app (catalog/catalog-context app))))))
+      (.then (fn [_]
+               (when-let [sid (client/session-id-from @(:state app))]
+                 (-> (agents/refresh! app sid) (.catch (fn [_] nil))))
+               (refresh-project! app)
+               (catalog/refresh-catalog! app (catalog/catalog-context app))))))
 
 
 (defn boot! [app preferred-session-id]
@@ -238,8 +247,11 @@
 
     :else
     (let [preferred-session-id (when reconnect? (client/session-id-from @(:state app)))
-          _ (swap! (:state app) assoc :connection {:status :starting}
-                   :host-requests [] :widgets-by-session {} :hydrating nil :notice nil)
+          _ (swap! (:state app)
+                   #(-> %
+                        (assoc :connection {:status :starting}
+                               :host-requests [] :widgets-by-session {} :hydrating nil :notice nil)
+                        (update :agents merge {:loading? false :token nil :buffer [] :requested-sid nil})))
           before (-> (client/resolved nil)
                      (.then (fn [_]
                               (if-let [client @(:client app)]
@@ -267,6 +279,7 @@
                                  (update :connection (fn [connection]
                                                        (-> connection (assoc :status :ready) (dissoc :error))))
                                  client/operation-notice))
+                     (agents/reconcile-submissions! app)
                      result)))
                (fn [connect-error]
                  (when-not @(:closed? app)
@@ -304,6 +317,7 @@
    :closed? (atom false)
    :state
    (atom {:connection {:status :starting}
+          :agents {:root-id nil :agents [] :cursor 0 :submissions {}}
           :view (model/empty-state)
           :sessions []
           :models []
@@ -404,7 +418,33 @@
                                                (select-keys data [:offset :limit :after :tail?]))) (.then client/decode))
       :refresh (if sid (sessions/hydrate-session! app sid false) (client/resolved (:view state)))
       :sessions (sessions/load-sessions! app)
-      :switch-session (sessions/switch-session! app (:id data))
+      :switch-session (-> (sessions/switch-session! app (:id data))
+                          (.then (fn [snapshot]
+                                   (-> (agents/refresh! app (:id data))
+                                       (.then (fn [_] snapshot))))))
+      :agents (do (agents/reconcile-submissions! app)
+                  (agents/refresh! app sid))
+      :agent-open (-> (sessions/switch-session! app (:id data))
+                      (.then (fn [snapshot]
+                               (-> (agents/refresh! app (:id data))
+                                   (.then (fn [_] snapshot))))))
+      :agent-start (agents/start! app data)
+      :agent-send (agents/send! app data)
+      :agent-messages (-> (client/call! app "agent.messages" {:session-id sid :limit 100})
+                          (.then client/decode))
+      :agent-result (-> (client/call! app "agent.result"
+                                        {:session-id sid :agent-id (:id data)
+                                         :operation-id (:operation-id data)})
+                        (.then client/decode))
+      :agent-cancel (-> (client/mutation! app "agent.cancel"
+                                         (client/non-nil-map
+                                          {:session-id sid :agent-id (:id data)
+                                           :operation-id (:operation-id data)}))
+                        (.then client/decode))
+      :agent-stop (-> (client/mutation! app "agent.stop" {:session-id sid :agent-id (:id data)})
+                      (.then client/decode))
+      :agent-resume (-> (client/mutation! app "agent.resume" {:session-id sid :agent-id (:id data)})
+                        (.then client/decode))
 
       :new-session
       (if (and (not= false (get-in app [:options :setup?]))

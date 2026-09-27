@@ -78,9 +78,10 @@ The initializer may return a cleanup function or a map containing `:close`. It m
 Registered functions receive one argument map. They may return a native value or a structured result with `:value`, `:content`, `:details`, and optional `:error?`. Wrappers apply argument validation, hooks, permissions, effect locking, cancellation, progress, and retention. They remain Clojure functions rather than separate provider-visible tools.
 
 Descriptors may also supply `:returns {:description "..." :example ...}` and
-`:examples [{:source "..."}]`. These are exposed through `registered-tools`;
-wrapper Vars carry the function's description and return documentation in metadata.
-Keep native values distinct from their human-readable `:content` representation.
+`:examples [{:source "..."}]`. `(help "function-name")` shows a bounded native
+contract; `(help "function-name" {:detailed? true})` shows its complete
+registered schema. Wrapper Vars carry description and return documentation
+in metadata. Keep native values distinct from human-readable `:content`.
 
 Tool replacement must be explicit: set `:replace? true` to override an existing registered function. Ordinary duplicate names fail. When an override is withdrawn, Arrodes restores the nearest previous implementation owned by another activation.
 

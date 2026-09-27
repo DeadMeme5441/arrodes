@@ -113,6 +113,24 @@ arrodes "Explain the failing command, fix the cause, and verify the result."
 
 Arrodes keeps one live evaluator per session. Function calls appear compactly in the conversation; select a row to inspect its summary, output, native value, or evaluation source. Pending follow-ups can be edited or removed before delivery.
 
+### Session agents (development branch)
+
+On `feature/session-agents`, the model can call `agents/start!` inside the same
+persistent REPL to start an independently evaluated child session. Children and
+their parent exchange addressed messages, inspect operation-specific outcomes,
+and continue work without turning function jobs into agents. `/agents` opens a
+team browser for navigation, messages, results and explicit cancel/stop/resume;
+the ordinary composer retains its unsent text across navigation. Children share
+the working checkout and process permissions, **not** the parent's live REPL
+bindings. Foreground cancellation does not cancel accepted jobs or children.
+See the [agent/session contract](docs/SESSIONS.md). **Storage cutover:** on
+this unreleased branch, an incompatible *recognized Arrodes* SQLite store
+(including schemas 3 and 4) is automatically deleted and recreated as schema 5.
+Its prior sessions, history, jobs and retained results are permanently lost;
+export needed history with a compatible earlier build before launching.
+Foreign SQLite databases, credentials, settings and unrelated files are
+not reset. This is not a migration and requires no new `--data-dir`.
+
 ### Keys
 
 | Action | Key |
@@ -123,7 +141,10 @@ Arrodes keeps one live evaluator per session. Function calls appear compactly in
 | Close a panel; otherwise request cancellation | `Esc` |
 | Sessions | `F2` |
 | Commands | `F3` or `Ctrl+P` |
+| Agent roster (development branch) | `F4` |
 | Move to the next pane | `F6` |
+| Compose a message in `/agents` (development branch) | `F7` |
+| Inspect messages in `/agents` (development branch) | `F8` |
 | Attach a project file | `@` |
 | Discover commands | `/` |
 | Scroll without following output | `PgUp` / `PgDn` |
@@ -142,6 +163,8 @@ Arrodes keeps one live evaluator per session. Function calls appear compactly in
 | `/history` | Inspect history and create a branch |
 | `/refresh` | Reconcile recorded session state without repeating a mutation |
 | `/jobs` | Inspect and cancel background function jobs; read output and native results |
+| `/agents` | Browse and control the agent team (development branch) |
+| `/parent` | Return from a child conversation (development branch) |
 | `/pending` | Edit or drop queued input |
 | `/attach`, `/attachments` | Add or remove project-file context |
 | `/providers`, `/setup`, `/login` | Manage provider connections and sign-in |

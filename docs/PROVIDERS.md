@@ -4,6 +4,17 @@
 exposes one provider-visible action, `repl`; registered coding/MCP/extension functions
 remain ordinary Clojure functions inside the evaluator.
 
+Session agents use that same `repl` action in their own session/evaluator; `agents/*`
+functions are ordinary functions in a REPL namespace, not a second provider action. A child takes
+a selected configuration snapshot at launch; changing its parent's model later does
+not change the child's provider/model. Credentials remain resolved through the
+normal provider credential store rather than copied into child launch metadata.
+
+Provider-visible history labels delegated tasks, attributed peer messages and
+agent completions as untrusted data rather than privileged instructions.
+Ordinary human messages retain a distinct label. Tool-call/result ordering
+still follows the single-`repl` protocol.
+
 ## Authentication and discovery
 
 Authentication is explicit. Credentials belong in the authentication store or supported

@@ -179,22 +179,44 @@
           (is (= 2 (count (store/jobs (:store reopened) sid))))
           (finally (runtime/close! reopened)))))))
 
-(deftest noncurrent-store-formats-are-rejected-without-changing-the-database
-  (doseq [version [0 1 2 4]]
+(deftest incompatible-stores-reset-without-erasing-settings-or-neighbors
+  (doseq [version [0 1 2 3 4 6]]
     (let [directory (session-fixtures/temp-directory)
           path (str directory "/sessions.sqlite")
-          storage (store/open! {:path path})]
+          artifact-dir (str path ".artifacts")
+          settings (java.nio.file.Path/of directory (into-array String ["config" "settings.edn"]))
+          neighbor (java.nio.file.Path/of directory (into-array String ["notes.txt"]))
+          storage (store/open! {:path path})
+          sid (:id (store/create-session! storage {:cwd directory :name "Prior history"}))
+          artifact (artifacts/put! storage sid "old artifact" {:name "old"})
+          artifact-path (java.nio.file.Path/of artifact-dir
+                                               (into-array String [(subs (:sha256 artifact) 0 2)
+                                                                   (:sha256 artifact)]))]
       (store/close! storage)
       (try
+        (java.nio.file.Files/createDirectories (.getParent settings)
+                                                (make-array java.nio.file.attribute.FileAttribute 0))
+        (java.nio.file.Files/writeString settings "credentials belong to configuration"
+                                         (make-array java.nio.file.OpenOption 0))
+        (java.nio.file.Files/writeString neighbor "retain this neighbor"
+                                         (make-array java.nio.file.OpenOption 0))
         (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
                     statement (.createStatement connection)]
           (.execute statement (str "PRAGMA user_version=" version)))
-        (let [before (java.nio.file.Files/readAllBytes (java.nio.file.Path/of path (make-array String 0)))
-              error (try (store/open! {:path path}) nil (catch clojure.lang.ExceptionInfo error error))
-              after (java.nio.file.Files/readAllBytes (java.nio.file.Path/of path (make-array String 0)))]
-          (is (= "unsupported-store-format" (:error/code (ex-data error))))
-          (is (= version (:found (ex-data error))))
-          (is (java.util.Arrays/equals before after)))
+        (let [reopened (store/open! {:path path})]
+          (try
+            (is (empty? (store/list-sessions reopened {})))
+            (is (= 5 (store/store-read reopened
+                        (fn [connection]
+                          (with-open [statement (.createStatement connection)
+                                      result (.executeQuery statement "PRAGMA user_version")]
+                            (.next result)
+                            (.getInt result 1)))))
+                "A replacement must use the current schema")
+            (finally (store/close! reopened))))
+        (is (false? (java.nio.file.Files/exists artifact-path (make-array java.nio.file.LinkOption 0))))
+        (is (= "credentials belong to configuration" (java.nio.file.Files/readString settings)))
+        (is (= "retain this neighbor" (java.nio.file.Files/readString neighbor)))
         (finally (session-fixtures/remove-directory! directory))))))
 
 (deftest capacity-rejection-does-not-run-the-function

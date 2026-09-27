@@ -93,6 +93,19 @@ Supported session-default fields are:
 
 `provider-retries` is bounded to five retries at runtime. A false `:fallback-model?` prevents silent model substitution.
 
+Session-agent runtime limits are configured under runtime `:settings`: `:operation-limit`
+(default 32, 1–128 admitted foreground operations), `:agent-limit` (default 32,
+range 1–128 team members), and `:agent-max-depth` (default 4, range 1–16
+delegation levels).
+Operation admission counts running and waiting operations; it is independent of
+`:job-limit` for background functions.
+`operation-threads` is not a compatibility spelling for `operation-limit`.
+When launched, a child inherits a selected snapshot of its parent's session
+configuration unless its `agents/start!`/`agent.start` options override it. Future
+parent model changes do not mutate child configuration. Provider credentials remain
+in the usual provider credential store, not in a child launch record; a child
+loads project resources and trust through its own session/evaluator lifecycle.
+
 Automatic session naming is enabled by default. Set `:auto-title? false` to disable
 both the initial local name and background title generation. `:title-model` selects
 the exact model ID for naming; `:title-provider` optionally selects another
@@ -175,5 +188,9 @@ Arrodes never moves, merges, or overwrites them. Choose a current-format applica
 home explicitly when necessary.
 
 An implicit `HOME/data` directory is not selected as project history. An explicit
-`--data-dir PATH` may point to any current-format store or a fresh directory. Older
-SQLite schemas are rejected, not converted. No existing files are deleted.
+`--data-dir PATH` selects one data directory. If its **recognized Arrodes** SQLite
+store has an incompatible schema, Arrodes automatically resets its exclusively
+owned session database and retained artifacts to fresh schema 5. Prior
+sessions/results are lost. A foreign SQLite database is rejected intact;
+credentials, settings and unrelated files remain outside this reset. This is
+not a migration and does not require a new `--data-dir` flag or path.

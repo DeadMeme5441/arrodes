@@ -881,7 +881,7 @@
 
 (defn create!
   "Create a session's functions, evaluation state, and result/artifact helpers."
-  [{:keys [session-id cwd store config emit! get-session job-manager]}]
+  [{:keys [session-id cwd store config emit! get-session job-manager agent-manager]}]
   (value/check! (and (string? session-id) (not (str/blank? session-id))) :invalid-session-id
                "Capability registry requires a session id" {})
   (value/check! (and (string? cwd) (not (str/blank? cwd))) :invalid-cwd
@@ -896,7 +896,7 @@
         _ (binding [*ns* ns-object] (clojure.core/refer 'clojure.core))
         registry (map->Registry
                    {:session-id session-id :cwd (util/canonical-path cwd) :store store
-                    :config (or config {}) :job-manager job-manager
+                    :config (or config {}) :job-manager job-manager :agent-manager agent-manager
                     :emit! (if emit! (bound-fn [event] (emit! event)) identity)
                     :get-session (or get-session (fn [] nil)) :namespace namespace :namespace-object ns-object
                     :generation (util/id)
@@ -912,7 +912,7 @@
                    :register! #(register! registry %)
                    :registered-implementation #(some-> (get @(:capabilities registry) %) :fn)
                    :invoke-value! #(invoke-value! registry %1 %2)
-                   :registered-tools #(selected-catalog registry)
+                   :selected-tools #(selected-catalog registry)
                    :result-value #(result-value registry %)
                    :result-info #(dissoc (artifacts/result store session-id %) :value)
                    :result-page (fn [opts]

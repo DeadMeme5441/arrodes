@@ -1,7 +1,10 @@
 (ns arrodes.session-test
   (:require [arrodes.artifacts :as artifacts]
+            [arrodes.commands :as commands]
+            [arrodes.runtime :as runtime]
             [arrodes.store :as store]
             [arrodes.platform :as u]
+            [clojure.data.json :as json]
             [clojure.test :refer [deftest is testing]])
   (:import (java.nio.charset StandardCharsets)
            (java.nio.file Files OpenOption Path)
@@ -130,12 +133,14 @@
         sid (:id (new-session first-store))]
     (try
       (store/commit! first-store sid {:entries [(message-entry :user "A durable request")]})
-      (let [artifact (artifacts/put! first-store sid "A durable result" {:name "result"})]
+      (let [artifact (artifacts/put! first-store sid "A durable result" {:name "result"})
+            cursor (:cursor (artifacts/read! first-store sid (:id artifact) {:limit 2}))]
         (store/close! first-store)
         (let [reopened (store/open! options)]
           (try
             (is (= [{:message/role :user :message/content "A durable request"}] (context-text reopened sid)))
             (is (= "A durable result" (:content (artifacts/read! reopened sid (:id artifact) {}))))
+            (is (= "durable result" (:content (artifacts/read! reopened sid (:id artifact) {:after cursor}))))
             (finally (store/close! reopened)))))
       (finally (store/close! first-store) (remove-directory! directory)))))
 
@@ -162,6 +167,75 @@
              (vec (.decode (java.util.Base64/getDecoder) ^String (:content binary-page)))))
       (is (= 5 (:next-offset binary-page)))
       (is (true? (:truncated? binary-page))))))
+
+(deftest artifact-cursors-page-retained-content-without-consuming-other-readers
+  (with-store [database]
+    (let [sid (:id (new-session database))
+          other (:id (new-session database))
+          text (artifacts/put! database sid "Aé中🙂Z" {})
+          binary (artifacts/put! database sid (byte-array [0 1 2 3 -1 127]) {:kind :binary})
+          empty-artifact (artifacts/put! database sid "" {})
+          text-first (artifacts/read! database sid (:id text) {:limit 3})
+          text-second (artifacts/read! database sid (:id text) {:after (:cursor text-first) :limit 2})
+          text-last (artifacts/read! database sid (:id text) {:after (:cursor text-second) :limit 2})
+          binary-first (artifacts/read! database sid (:id binary) {:limit 2})
+          binary-second (artifacts/read! database sid (:id binary) {:after (:cursor binary-first) :limit 2})
+          binary-last (artifacts/read! database sid (:id binary) {:after (:cursor binary-second) :limit 2})
+          decode-page #(vec (.decode (java.util.Base64/getDecoder) ^String (:content %)))
+          error-code (fn [session artifact opts]
+                       (try (artifacts/read! database session artifact opts)
+                            nil
+                            (catch clojure.lang.ExceptionInfo error
+                              (:error/code (ex-data error)))))]
+      (is (= "Aé中🙂Z" (str (:content text-first) (:content text-second) (:content text-last))))
+      (is (= text-second (artifacts/read! database sid (:id text) {:after (:cursor text-first) :limit 2})))
+      (is (= {:session-id sid :artifact-id (:id text) :offset 4} (:cursor text-first)))
+      (is (= (:next-offset text-first) (get-in text-first [:cursor :offset])))
+      (is (nil? (:cursor text-last)))
+      (is (= [0 1 2 3 -1 127] (vec (mapcat decode-page [binary-first binary-second binary-last]))))
+      (is (= binary-second (artifacts/read! database sid (:id binary) {:after (:cursor binary-first) :limit 2})))
+      (is (nil? (:cursor binary-last)))
+      (is (nil? (:cursor (artifacts/read! database sid (:id empty-artifact) {}))))
+      (is (= "" (:content (artifacts/read! database sid (:id text) {:offset 100}))))
+      (is (nil? (:cursor (artifacts/read! database sid (:id text) {:offset 100}))))
+      (doseq [cursor [nil {} {:session-id sid :artifact-id (:id text) :offset 0}
+                      (assoc (:cursor text-first) :offset 100)
+                      (assoc (:cursor text-first) :extra true)
+                      (assoc (:cursor text-first) :artifact-id (:id binary))
+                      (assoc (:cursor text-first) :session-id other)]]
+        (is (= "invalid-artifact-cursor"
+               (error-code sid (:id text) {:after cursor}))))
+      (is (= "invalid-artifact-page"
+             (error-code sid (:id text) {:after (:cursor text-first) :offset 4})))
+      (is (= "artifact-forbidden"
+             (error-code other (:id text) {:after (:cursor text-first)}))))))
+
+(deftest artifact-continuation-crosses-repl-and-rpc-with-native-cursors
+  (let [directory (temp-directory)
+        rt (runtime/open! {:cwd directory :home (str directory "/home")
+                           :data-dir (str directory "/data")
+                           :complete-fn (fn [_ _] nil)})]
+    (try
+      (let [sid (:id (runtime/create-session! rt {:name "Artifact paging" :config config}))
+            artifact (artifacts/put! (:store rt) sid "abcdef" {})
+            params {:session-id sid :artifact-id (:id artifact)}
+            first-page (commands/dispatch! rt "artifact.read" (assoc params :limit 2))
+            repl-page (:value (runtime/evaluate!
+                               rt sid (pr-str (list 'artifact-page (:id artifact)
+                                                    {:after (:cursor first-page) :limit 2}))))
+            wire-cursor (-> repl-page :cursor commands/public-value json/write-str
+                            (json/read-str :key-fn keyword))
+            last-page (commands/dispatch! rt "artifact.read"
+                                          (assoc params :after wire-cursor :limit 2))]
+        (is (= "abcdef" (str (:content first-page) (:content repl-page) (:content last-page))))
+        (is (nil? (:cursor last-page)))
+        (is (= "invalid-artifact-page"
+               (try (commands/dispatch! rt "artifact.read"
+                                        (assoc params :after wire-cursor :offset 1))
+                    nil
+                    (catch clojure.lang.ExceptionInfo error
+                      (:error/code (ex-data error)))))))
+      (finally (runtime/close! rt) (remove-directory! directory)))))
 
 (deftest file-artifact-page-detects-same-size-corruption
   (with-store [database]

@@ -13,9 +13,10 @@ results. The UI combines a consistent snapshot, durable events and transient out
 
 | Owner | Owns |
 | --- | --- |
-| Runtime | Store, executor, session handles and foreground-operation admission |
+| Runtime | Store, admitted operation workers, session coordination, session handles and foreground-operation admission |
+| Agent service | Session-backed delegation, addressed message wake policy and managed waiting; uses the runtime/store, not a second provider loop |
 | Session handle | Evaluator namespace, function registry, provider manager and resource activation |
-| Job service | Session-owned function workers, independent cancellation/output, child cleanup, durable outcomes |
+| Job service | Session-owned function workers, independent cancellation/output, child *function-job* cleanup, durable outcomes |
 | Operation | Cancellation, worker lifetime, usage and queued-input delivery boundaries |
 | Registry | Evaluation lock, native results, function wrappers and owned closeable resources |
 | Resource activation | Attributed extension contributions, cleanup and lazy MCP clients |
@@ -24,6 +25,16 @@ results. The UI combines a consistent snapshot, durable events and transient out
 
 The evaluator is live execution state. The session is durable conversation/configuration
 state. A model change or compaction must not quietly replace the evaluator.
+
+Each agent is a session with its own persistent evaluator and initial operation.
+`agents` is installed next to `jobs` in the REPL registry; the provider still exposes
+only `repl`. Accepted child operations each have a schedulable worker within a
+bounded admission limit, so a parent waiting in Clojure cannot strand its child
+behind its own worker. Peer messages and terminal child outcomes are committed
+durably, delivered at safe provider/tool/turn boundaries, and acknowledged with
+their history entry. Delivery does not consume user queue items or job outcomes.
+The root/team roster and `:agent/changed`/`:agent/message` summaries are projections
+of those records, not an independent lifecycle owner.
 
 ## TUI modules
 
@@ -45,6 +56,15 @@ SQLite transactions commit canonical entries, session changes, queue changes,
 operations and events. Artifacts store larger immutable content. Result descriptors
 honestly distinguish inline, artifact-backed, live-only and unavailable values.
 Streaming text/progress is transient; it cannot become a competing durable history.
+
+Startup takes an exclusive file-backed store lock. Schema-5 validation
+resets an incompatible **recognized Arrodes** store by removing its owned
+artifacts and SQLite files before fresh initialization, with a durable
+reset marker for interrupted cleanup. It does not replay effects, migrate
+history, clear credentials/settings or delete unrelated neighbors.
+Foreign databases, unsafe paths, shared artifact roots, corruption and lock
+contention fail instead of broadening the destructive scope. See the
+[format contract](COMPATIBILITY.md).
 
 `session.view` provides an atomic snapshot and event cursor. UI hydration buffers events,
 replays activity through the cursor, then applies later events without duplicating entries
@@ -69,5 +89,6 @@ lock for job cleanup; incomplete cleanup preserves the old registry and store.
 
 Model-step boundaries append completion context and acknowledge those records in one
 transaction. These entries use structured retained descriptors so fork/import can remap
-result IDs. UI inspection does not consume model notifications. No idle model wakeup or
-subagent execution is introduced.
+result IDs. UI inspection does not consume model notifications. Idle jobs notify the
+UI without starting a model call; **only eligible agent messages and completions**
+can trigger the separate policy-controlled agent wake path.

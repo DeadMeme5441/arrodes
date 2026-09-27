@@ -1,6 +1,9 @@
 # Sessions and results
 
-A session is a durable conversation plus configuration, history branches, queued input, operations, and retained results. Each live session also has an evaluator namespace for composing coding functions and inspecting native values.
+A session is a durable conversation plus configuration, history branches, queued input,
+operations, and retained results. Each live session has its own evaluator namespace
+for composing coding functions and inspecting native values. A delegated agent is
+another session in the root session's team, not a job or shared evaluator.
 
 ## Create, switch, and resume
 
@@ -51,6 +54,17 @@ Over RPC, the corresponding methods are `session.create`, `session.list`, `sessi
 
 Cancellation is a request, not an undo operation. A command or file edit that already completed remains completed. Delivered queue items cannot be edited or resurrected.
 
+Cancelling a foreground operation pauses automatic agent wake for that session;
+accepted background function jobs and independently running child sessions continue.
+An already-cancelled invocation cannot start another managed job or agent, send
+new agent input, or resume an agent. These APIs check the invocation's cancellation
+token even if its Clojure code catches a thread interruption. Cleanup controls
+remain available; arbitrary local code is still not a sandboxed transaction.
+Explicit `session.run`/`session.continue` or `agents/resume!` resumes its routing.
+Use a separate agent tree stop to close delegation/wake admission before cancelling
+descendant operations and session-owned jobs. Cancellation and shutdown wait for
+actual worker exit before releasing owned live resources.
+
 RPC integrations receive durable operation receipts from `session.run`, `session.continue`, and `session.compact`. Track them with `operation.inspect` or `operation.wait`; control them with the operation or session cancellation, steering, and follow-up methods.
 
 ## History and branches
@@ -60,6 +74,11 @@ RPC integrations receive durable operation receipts from `session.run`, `session
 **Branching is not filesystem undo.** It does not revert edits, shell commands, network calls, or any other external effect. Review or restore files with the appropriate version-control or filesystem tools.
 
 Context compaction also does not delete the original history. It changes the active model context while preserving durable records for inspection and export.
+
+Branch movement advances the session's routing context. Old-context child returns
+and pending peer deliveries are superseded rather than injected into the new path;
+off-context children remain inspectable and may continue independently. Compaction
+does not change routing context.
 
 Automatic compaction defaults to 85% of the selected model's context window and
 uses the latest completed provider call's reported usage. Each completion replaces
@@ -117,10 +136,40 @@ Advanced evaluation is available through `/eval`. For example:
 
 ### Working in the REPL
 
-Discover the compact function catalog with `(registered-tools {:brief? true})`,
-then inspect one contract with `(registered-tools "grep")`. Contracts include
-inputs, native return shapes, limits, errors and examples where useful. Calling
-`registered-tools` without arguments returns the full catalog.
+Start with `(help)` for a small group/count overview. Page one group with
+`(help {:group "coding" :query "grep" :offset 0 :limit 8})` (maximum 20),
+then inspect one native Clojure function contract with `(help 'grep)` or
+`(help "agents/start!")`. Add `{:detailed? true}` to a named lookup only
+when its full registered schema or native diagnostics are needed. The catalog
+includes selected coding and extension functions, jobs, agents, and REPL
+value/workspace/artifact helpers; unselected functions are not advertised.
+
+`(help)` also lists available workflow trailheads without loading their recipes:
+
+| Selector | Workflow |
+| --- | --- |
+| `(help {:workflow "background"})` | Start, observe, retrieve or cancel a function job |
+| `(help {:workflow "delegation"})` | Launch, reconcile, message, wait and stop a child session |
+| `(help {:workflow "failure"})` | Inspect partial execution and known receipts before another mutation |
+| `(help {:workflow "results"})` | Inspect bindings, retained values and paged output |
+
+Recipes are inert guidance, not executable workflows. Evaluate their steps separately
+and choose the branch matching the observed state. Only recipes whose native helpers
+are installed are advertised.
+
+Ordinary `def`/`defn` bindings appear in `(workspace)`, not the help catalog.
+An evaluation returns the last expression only: use `let` and a final map to
+bundle useful values, or `prn` for explicit output.
+
+Keep batches small and return only what is useful:
+
+```clojure
+{:contract (help "read")
+ :sample (read {:path "src/example.clj" :limit 20})}
+```
+
+Bind a large detailed value first, then select fields in later expressions instead
+of printing the whole record. No intermediate forms are automatically displayed.
 
 Search and listing functions return structured data only:
 
@@ -158,12 +207,31 @@ the number of completed top-level forms and the failing form's index/phase; effe
 before a failure remain in place. Reader, evaluation and printing failures are
 distinguished. `*e` is still the latest live exception, while retained failure
 details remain inspectable after another error or evaluator reset.
+The failing form may itself have produced effects even when zero top-level forms
+completed. Retained call details can contain effect receipts, but neither the completed
+form count nor those receipts are a complete effect log. Inspect relevant external state
+and reconcile known agent submission IDs before deliberately issuing another mutation.
+
+Individual inspection responses expose a small `:next` map of **inert Clojure source
+strings**. Copy the action you intend; inspecting a response never executes its hints.
+`result-info` links to an available value, artifact pages, or failure reconciliation;
+failed/unavailable results do not advertise a successful value read. Job and agent
+inspection link their distinct identities without inventing a universal task handle.
+Hints describe the inspection snapshot, not guaranteed future availability. Result
+integers remain local to the inspecting session; do not transplant them to another
+session. Roster/result lists remain compact rather than repeating navigation per row.
 
 `(results {:limit 20})` lists references newest first. Pass its `:next-before-id`
 as `:before-id` for the next page; listing does not load artifact values.
-`(artifact-page "id" {:offset 1 :limit 4096})` reads retained content without
-rerunning the original operation. Shell output beyond its hard retention cap
-cannot be recovered; truncation flags and return documentation identify that limit.
+`(def page (artifact-page "id" {:limit 4096}))` reads retained content without
+rerunning the original operation. While `(:cursor page)` is non-nil, continue with
+`(def page (artifact-page "id" {:after (:cursor page) :limit 4096}))`.
+Artifact cursors are reusable, session/artifact-scoped positions; they survive restart
+with retained content and are nil at EOF. They do not consume data or grant access.
+Choose either `:after` or explicit 1-based `:offset`, never both. Text offsets count
+UTF-16 characters; binary offsets count bytes. File reads keep 1-based line offsets.
+Shell output beyond its hard retention cap cannot be recovered; truncation flags and
+return documentation identify that limit.
 
 These return shapes replace the former formatted string vectors; there is no
 legacy mode. Update existing REPL code to select `:entries` or `:matches`.
@@ -177,6 +245,135 @@ RPC clients can use:
 - `event.replay` to reconstruct recorded activity after a durable cursor.
 
 For inline native values, `result.inspect` includes bounded `value-edn` and `value-truncated?` fields. Prefer `value-edn` when keyword keys, ratios, symbols, or other Clojure types matter; JSON `value` is only a projection.
+
+## Session-backed agents
+
+From the persistent REPL, start a child with its own conversation and evaluator.
+Treat the following lines as separate evaluations, rather than one large output dump:
+
+```clojure
+(def child (agents/start! {:name "Parser"
+                           :task "Investigate parser boundaries"
+                           :context "Inspect and report evidence."}))
+(agents/inspect child)
+(def followup (agents/send! child "Please check the fallback branch."))
+(agents/delivery followup)
+(agents/wait {:receipts [followup] :until :completed :timeout-ms 30000})
+;; Use the returned :ready operation handle with agents/result.
+(agents/result child) ; still the original launch operation, not the follow-up
+(agents/list)
+(agents/messages)
+(agents/cancel! child)
+(agents/resume! child)
+(agents/stop! child)
+```
+
+`start!` accepts one options map with required `:task`, optional `:name`,
+`:context`, `:config`, and known-before-submit `:submission-id`. The returned handle
+has `:session-id`, initial `:operation-id`, and `:submission-id`. Names are
+unique within the root team. The child inherits selected parent configuration
+once and gets a fresh evaluator; it never receives the parent's live Vars or
+atom values. Subsequent addressed work uses the same child session and its
+live bindings. A function job launched from an agent is still owned by its
+own session; the foreground parent operation does not own accepted jobs or
+children.
+
+`(agents/submission submission-id)` retrieves the original spawn/send receipt,
+or `nil` when no accepted submission matches that caller-owned ID. Generate
+and retain a UUID before an uncertain mutation; reconcile it with this helper
+instead of reissuing a launch or message under a new identity.
+
+`send!` accepts a handle, same-team session ID/name, `:parent` or `:all`;
+broadcast captures current recipients and excludes the sender. Content can be
+text or supported native EDN up to 256 KiB, never a live object. Explicit
+`{:result/ref {:session-id sender-id :id positive-result-id}}` copies a durable
+inline value with source provenance; live-only and artifact-backed references
+cannot be sent this way. An optional third map accepts `:submission-id` and
+`:wake?`. A message is durably accepted before a receipt is returned; its
+recipient's model history records sender and kind (`:peer`, `:human` or
+`:completion`) at a safe boundary, atomically with the delivery acknowledgement.
+
+Model-facing inspection is compact by default:
+
+- `list` returns `{:root-id ... :agents [...] :total n :next-offset ...}`. Default
+  page size is 8, maximum 20; pass `:offset` for the next page. Rows contain identity,
+  model/provider, status/operation ID, routing flags and pending count—not history,
+  configuration, usage breakdowns or provider payloads.
+- `inspect` returns one compact row. Both calls accept `{:detailed? true}` when full
+  configuration and diagnostics are explicitly wanted.
+- `result` returns a particular operation's status, at most 1,200 answer characters,
+  and a bounded error (240 message characters), with explicit clipping flags.
+  `(agents/result handle {:detailed? true})` returns the original native outcome;
+  `(agents/result target operation-id opts)` selects an explicit operation.
+- `messages` returns `{:messages [...] :next-before ...}` newest first, default 8
+  and maximum 20. Small supported content stays native (including ratios/maps);
+  large content is explicitly omitted with a short preview. At most four recipient
+  IDs appear in each summary, with count/omission information for larger broadcasts.
+  Pass `:before` to page, or `:detailed? true` for full records on that page.
+
+Compact `inspect` and `result` responses include `:next` source strings for full
+diagnostics and relevant operation/result reads or managed waits. Operation links pin
+the observed session/operation pair: a later follow-up cannot silently change which
+result that link selects. They do not load the result or acknowledge delivery.
+
+`(agents/delivery receipt)` resolves a send receipt or message ID to a recipient page:
+delivery status, committed entry ID, incorporating operation ID and current operation
+status. It does not consume the message. Options are `:offset`, `:limit` (8 by default,
+maximum 20), and `:detailed? true` to read that one message's full native content.
+Pending or superseded deliveries have no invented operation handle. Several messages
+can join one operation; broadcast recipients can bind to different operations.
+Each incorporated delivery row includes `:next :result` for that exact operation.
+The page's `:next` offers full content, a managed wait when relevant, and the next page
+when present; pending/superseded rows never acquire a guessed result link.
+
+`wait` accepts `:handles` **or** `:receipts` (at most 20 selectors), plus `:timeout-ms`
+(default/max 300000). Receipt waits use `:until :completed` by default, or
+`:until :delivered` to obtain handles once input enters context. Returns include
+`:reason` and up to 20 `:ready` operation handles; larger sets are marked
+`:more-ready?`. Superseded deliveries return `:reason :superseded` and recipient
+identities instead of waiting forever. Peer input and steering still interrupt a
+wait, potentially before any handle is ready: return from the evaluation to process
+that input rather than polling. Explicit self/cyclic operation waits are rejected.
+Nothing is acknowledged by inspection or waiting, and timeout does not cancel work.
+
+`cancel!` targets the specified operation or the target's current operation; `stop!`
+stops a subtree and its session-owned jobs (optionally with `{:timeout-ms ...}`);
+`resume!` unpauses pending eligible input. The RPC/TUI roster and diagnostic methods
+remain rich projections for human inspection; the defaults above are the REPL API.
+
+Peer delivery retains full supported content under the recipient's ownership and
+places a bounded 1,200-character preview in model context. Live-only objects,
+registry resources, and arbitrary closures are not portable.
+`(agents/value target result-id)` reads supported durable EDN from a team
+member's positive-integer result ID and rejects live-only descriptors; it does
+not expose another session's live object. Messages have real sender provenance
+and do not become privileged instructions. Every completed, failed, cancelled
+or interrupted child operation produces one durable completion notice for its
+launch parent. The parent sees a short status/answer preview and a locally
+retained canonical assistant response (selected provider/model/usage/cost/finish
+metadata); `agents/result` returns a compact summary unless full diagnostics are
+explicitly requested. The parent's context does not copy the child's transcript or
+opaque provider SDK records.
+Use peer messages for blockers, interim findings and coordination. A child need not
+send its final report separately: its final answer already arrives through the durable
+completion route. Peer and completion records remain distinct; the harness does not
+deduplicate their prose or suppress lifecycle outcomes.
+
+Idle unpaused children can wake on direct messages. The unpaused root can wake for
+child completion; ordinary REPL peer chatter does not wake it unless explicitly
+marked `:wake? true`. Human messages sent through RPC/TUI default to waking an
+unpaused recipient; specify `wake? false` to keep an idle recipient idle.
+Cancelling a session pauses its automatic wake while independent work continues.
+Restart pauses all team routing until explicit user run/continue or
+`agents/resume!`; nothing replays an interrupted Clojure stack. Root stop
+closes admission before stopping descendants, rather than permitting another
+child to escape during cancellation.
+
+Team routing, incorporating-operation links and submission receipts are schema-5 local state,
+not an exportable running team. Fork/clone/import create independent roots and do
+not launch children. Session export includes delivered content and retained local
+references but not pending routes or executable ownership. Deleting a session with
+linked descendants requires stopping/deleting the descendants first.
 
 ## Background jobs
 
@@ -207,6 +404,12 @@ with `:truncated? true` when clipped). Provenance, timestamps, full diagnostics,
 result descriptors stay available through `inspect`/`list`/`wait` with
 `{:detailed? true}`. The value returned by `jobs/result` is unchanged.
 
+Individual `jobs/inspect` responses also contain `:next`: output, retained result
+inspection, and either successful `:value-and-ack` or active-work `:wait`/`:cancel!`
+source strings. These use the real session-owned handle, not a guessed binding name.
+Inspection and generic `(result id)` reads do not acknowledge the job outcome;
+`jobs/result` explicitly does. Listing and waiting do not repeat these hints.
+
 `list` is newest-first, with a maximum page size of 500; pass the last ID as `:before`
 for older jobs. RPC job records and the UI continue to receive full metadata.
 
@@ -235,6 +438,10 @@ API. It returns `:text`, `:offset`, `:next-offset`, `:cursor`, `:more?`, `:eof?`
 `:truncated?`. Pass `{:after (:cursor page)}` to read newly available text. Cursors are
 explicit, reusable maps tied to the job; separate readers never consume one another's
 output. An empty page while running keeps the same cursor and has `:eof? false`.
+`:more? false` means caught up to the currently captured output, not completion;
+`:eof? true` means the job is terminal and retained output is drained. Continue using
+`jobs/output` after settlement; an exposed artifact ID does not require switching APIs
+or translating offsets.
 Cursors continue to work across settlement/restart when output was retained. Choose
 only one of `:offset`, `:after`, or `:tail? true`; mismatched/out-of-range cursors are
 rejected. `:tail? true` reads the last `:limit` characters of the **retained** capture,
@@ -280,8 +487,9 @@ Refreshing preserves the selected output page or tail view. The footer counts ac
 `session.evaluate` using `jobs/start!`. `session.view` includes the newest job records,
 and durable `job/changed` events reconcile status after reconnect.
 
-This does not provide subagents, scheduled jobs, process-daemon supervision, automatic
-retry, or JVM stack checkpointing.
+This does not provide scheduled jobs, process-daemon supervision, automatic
+retry, or JVM stack checkpointing. A `jobs/start!` child is a function job,
+not an `agents/start!` session agent.
 
 ## What survives restart
 
@@ -292,7 +500,17 @@ Durable:
 - operation/job records and durable events;
 - queue state;
 - supported inline results and artifact-backed results;
+- team membership, message/delivery statuses, submission receipts, paused routing,
+  and inspectable child operation outcomes (schema 5);
 - exported files you explicitly write.
+
+These records survive a normal restart **only when the store already uses the
+current schema**. Startup automatically resets an incompatible **recognized
+Arrodes** store (including schemas 3 and 4) and its owned artifacts after exclusive
+ownership; foreign SQLite remains untouched. The old Arrodes sessions, branches,
+messages, jobs and results are lost without migration or automatic backup;
+export needed history beforehand with a compatible earlier build.
+Credentials/settings and unrelated files remain.
 
 Live only:
 

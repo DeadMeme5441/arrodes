@@ -52,7 +52,15 @@
     :activity (model/activity-title (:activity row))
     :reasoning "Reasoning"
     :presentation "Extension"
-    :message (case (:role row) :user "YOU" :assistant "ARRODES" "CONTEXT")
+    :message (if (:agent-kind row)
+               (str (case (:agent-kind row)
+                      :peer "Peer"
+                      :completion "Agent completion"
+                      :human "Human addressed message"
+                      :task "Delegated task"
+                      "Agent message")
+                    (when (:agent-from row) (str " · " (model/safe-text (:agent-from row)))))
+               (case (:role row) :user "YOU" :assistant "ARRODES" "CONTEXT"))
     "Execution"))
 
 (defn recorded-diff [a]
@@ -124,6 +132,7 @@
 (defn default-tab [row]
   (let [a (activity row)]
     (cond (recorded-diff a) :summary
+          (and (= :message (:kind row)) (:result row)) :value
           (contains? #{"bash" "powershell"} (:name a)) :output
           (= :evaluation (:kind a)) :value
           (= :job (:kind a)) :output
@@ -141,7 +150,7 @@
 (defn inspection [view row tab inspection-state]
   (let [a (activity row)
         root (execution view a)
-        descriptor (or (:descriptor inspection-state) (:result a))
+        descriptor (or (:descriptor inspection-state) (:result row) (:result a))
         page (:page inspection-state)
         result-id (model/field descriptor :id)
         kind (keyword (or (model/field descriptor :kind) "unknown"))

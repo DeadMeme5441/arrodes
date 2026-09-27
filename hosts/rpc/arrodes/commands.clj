@@ -2,6 +2,7 @@
   "Transport-independent commands. Every interface uses this command surface."
   (:refer-clojure :exclude [methods])
   (:require [arrodes.artifacts :as artifacts]
+            [arrodes.agents :as agents]
             [arrodes.capabilities :as capabilities]
             [arrodes.packages :as packages]
             [arrodes.provider :as provider]
@@ -17,7 +18,7 @@
             [clojure.string :as str])
   (:import (java.util.concurrent TimeUnit)))
 
-(def version "0.1.6")
+(def version "0.1.7")
 (def protocol-version 1)
 (def methods
   ["runtime.inspect" "session.list" "session.create" "session.inspect" "session.state"
@@ -28,6 +29,9 @@
    "session.queue.drop" "session.reload" "session.evaluate" "session.invoke"
    "session.command" "session.export" "session.import" "session.share"
    "job.list" "job.inspect" "job.wait" "job.cancel" "job.output"
+   "agent.start" "agent.list" "agent.inspect" "agent.send" "agent.messages"
+   "agent.result" "agent.value" "agent.wait" "agent.cancel" "agent.stop"
+   "agent.resume" "agent.submission" "agent.delivery"
    "operation.list" "operation.inspect"
    "operation.wait" "operation.cancel" "operation.steer" "operation.follow-up"
    "capability.list" "capability.set" "capability.attach" "capability.detach"
@@ -66,6 +70,9 @@
 (defn- oid [params] (required-string params :operation-id))
 (defn- qid [params] (required-string params :queue-id))
 (defn- keyword-value [value] (if (string? value) (keyword value) value))
+(defn- agent-target [params]
+  (let [target (or (:target params) (:agent-id params))]
+    (case target "parent" :parent "all" :all target)))
 (defn- required-provider [params]
   (let [value (:provider params)]
     (value/check! (or (keyword? value) (and (string? value) (not (str/blank? value))))
@@ -265,6 +272,38 @@
                        (let [text (if (:path params) (import-file (:path params)) (:content params))]
                          (runtime/import! rt (import-content text) (select-keys params [:cwd :name]))))
     "session.share" (share! rt params)
+    "agent.start" (agents/start-agent! (:agents rt) (sid params)
+                                     (cond-> (select-keys params [:name :task :context :config :submission-id])
+                                       (:config params) (update :config normalize-config)))
+    "agent.list" (agents/list-agents (:agents rt) (sid params) (select-keys params [:limit :offset]))
+    "agent.inspect" (agents/inspect-agent (:agents rt) (sid params) (agent-target params))
+    "agent.send" (agents/send-message! (:agents rt) (sid params) (agent-target params)
+                                     (:content params)
+                                     (merge {:kind :human :wake? true}
+                                            (select-keys params [:submission-id :wake?])))
+    "agent.messages" {:messages (agents/messages-for (:agents rt) (sid params)
+                                                     (select-keys params [:limit :before]))}
+    "agent.result" (public-value (agents/operation-result (:agents rt) (sid params)
+                                                        (agent-target params) (oid params)))
+    "agent.value" (public-value
+                   (select-keys
+                     (result-view {:kind :inline
+                                   :value (agents/read-value (:agents rt) (sid params)
+                                                             (agent-target params)
+                                                             (positive-int (:result-id params) :result-id nil Long/MAX_VALUE))})
+                     [:value :value-edn :value-truncated?]))
+    "agent.wait" (agents/await-agents (:agents rt) (sid params)
+                                     (cond-> (select-keys params [:handles :receipts :until :timeout-ms])
+                                       (:until params) (update :until keyword-value)))
+    "agent.cancel" (agents/cancel-agent! (:agents rt) (sid params) (agent-target params) (:operation-id params))
+    "agent.stop" (agents/stop-agent! (:agents rt) (sid params) (agent-target params)
+                                   (select-keys params [:timeout-ms]))
+    "agent.resume" (agents/resume-agent! (:agents rt) (sid params) (agent-target params))
+    "agent.submission" (agents/submission (:agents rt) (sid params) (required-string params :submission-id))
+    "agent.delivery" (public-value
+                       (agents/delivery-state (:agents rt) (sid params)
+                                               (or (:receipt params) (required-string params :message-id))
+                                               (select-keys params [:offset :limit :detailed?])))
     "job.list" (jobs/snapshot (:jobs rt) (sid params) (select-keys params [:limit :before]))
     "job.inspect" (jobs/inspect-job (:jobs rt) (sid params) (required-string params :job-id))
     "job.wait" (jobs/await-job (:jobs rt) (sid params) (required-string params :job-id)
@@ -305,7 +344,7 @@
                                                     (positive-int (:result-id params) :result-id nil Long/MAX_VALUE)))
     "artifact.list" {:artifacts (artifacts/list-artifacts (:store rt) (sid params))}
     "artifact.inspect" (artifacts/get-artifact (:store rt) (sid params) (required-string params :artifact-id))
-    "artifact.read" (artifacts/read! (:store rt) (sid params) (required-string params :artifact-id) (select-keys params [:offset :limit]))
+    "artifact.read" (artifacts/read! (:store rt) (sid params) (required-string params :artifact-id) (select-keys params [:offset :limit :after]))
     "artifact.write" (artifacts/put! (:store rt) (sid params) (or (:content params) "") (select-keys params [:name]))
     "resource.list" (resources/catalog (resource-manager rt params))
     "skill.read" {:name (required-string params :name)
@@ -326,10 +365,12 @@
                                    (assoc params
                                           :input (fn [prompt]
                                                    (runtime/ui! rt
-                                                                {:kind :input
-                                                                 :title (or (:message prompt) "Provider authentication")
-                                                                 :prompt (not-empty (dissoc prompt :type :message))
-                                                                 :secret? (contains? #{:secret :manual-code} (keyword-value (:type prompt)))}))
+                                                                (cond-> {:kind :input
+                                                                         :title (or (:message prompt) "Provider authentication")
+                                                                         :prompt (not-empty (dissoc prompt :type :message))
+                                                                         :secret? (contains? #{:secret :manual-code} (keyword-value (:type prompt)))}
+                                                                  (:session-id params) (assoc :session-id (:session-id params))
+                                                                  (:operation-id params) (assoc :operation-id (:operation-id params)))))
                                           :on-event #(setup/auth-event! rt %))))
     "auth.logout" (provider/logout! (provider-manager rt params) (required-provider params))
     "settings.get" {:settings (value/redact (resources/settings (resource-manager rt params)))}
