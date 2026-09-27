@@ -7,7 +7,7 @@
         io.github.plumce/plumcp.core-json-datajson {:mvn/version "0.2.2"}
         net.java.dev.jna/jna {:mvn/version "5.16.0"}
         net.java.dev.jna/jna-platform {:mvn/version "5.16.0"}
-        net.clojars.deadmeme5441/clojure-llm-sdk {:mvn/version "0.6.0"}}
+        net.clojars.deadmeme5441/clojure-llm-sdk {:mvn/version "0.6.2"}}
  :aliases
  {:host {:extra-paths ["hosts/rpc"]
          :main-opts ["-m" "arrodes.rpc-main"]}

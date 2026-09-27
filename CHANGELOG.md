@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.9
+
+- Update clojure-llm-sdk from 0.6.0 to 0.6.2, including OpenRouter structured
+  reasoning output and the SDK's Vertex verification/documentation fixes.
+- Align the corresponding-source revision and third-party notices with SDK 0.6.2.
+
 ## 0.1.8
 
 - Reduce standalone executable weight by writing actual gzip payload bytes and
