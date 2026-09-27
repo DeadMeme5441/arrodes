@@ -701,6 +701,23 @@
                 "Metadata and reported context belong below the composer; routine feedback must not create an alert")
         (.then (fn [_] (capture! terminal "footer-with-context") (pause)))
         (.then (fn [_]
+                 (swap! (:state application) assoc-in [:ui :draft] "my unsent work")
+                 (let [button (node terminal "footer-context")]
+                   (.click (.-mockMouse terminal) (+ 2 (.-screenX button)) (.-screenY button)))
+                 (until! terminal
+                         #(and (= :usage (get-in @(:state application) [:ui :overlay :kind]))
+                               (str/includes? (.captureCharFrame terminal) "Cache read: 10000")
+                               (str/includes? (.captureCharFrame terminal) "Cache write: unknown")
+                               (str/includes? (.captureCharFrame terminal) "Estimated spend: unknown"))
+                         "Footer usage action must show measured cache fields and honest unknown spend")))
+        (.then (fn [_]
+                 (.pressEscape (.-mockInput terminal))
+                 (until! terminal
+                         #(and (nil? (get-in @(:state application) [:ui :overlay]))
+                               (= "my unsent work" (get-in @(:state application) [:ui :draft]))
+                               (= "my unsent work" (.-plainText (node terminal "composer"))))
+                         "Dismissing usage must preserve the unsent draft")))
+        (.then (fn [_]
                  (swap! (:state application) update-in [:view :entries] conj
                         {:id "new-usage" :kind :message
                          :data {:message/role :assistant :message/content "Next reply"
@@ -712,7 +729,8 @@
                  (swap! (:state application) update-in [:view :entries] conj
                         {:id "compacted" :kind :compaction
                          :data {:summary "Reduced context" :usage {:usage/total-tokens 100000}}})
-                 (until! terminal #(= "Context —" (.-plainText (node terminal "footer-context")))
+                 (until! terminal #(and (str/includes? (.-plainText (node terminal "footer-context")) "Context —")
+                                        (not (str/includes? (.-plainText (node terminal "footer-context")) "64k")))
                          "Compaction invalidates the old context count; summary usage is not the new context")))
         (.then (fn [_]
                  (until! terminal #(nil? (:notice @(:state application))) "Routine confirmation must expire automatically")))
@@ -724,7 +742,7 @@
                  (swap! (:state application) assoc-in [:view :entries] [])
                  (until! terminal #(and (.-visible (node terminal "notice-box"))
                                         (.-visible (node terminal "notice-details"))
-                                        (= "Context —" (.-plainText (node terminal "footer-context"))))
+                                        (str/includes? (.-plainText (node terminal "footer-context")) "Context —"))
                          "Errors must retain diagnostics; missing usage must not be shown as zero")))
         (.then (fn [_] (pause)))
         (.then (fn [_]

@@ -1,8 +1,10 @@
 (ns arrodes.provider
   "Manager-local provider catalog, authentication, and real llm.sdk request routing."
-  (:require [clojure.string :as str]
+  (:require [clojure.data.json :as json]
+            [clojure.string :as str]
             [arrodes.auth :as auth]
             [arrodes.platform :as u]
+            [arrodes.run :as run]
             [llm.sdk :as sdk]
             [llm.sdk.errors :as sdk-errors]
             [llm.sdk.http :as sdk-http]
@@ -125,17 +127,21 @@
     (when-not (and (string? id) (not (str/blank? id)))
       (fail! :provider/model "Provider model descriptor requires a non-empty :id"
              {:provider provider-id}))
-    (when-not (every? all-thinking-levels levels)
+    (when-not (and (seq levels) (every? all-thinking-levels levels))
       (fail! :provider/thinking "Model descriptor contains an unsupported thinking level"
              {:provider provider-id :model id}))
-    {:provider provider-id
-     :id id
-     :name (or (:name m) (:model/display-name m) id)
-     :context-window (or (:context-window m) (:model/context-length m))
-     :thinking-levels levels
-     :input (vec (or (:input m) [:text]))
-     :cost (or (:cost m) (:model/cost m) :unknown)
-     :source (or (:source m) :configured)}))
+    (cond-> {:provider provider-id
+             :id id
+             :name (or (:name m) (:model/display-name m) id)
+             :context-window (or (:context-window m) (:model/context-length m))
+             :thinking-levels levels
+             :input (vec (or (:input m) [:text]))
+             :cost (or (:cost m) (:model/cost m) :unknown)
+             :source (or (:source m) :configured)}
+      (contains? m :tools?) (assoc :tools? (:tools? m))
+      (or (:max-output-tokens m) (:model/max-output-tokens m))
+      (assoc :max-output-tokens (or (:max-output-tokens m)
+                                    (:model/max-output-tokens m))))))
 
 (defn- normalize-custom-profile [id descriptor]
   (when (contains-secret? descriptor)
@@ -373,14 +379,17 @@
   (cond-> [:text]
     (or (contains? capabilities :multimodal)
         (contains? capabilities :vision)) (conj :image)
-    (contains? capabilities :file-attachments) (conj :file)))
+    (or (contains? capabilities :file-attachments)
+        (contains? capabilities :pdf)) (conj :file)))
 
 (defn- sdk-model->descriptor [provider-id p entry]
-  (let [capabilities (set (concat (:capabilities p) (:model/capabilities entry)))]
+  (let [capabilities (or (:model/capabilities entry) (:capabilities p))]
     {:provider provider-id
      :id (:model/id entry)
      :name (or (:model/display-name entry) (:model/id entry))
      :context-window (:model/context-length entry)
+     :max-output-tokens (:model/max-output-tokens entry)
+     :tools? (contains? capabilities :tools)
      :thinking-levels (reasoning-levels provider-id (:model/id entry) capabilities nil)
      :input (input-types capabilities)
      :cost (or (:model/cost entry) :unknown)
@@ -461,10 +470,11 @@
 
 (defn- sdk-runtime-config [manager provider-id p resolution]
   (cond-> (merge
+           {:connect-timeout-ms 15000 :timeout-ms 60000}
            (select-keys (:settings manager)
                         [:connect-timeout-ms :timeout-ms :transport :incremental?])
            (select-keys (get-in (:settings manager) [:provider-options provider-id])
-                        [:connect-timeout-ms :timeout-ms :transport :incremental?]))
+                        [:base-url :connect-timeout-ms :timeout-ms :transport :incremental?]))
     (:token resolution) (assoc :auth-token (:token resolution))
     (:account-id resolution) (assoc :account-id (:account-id resolution))
     (and (= :profile-alias (:kind p)) (:base-url p))
@@ -617,11 +627,32 @@
   (when (auth/cancelled? options) (throw (cancelled-ex))))
 
 (defn- direct-http-options [manager provider-id]
-  (merge (select-keys (:settings manager) [:connect-timeout-ms :timeout-ms :http-client])
+  (merge {:connect-timeout-ms 15000 :timeout-ms 60000}
+         (select-keys (:settings manager) [:connect-timeout-ms :timeout-ms :http-client])
          (select-keys (get-in (:settings manager) [:provider-options provider-id])
                       [:connect-timeout-ms :timeout-ms :http-client])))
 
+(defn- incomplete! [provider-id model-id response]
+  (fail! :provider/incomplete-stream
+         "Provider stream ended before a complete response; no tool calls were executed"
+         {:provider provider-id :model model-id :retryable? false
+          :partial-response response}))
+
+(defn- complete-stream! [response provider-id model-id]
+  (when (= :incomplete (:response/finish-reason response))
+    (incomplete! provider-id model-id response))
+  (when (some (fn [call]
+                (or (str/blank? (:tool-call/name call))
+                    (not (string? (:tool-call/arguments call)))
+                    (not (map? (try
+                                 (json/read-str (:tool-call/arguments call))
+                                 (catch Exception _ nil))))))
+              (:response/tool-calls response))
+    (incomplete! provider-id model-id response))
+  response)
+
 (defn- direct-sse-complete! [provider-id model-id profile transport request-map options]
+  (when (auth/cancelled? options) (throw (cancelled-ex)))
   (let [response (sdk-http/sse-response request-map)
         body (:body response)]
     (try
@@ -636,24 +667,30 @@
             (loop [records (seq (sdk-sse/event-seq
                                  (sdk-http/line-seq-closeable body)))
                    acc (sdk-stream/reduce-event (sdk-stream/empty-accumulator) start)
-                   terminal? false]
+                   terminal? false
+                   done? false]
               (if-let [record (first records)]
-                (let [parsed (event-list
+                (let [payload (sdk-sse/data-payload record)
+                      done-record? (boolean (re-find #"(?m)^data:\s*\[DONE\]\s*$" record))
+                      _ (when (and payload (nil? (sdk-sse/parse-json-data record)))
+                          (incomplete! provider-id model-id
+                                       (sdk-stream/acc->response acc provider-id model-id)))
+                      parsed (event-list
                               (sdk-transport/parse-stream-event transport profile record))
                       acc (reduce (fn [current event]
                                     (emit-event! options event)
                                     (sdk-stream/reduce-event current event))
                                   acc parsed)]
                   (recur (next records) acc
-                         (or terminal? (some #(= :stream/end (:event/type %)) parsed))))
-                (if terminal?
+                         (or terminal? (some #(= :stream/end (:event/type %)) parsed))
+                         (or done? done-record?)))
+                (if (and terminal? done?)
                   acc
-                  (let [end (sdk-stream/end-event :finish-reason :incomplete)]
-                    (emit-event! options end)
-                    (sdk-stream/reduce-event acc end)))))
+                  (incomplete! provider-id model-id
+                               (sdk-stream/acc->response acc provider-id model-id)))))
             response (sdk-stream/acc->response accumulated provider-id model-id)]
         (-> response
-            (assoc :response/provider provider-id :response/model model-id)
+            (complete-stream! provider-id model-id)
             (pricing/stamp-response-cost-and-cache provider-id model-id)))
       (finally
         (when (instance? java.io.Closeable body)
@@ -719,19 +756,57 @@
     (let [response (sdk/complete sdk-id request :stream? true :on-event callback
                                  :retry false :config config)]
       (when (auth/cancelled? options) (throw (cancelled-ex)))
-      (assoc response :response/provider provider-id))))
+      (-> response
+          (assoc :response/provider provider-id)
+          (complete-stream! provider-id (:request/model request))))))
 
-(defn- validate-request! [provider-id request]
+(defn- validate-request! [manager provider-id request]
   (when-not (and (map? request)
                  (string? (:request/model request))
                  (not (str/blank? (:request/model request)))
                  (vector? (:request/messages request)))
     (fail! :provider/request "Invalid canonical provider request"
            {:provider provider-id}))
-  (when-let [effort (get-in request [:request/reasoning :effort])]
-    (when-not (contains? all-thinking-levels effort)
+  (when-not (:complete-fn manager)
+    (let [model-id (:request/model request)
+          available (profile-models manager provider-id (profile manager provider-id))
+          descriptor (some #(when (= model-id (:id %)) %) available)
+          effort (get-in request [:request/reasoning :effort])
+        input (set (:input descriptor))
+        requested (into #{}
+                        (comp (mapcat (fn [message]
+                                        (let [content (:message/content message)]
+                                          (if (vector? content) content []))))
+                              (keep (fn [part]
+                                      (case (:part/type part)
+                                        :image :image
+                                        :file :file
+                                        nil))))
+                        (:request/messages request))]
+    (when (and (seq available) (nil? descriptor))
+      (fail! :provider/model
+             "Model is not listed for this provider; configure its exact ID or refresh this provider's catalog"
+             {:provider provider-id :model model-id}))
+    (when (and effort (not (contains? all-thinking-levels effort)))
       (fail! :provider/thinking "Unsupported reasoning effort"
-             {:provider provider-id :effort effort})))
+             {:provider provider-id :model model-id :effort effort}))
+    (when (and descriptor effort
+               (not (contains? (set (:thinking-levels descriptor)) effort)))
+      (fail! :provider/thinking "Selected model does not support this reasoning effort"
+             {:provider provider-id :model model-id :effort effort
+              :supported (:thinking-levels descriptor)}))
+    (when (and (seq (:request/tools request)) (= false (:tools? descriptor)))
+      (fail! :provider/tools "Selected model does not support tools"
+             {:provider provider-id :model model-id}))
+    (when-let [missing (and descriptor (seq (remove input requested)))]
+      (fail! :provider/input "Selected model does not support the requested input"
+             {:provider provider-id :model model-id :unsupported (vec missing)}))
+    (when (and (number? (:max-output-tokens descriptor))
+               (number? (:request/max-tokens request))
+               (> (:request/max-tokens request) (:max-output-tokens descriptor)))
+      (fail! :provider/output "Requested output exceeds the selected model's output limit"
+             {:provider provider-id :model model-id
+              :limit (:max-output-tokens descriptor)}))))
   request)
 
 (defn- classified-ex [provider-id error]
@@ -743,16 +818,32 @@
       (let [classified (or (:error data)
                            (sdk-errors/classify-error error
                                                       :status (:status data)
+                                                      :body (:body data)
                                                       :provider provider-id))
-            reason (:error/reason classified :unknown)]
-        (ex-info (or (ex-message error) "Provider request failed")
-                 (merge data
-                        {:error/code (str "provider/" (name reason))
-                         :error/type reason
-                         :retryable? (boolean (:error/retryable classified))
-                         :provider provider-id
-                         :error classified
-                         :attempts 1})
+            reason (:error/reason classified :unknown)
+            context? (run/context-overflow? error)
+            code (if context? :context-overflow reason)]
+        (ex-info (str (case code
+                        :auth "Provider authentication failed; check credentials or sign in again"
+                        :rate-limit "Provider rate limited; wait before retrying"
+                        :context-overflow "Provider context limit exceeded; reduce input or compact the session"
+                        :timeout "Provider timed out; check connection or retry"
+                        :server "Provider server error; retry later"
+                        :overloaded "Provider overloaded; retry later"
+                        (str "Provider " (name code)))
+                      (when-let [status (:status data)] (str " (HTTP " status ")")))
+                 {:error/code (str "provider/" (name code))
+                  :error/type code
+                  :status (:status data)
+                  :retryable? (and (not context?)
+                                   (boolean (:error/retryable classified)))
+                  :provider provider-id
+                  :error (select-keys classified
+                                      [:error/reason :error/retryable
+                                       :error/should-compress])
+                  :partial-response (:partial-response data)
+                  :stream/error (:stream/error data)
+                  :attempts 1}
                  error)))))
 
 (defn complete!
@@ -764,7 +855,7 @@
       (fail! :provider/selection "Provider selection is required in opts :provider" {}))
     (let [provider-id (keyword provider)
           p (profile manager provider-id)]
-      (validate-request! provider-id canonical-request)
+      (validate-request! manager provider-id canonical-request)
       (when (auth/cancelled? options) (throw (cancelled-ex)))
       (try
         (if-let [complete-fn (:complete-fn manager)]
@@ -781,7 +872,9 @@
             :auth/cancelled (throw (cancelled-ex))
             (throw (classified-ex provider-id e))))
         (catch Exception e
-          (throw (classified-ex provider-id e)))))))
+          (if (auth/cancelled? options)
+            (throw (cancelled-ex))
+            (throw (classified-ex provider-id e))))))))
 
 (defn close!
   "Close a provider manager or session view. Idempotent.

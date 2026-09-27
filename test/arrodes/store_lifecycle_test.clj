@@ -742,33 +742,50 @@
           (finally (store/close! database))))
       (finally (remove-directory! directory)))))
 
-(deftest schema-five-recreates-recognized-schema-four-store-without-touching-neighbor
+(defn- sqlite-statements! [path statements]
+  (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
+              statement (.createStatement connection)]
+    (doseq [sql statements] (.execute statement sql))))
+
+(defn- sqlite-version [path]
+  (with-open [connection (java.sql.DriverManager/getConnection
+                           (str "jdbc:sqlite:" (.toUri (util/path path)) "?mode=ro"))
+              statement (.createStatement connection)
+              result (.executeQuery statement "PRAGMA user_version")]
+    (.next result)
+    (.getInt result 1)))
+
+(deftest schema-four-retains-current-shape-history-and-backup
+  ;; Schema 4 is evidenced as the present tables with the prior version marker.
   (let [directory (temp-directory)
         path (str directory "/sessions.sqlite")
         neighbor (util/path (str directory "/keep.txt"))]
     (try
-      (let [database (store/open! {:path path})]
-        (try
-          (new-session database)
-          (finally (store/close! database))))
-      (Files/writeString neighbor "unrelated" (make-array java.nio.file.OpenOption 0))
-      (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
-                  statement (.createStatement connection)]
-        (.execute statement "PRAGMA user_version=4"))
-      (let [reopened (store/open! {:path path})]
-        (try
-          (is (empty? (store/list-sessions reopened {})))
-          (is (= "unrelated" (Files/readString neighbor)))
-          (store/store-read reopened
-            (fn [connection]
-              (with-open [statement (.createStatement connection)
-                          result (.executeQuery statement "PRAGMA user_version")]
-                (is (.next result))
-                (is (= 5 (.getInt result 1))))))
-          (finally (store/close! reopened))))
+      (let [database (store/open! {:path path})
+            sid (:id (new-session database))]
+        (store/commit! database sid {:entries [(message-entry :user "Keep prior history")]})
+        (store/close! database)
+        (Files/writeString neighbor "unrelated" (make-array java.nio.file.OpenOption 0))
+        (sqlite-statements! path ["PRAGMA user_version=4"])
+        (let [reopened (store/open! {:path path})]
+          (try
+            (is (= ["Keep prior history"]
+                   (mapv :message/content (store/context-messages reopened sid))))
+            (is (= 5 (sqlite-version path)))
+            (is (= "unrelated" (Files/readString neighbor)))
+            (finally (store/close! reopened))))
+        (with-open [files (Files/list (util/path directory))]
+          (let [backups (filter #(re-find #"\.schema4-.*\.backup$" (str %))
+                                (iterator-seq (.iterator files)))]
+            (is (= 1 (count backups)))
+            (is (= 4 (sqlite-version (str (first backups)))))
+            (is (= "rw-------"
+                   (PosixFilePermissions/toString
+                    (Files/getPosixFilePermissions (first backups)
+                                                  (make-array java.nio.file.LinkOption 0))))))))
       (finally (remove-directory! directory)))))
 
-(deftest malformed-current-agent-record-resets-without-touching-neighbors
+(deftest malformed-current-agent-record-is-rejected-without-mutation
   (let [directory (temp-directory)
         path (str directory "/sessions.sqlite")
         neighbor (util/path (str directory "/keep.edn"))]
@@ -779,14 +796,14 @@
         (store/close! database))
       (Files/writeString neighbor "{:settings :preserved}"
                          (make-array java.nio.file.OpenOption 0))
-      (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
-                  statement (.createStatement connection)]
-        (.executeUpdate statement "UPDATE agent_routes SET depth=-1 WHERE parent_session_id IS NOT NULL"))
-      (let [reopened (store/open! {:path path})]
-        (try
-          (is (empty? (store/list-sessions reopened {})))
-          (is (= "{:settings :preserved}" (Files/readString neighbor)))
-          (finally (store/close! reopened))))
+      (sqlite-statements! path
+                          ["UPDATE agent_routes SET depth=-1 WHERE parent_session_id IS NOT NULL"])
+      (let [before (Files/readAllBytes (util/path path))
+            error (try (store/open! {:path path}) nil
+                       (catch clojure.lang.ExceptionInfo failure failure))]
+        (is (= "unsupported-store-format" (:error/code (ex-data error))))
+        (is (java.util.Arrays/equals before (Files/readAllBytes (util/path path))))
+        (is (= "{:settings :preserved}" (Files/readString neighbor))))
       (finally (remove-directory! directory)))))
 
 (deftest fresh-root-counts-toward-agent-cap-and-reserves-main-name
@@ -807,7 +824,7 @@
       (is (= [root] (mapv :session-id (store/agent-team database root {}))))
       (is (empty? (store/operations database {:session-id root}))))))
 
-(deftest incompatible-store-second-owner-cannot-trigger-reset
+(deftest upgrade-cannot-bypass-exclusive-owner
   (let [directory (temp-directory)
         path (str directory "/sessions.sqlite")
         first-store (store/open! {:path path})]
@@ -816,7 +833,7 @@
         (store/store-read first-store
           (fn [connection]
             (with-open [statement (.createStatement connection)]
-              (.execute statement "PRAGMA user_version=3"))))
+              (.execute statement "PRAGMA user_version=4"))))
         (let [error (try (store/open! {:path path}) nil
                          (catch clojure.lang.ExceptionInfo failure failure))]
           (is (= "store-in-use" (:error/code (ex-data error))))
@@ -824,13 +841,13 @@
         (store/close! first-store)
         (let [replacement (store/open! {:path path})]
           (try
-            (is (empty? (store/list-sessions replacement {})))
+            (is (= sid (:id (store/session replacement sid))))
             (finally (store/close! replacement)))))
       (finally
         (store/close! first-store)
         (remove-directory! directory)))))
 
-(deftest unsafe-artifact-symlink-prevents-destructive-reset
+(deftest unsafe-artifact-symlink-prevents-upgrade
   (let [directory (temp-directory)
         path (str directory "/sessions.sqlite")
         outside (util/path (str directory "/unrelated"))
@@ -841,7 +858,7 @@
         (store/close! database))
       (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
                   statement (.createStatement connection)]
-        (.execute statement "PRAGMA user_version=3"))
+        (.execute statement "PRAGMA user_version=4"))
       (Files/createDirectory outside (make-array FileAttribute 0))
       (Files/writeString (.resolve outside "untouched") "Keep this"
                          (make-array java.nio.file.OpenOption 0))
@@ -887,7 +904,7 @@
                                   (make-array java.nio.file.LinkOption 0)))))
       (finally (remove-directory! directory)))))
 
-(deftest shared-artifact-root-cannot-delete-another-stores-content
+(deftest shared-artifact-root-cannot-claim-another-stores-content
   (let [directory (temp-directory)
         first-path (str directory "/first.sqlite")
         second-path (str directory "/second.sqlite")
@@ -902,7 +919,7 @@
           (finally (store/close! second)))
         (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" second-path))
                     statement (.createStatement connection)]
-          (.execute statement "PRAGMA user_version=3"))
+          (.execute statement "PRAGMA user_version=4"))
         (let [error (try (store/open! {:path second-path :artifact-dir shared}) nil
                          (catch clojure.lang.ExceptionInfo failure failure))]
           (is (= "artifact-store-in-use" (:error/code (ex-data error))))
@@ -938,68 +955,175 @@
         (store/close! original)
         (remove-directory! directory)))))
 
-(deftest incomplete-reset-marker-retries-artifacts-before-fresh-schema
+(deftest interrupted-legacy-reset-marker-blocks-deletion
   (let [directory (temp-directory)
         path (str directory "/sessions.sqlite")
         database (store/open! {:path path})
         sid (:id (new-session database))
         artifact (artifacts/put! database sid "Old retained artifact" {})
         content (util/path (str path ".artifacts/"
-                                (subs (:sha256 artifact) 0 2) "/" (:sha256 artifact)))]
+                                (subs (:sha256 artifact) 0 2) "/" (:sha256 artifact)))
+        marker (util/path (str path ".reset"))]
     (store/close! database)
     (try
-      (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
-                  statement (.createStatement connection)]
-        (.execute statement "PRAGMA user_version=3"))
-      (let [target-var (get (ns-interns 'arrodes.store) 'reset-file!)
-            original @target-var
-            error (try
-                    (when-let [unexpected (with-redefs-fn
-                                            {target-var (fn [target]
-                                                          (if (= (:sha256 artifact)
-                                                                 (str (.getFileName (util/path target))))
-                                                            (throw (ex-info "Simulated artifact unlink failure" {}))
-                                                            (original target)))}
-                                            #(store/open! {:path path}))]
-                      (store/close! unexpected))
-                    nil
-                    (catch clojure.lang.ExceptionInfo failure failure))]
-        (is (= "Simulated artifact unlink failure" (ex-message error)))
-        (is (Files/exists (util/path path) (make-array java.nio.file.LinkOption 0)))
+      (Files/writeString marker (pr-str {:database path :artifacts (str path ".artifacts")})
+                         (make-array java.nio.file.OpenOption 0))
+      (let [before (Files/readAllBytes (util/path path))
+            error (try (store/open! {:path path}) nil
+                       (catch clojure.lang.ExceptionInfo failure failure))]
+        (is (= "incomplete-legacy-reset" (:error/code (ex-data error))))
+        (is (java.util.Arrays/equals before (Files/readAllBytes (util/path path))))
         (is (Files/exists content (make-array java.nio.file.LinkOption 0)))
-        (is (Files/exists (util/path (str path ".reset"))
-                          (make-array java.nio.file.LinkOption 0))))
-      ;; Model a process crash immediately after the old database is unlinked.
-      (Files/delete (util/path path))
-      (let [fresh (store/open! {:path path})]
-        (try
-          (is (empty? (store/list-sessions fresh {})))
-          (is (false? (Files/exists content (make-array java.nio.file.LinkOption 0))))
-          (is (false? (Files/exists (util/path (str path ".reset"))
-                                    (make-array java.nio.file.LinkOption 0))))
-          (finally (store/close! fresh))))
+        (is (Files/exists marker (make-array java.nio.file.LinkOption 0))))
       (finally (remove-directory! directory)))))
 
-(deftest unmarked-prior-arrodes-signature-is-recognized-for-reset
+(deftest historical-schema-three-retains-history-results-jobs-and-artifacts
+  ;; The 0.1.5 schema-3 DDL is precisely these eight tables (no agent tables).
   (let [directory (temp-directory)
         path (str directory "/sessions.sqlite")
-        old (store/open! {:path path})]
+        database (store/open! {:path path})]
     (try
-      (new-session old)
-      (store/close! old)
-      (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
-                  statement (.createStatement connection)]
-        (doseq [sql ["DROP TABLE agent_deliveries"
-                     "DROP TABLE agent_messages"
-                     "DROP TABLE agent_submissions"
-                     "DROP TABLE agent_routes"
-                     "PRAGMA application_id=0"
-                     "PRAGMA user_version=3"]]
-          (.execute statement sql)))
-      (let [current (store/open! {:path path})]
-        (try
-          (is (empty? (store/list-sessions current {})))
-          (finally (store/close! current))))
+      (let [sid (:id (new-session database))
+            artifact (artifacts/put! database sid "Keep the blob" {:name "owned"})
+            result (artifacts/put-result! database sid
+                                          {:kind :inline :content "value" :details {}
+                                           :value {:retained true}})
+            job-id (util/id)]
+        (store/commit! database sid
+                       {:entries [(message-entry :user "Keep the history")]
+                        :operation {:id (util/id) :kind :run :status :completed}
+                        :events [{:type :history/saved :data {:retained true}}]})
+        (store/create-job! database {:id job-id :session-id sid :status :queued
+                                     :name "Retained job" :created-at 1})
+        (store/close! database)
+        (sqlite-statements!
+         path ["DROP TABLE agent_deliveries" "DROP TABLE agent_messages"
+               "DROP TABLE agent_submissions" "DROP TABLE agent_routes"
+               "PRAGMA application_id=0" "PRAGMA user_version=3"])
+        (let [reopened (store/open! {:path path})]
+          (try
+            (is (= 5 (sqlite-version path)))
+            (is (= ["Keep the history"]
+                   (mapv :message/content (store/context-messages reopened sid))))
+            (is (= config (:config (store/session reopened sid))))
+            (is (= {:retained true}
+                   (:value (artifacts/result reopened sid (:id result)))))
+            (is (= "Keep the blob"
+                   (:content (artifacts/read! reopened sid (:id artifact) {}))))
+            (is (= :queued (:status (store/job reopened sid job-id))))
+            (is (= :completed (:status (first (store/operations reopened {:session-id sid})))))
+            (is (some #(= :history/saved (:type %))
+                      (store/events-since reopened {:session-id sid})))
+            (is (= sid (:root-id (store/agent-state reopened sid))))
+            (finally (store/close! reopened))))
+        (with-open [files (Files/list (util/path directory))]
+          (let [backup (first (filter #(re-find #"\.schema3-.*\.backup$" (str %))
+                                      (iterator-seq (.iterator files))))]
+            (is backup)
+            (when backup
+              (is (= 3 (sqlite-version (str backup))))
+              (with-open [connection (java.sql.DriverManager/getConnection
+                                      (str "jdbc:sqlite:" (.toUri backup) "?mode=ro"))
+                          statement (.createStatement connection)
+                          result (.executeQuery statement "SELECT COUNT(*) FROM jobs")]
+                (.next result)
+                (is (= 1 (.getInt result 1))))))))
       (finally
-        (store/close! old)
+        (store/close! database)
         (remove-directory! directory)))))
+
+(deftest interrupted-upgrade-rolls-back-and-remains-retryable
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")
+        database (store/open! {:path path})
+        sid (:id (new-session database))]
+    (try
+      (store/commit! database sid {:entries [(message-entry :user "Survive failed migration")]})
+      (store/close! database)
+      (sqlite-statements!
+       path ["DROP TABLE agent_deliveries" "DROP TABLE agent_messages"
+             "DROP TABLE agent_submissions" "DROP TABLE agent_routes"
+             "PRAGMA application_id=0" "PRAGMA user_version=3"])
+      (let [target-var (get (ns-interns 'arrodes.store) 'execute-command!)
+            original @target-var
+            error (try
+                    (with-redefs-fn
+                      {target-var (fn [connection sql]
+                                    (if (= sql "PRAGMA user_version = 5")
+                                      (throw (ex-info "simulated migration interruption" {}))
+                                      (original connection sql)))}
+                      #(store/open! {:path path}))
+                    nil
+                    (catch clojure.lang.ExceptionInfo failure failure))]
+        (is (= "simulated migration interruption" (ex-message error)))
+        (is (= 3 (sqlite-version path)))
+        (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
+                    statement (.createStatement connection)
+                    result (.executeQuery statement
+                                          "SELECT COUNT(*) FROM sqlite_master WHERE name='agent_routes'")]
+          (.next result)
+          (is (zero? (.getInt result 1)))))
+      (let [reopened (store/open! {:path path})]
+        (try
+          (is (= ["Survive failed migration"]
+                 (mapv :message/content (store/context-messages reopened sid))))
+          (is (= 5 (sqlite-version path)))
+          (finally (store/close! reopened))))
+      (with-open [files (Files/list (util/path directory))]
+        (is (= 2 (count (filter #(re-find #"\.schema3-.*\.backup$" (str %))
+                                (iterator-seq (.iterator files)))))))
+      (finally
+        (store/close! database)
+        (remove-directory! directory)))))
+
+(deftest upgrade-backup-includes-uncheckpointed-wal-commits
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")
+        database (store/open! {:path path})]
+    (try
+      (let [sid (:id (new-session database))]
+        (store/close! database)
+        (with-open [writer (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
+                    statement (.createStatement writer)]
+          (.execute statement "PRAGMA journal_mode=WAL")
+          (.execute statement "UPDATE sessions SET name='Committed in WAL'")
+          (.execute statement "PRAGMA user_version=4")
+          (let [reopened (store/open! {:path path})]
+            (try
+              (is (= "Committed in WAL" (:name (store/session reopened sid))))
+              (finally (store/close! reopened)))))
+        (with-open [files (Files/list (util/path directory))]
+          (let [backup (first (filter #(re-find #"\.schema4-.*\.backup$" (str %))
+                                      (iterator-seq (.iterator files))))]
+            (is backup)
+            (when backup
+              (with-open [connection (java.sql.DriverManager/getConnection
+                                      (str "jdbc:sqlite:" (.toUri backup) "?mode=ro"))
+                          statement (.createStatement connection)
+                          result (.executeQuery statement "SELECT name FROM sessions")]
+                (.next result)
+                (is (= "Committed in WAL" (.getString result 1))))))))
+      (finally
+        (store/close! database)
+        (remove-directory! directory)))))
+
+(deftest unmarked-artifact-root-with-unknown-file-stays-unclaimed
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")
+        database (store/open! {:path path})
+        sid (:id (new-session database))
+        artifact (artifacts/put! database sid "Retained" {})
+        root (util/path (str path ".artifacts"))
+        extra (.resolve root "not-an-artifact")]
+    (store/close! database)
+    (try
+      (Files/delete (.resolve root ".arrodes-owner"))
+      (Files/writeString extra "Unrelated" (make-array java.nio.file.OpenOption 0))
+      (let [error (try (store/open! {:path path}) nil
+                       (catch clojure.lang.ExceptionInfo failure failure))]
+        (is (= "artifact-owner-unknown" (:error/code (ex-data error))))
+        (is (= "Unrelated" (Files/readString extra)))
+        (is (Files/exists (util/path (str root "/" (subs (:sha256 artifact) 0 2)
+                                          "/" (:sha256 artifact)))
+                          (make-array java.nio.file.LinkOption 0))))
+      (finally (remove-directory! directory)))))

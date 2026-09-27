@@ -36,13 +36,13 @@ agent isolation boundary.
 
 Application home is selected by `--home`, then `ARRODES_HOME`, then `~/.arrodes`. Provider credentials are stored in `auth/credentials.edn` below that home; supported ambient credentials may also come from the process environment or an existing provider-managed credential store. Session history and retained artifacts are stored under `projects/.../data/`, or under the explicit `--data-dir`. Treat the entire application home and any custom data directory as sensitive local data. Arrodes does not add application-layer encryption to these files.
 
-An incompatible **recognized Arrodes** SQLite session format triggers an
-automatic destructive reset after exclusive ownership is acquired. The
-selected session database and its owned retained artifacts are deleted
-and recreated; credentials, settings and unrelated files are not part
-of that reset. Export needed history with a compatible earlier build
-before starting this one. Foreign SQLite files remain untouched; neither
-corruption nor an unsafe path permits arbitrary deletion.
+Supported older Arrodes stores upgrade transactionally after an exclusive lock and
+a private, consistent SQLite backup. Backups contain sensitive session data and are
+retained beside the database; keep them protected along with the artifact directory.
+Unsupported/newer, foreign, malformed or unsafe stores fail without deletion.
+An interrupted legacy reset marker does not authorize further destructive cleanup.
+Packaged self-update verifies official release metadata and checksums and replaces
+only the owned executable; it does not migrate or roll back session data.
 
 A model request sends its included prompts, conversation context, attachments, and tool or evaluation output to the selected provider. Provider account settings, terms, and data practices apply. Requests made to a configured MCP server send the requested operation and supplied data to that server; its operator and transport determine how that data is handled. MCP responses can be retained in the session or included in later model context.
 

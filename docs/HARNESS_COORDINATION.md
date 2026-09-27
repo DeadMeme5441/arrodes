@@ -651,18 +651,14 @@ children, pending human prompts, unknown mutation outcomes, reconnect and cancel
 ### Format cutover
 
 Session routing, submissions and incorporating-operation links require **SQLite schema 5**.
-An incompatible **recognized Arrodes** store, including schemas 3 and 4, is never
-converted: after exclusive ownership, startup resets its database and
-owned artifacts as fresh schema 5. A current store carries Arrodes
-`application_id`; older unmarked stores require the full legacy table/column
-signature. Foreign SQLite remains untouched. The artifact-root marker/lock
-prevents deletion of another store's files, and a durable reset marker
-supports safe completion after interrupted cleanup. Old sessions/history/
-results in the reset store are lost; credentials, settings and unrelated
-files survive. RPC JSONL framing remains protocol 1 and session-only export
-format remains 1; additive `agent.*` methods do not imply legacy readers
-or recursive team export. Export copies delivered content under local
-retention ownership and severs executable team routes.
+The original destructive cutover described by this design has been replaced by
+the [preservation-first format contract](COMPATIBILITY.md). Supported schema-3/4
+layouts receive a consistent retained backup and transactional upgrade; unsupported,
+newer, malformed and foreign stores fail intact. Artifact ownership and exclusive
+locks remain required; interrupted legacy reset markers no longer resume deletion.
+RPC JSONL framing remains protocol 1 and session-only export format remains 1.
+Export copies delivered content under local retention ownership and severs
+executable team routes; it is not a recursive executable team transfer.
 
 ## 10. Selected product policies
 
@@ -743,8 +739,9 @@ claim for the session-agent feature.
 - Two reproduced regressions failed before correction and passed afterward:
   capacity released in another team now wakes accepted input, and a nested function
   job stopping its own team returns `:stopping` without waiting on its job ancestors.
-  Store tests also cover stopped-message preservation and the destructive reset's
-  recognition, ownership, hard-link, and interruption boundaries.
+  At that implementation stage, store tests also covered stopped-message
+  preservation and the then-current destructive reset boundaries. That reset policy
+  is superseded by the preservation-first compatibility contract above.
 - A cancellation-admission regression reproduced four escaped effects before its
   fix. Even when Clojure catches the thread interruption, a cancelled invocation
   now cannot create another job/agent, queue peer input, or undo its pause with resume.

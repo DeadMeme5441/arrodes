@@ -94,3 +94,17 @@ the composer draft. Completed jobs and retained results remain inspectable after
 Jobs appear inline with other execution artifacts; neither launch nor completion
 opens a popup. The inspector supplies F5 refresh, End/Latest for the retained output tail, and
 Ctrl+K cancellation. Refresh preserves the current page or tail view.
+
+## Usage inspection
+
+`/usage` or clicking the footer context indicator opens the existing full-terminal
+inspection surface. It separates the latest ordinary request's context from cumulative
+provider usage on the active history path, including compaction and branch summaries.
+Uncached input, cache-read, cache-write and output counts are independent counters;
+provider totals are not added to their breakdowns. Missing counters and prices are
+shown as unknown, and partial totals report unmeasured requests. Known USD spend is
+an estimate, not an invoice; title calls and inactive branches are excluded.
+
+At 120 columns or wider the footer also shows latest cache-read/write counts.
+The full `/usage` surface remains available at narrow widths. Escape restores the
+conversation without clearing its unsent draft or changing transcript scroll.

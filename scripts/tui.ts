@@ -2,9 +2,21 @@ import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as OpenTUI from "@opentui/core";
+import { runUpdate } from "./updater";
 
 // Only launch/build mechanics live in JavaScript. The application is ClojureScript.
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+if (process.argv[2] === "update") {
+  try {
+    await runUpdate({ args: process.argv.slice(3), currentVersion: "",
+                      executable: process.execPath, platform: process.platform,
+                      arch: process.arch, packaged: false });
+  } catch (error) {
+    process.stderr.write(`Arrodes: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  }
+  process.exit(process.exitCode ?? 0);
+}
 const output = join(root, "target/tui/main.cjs");
 function newest(path: string): number {
   if (!existsSync(path)) return 0;

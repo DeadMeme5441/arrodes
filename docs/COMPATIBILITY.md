@@ -1,42 +1,46 @@
 # Current format contract
 
-Arrodes supports its current contracts only. Do not add legacy readers,
-fallback representations, migrations or downgrade adapters. A format change
-updates its producers, consumers, documentation and tests together. An
-incompatible **store format** triggers the destructive fresh-store reset below;
-it is not read or converted.
+Durable contracts are versioned independently from application releases. Prefer
+additive changes that preserve existing records and update producers/consumers
+together. A required store change needs a supported, validated transactional
+upgrade with a retained backup; unknown formats must fail without deleting data.
+Downgrades never implicitly convert or reset a store.
 
 ## Persistence
 
-The current SQLite schema is **5**. Fresh stores initialize schema 5 with
-Arrodes `application_id` `0x4152524f`. Startup automatically resets a
-**recognized Arrodes store** when schema validation reports
-`unsupported-store-format`: an older/newer SQLite user version (including
-schemas 3 and 4), non-empty unversioned history, missing schema-5 tables or columns, or
-malformed agent routing/delivery state or operation associations. Marker
-`0x4152524f` positively identifies Arrodes even for a newer schema.
-Unmarked prior Arrodes stores are recognized only by their complete legacy
-table/column signature; a foreign SQLite database with another marker or
-no recognizable signature is rejected unchanged (`unrecognized-store`),
-never mistaken for an older Arrodes store. The reset loses old sessions, history,
-teams, jobs and retained results permanently. There is no legacy reader,
-migration, conversion or implicit backup. Export needed history with a
-compatible earlier build *before* starting this one.
+The current SQLite schema is **5**, with Arrodes `application_id` `0x4152524f`.
+Fresh stores initialize directly. Current stores reopen without conversion.
+Supported older stores upgrade before normal runtime recovery:
 
-The runtime holds the store lock throughout its lifetime and reset.
-The artifact root's private `.arrodes-owner` marker binds it to the database;
-a mismatched/shared root blocks reset. An unmarked prior root can be claimed
-only when its hash-shaped files are all recorded by that database; ambiguous
-extra files fail with `artifact-owner-unknown`, rather than being deleted.
-The durable `db.reset` marker binds database/artifact paths and remains until
-fresh schema initialization completes, so interrupted cleanup resumes safely
-even if the old database is gone. Owned artifact cleanup and SQLite `-wal`/
-`-shm` cleanup precede database deletion. Unknown neighbors, credentials,
-settings and project resources remain intact. SQLite corruption, SQL or
-permission errors, hard-linked database/sidecar files, untrusted symlinks
-under writable user directories and path traversal fail without destructive
-recovery. Root-owned system symlink prefixes may be used when their resolved
-path passes ownership checks.
+- Schema 3: the complete eight-table layout used by Arrodes 0.1.5.
+- Schema 4: that same base layout or the complete agent-table layout represented
+  by the existing schema-4 fixtures. Unknown partial agent layouts are rejected.
+
+Before an upgrade, SQLite `VACUUM INTO` creates a consistent private backup,
+including committed WAL content, beside the database:
+`sessions.sqlite.schemaVERSION-UUID.backup`. The backup is synced and retained.
+Schema changes commit in one transaction; failure rolls back rather than
+recreating the store. Immutable artifact files are not rewritten or deleted.
+History, configuration, results, jobs, queues and events retain their identities.
+Recovery then marks unfinished work interrupted, without replaying effects.
+
+Unsupported old/new versions, non-empty unversioned stores, malformed records,
+foreign databases, corruption and unrelated SQL/I/O failures are rejected intact.
+There is no destructive fresh-store fallback. A legacy `.reset` marker causes
+`incomplete-legacy-reset`: inspect/recover the existing data before moving that
+marker aside. Startup never resumes the earlier release's destructive cleanup.
+
+The runtime retains exclusive database and artifact-root ownership. The private
+`.arrodes-owner` marker binds artifacts to the database; mismatched/shared roots
+and ambiguous unowned files fail rather than broadening access. Unsafe symlinks,
+hard-linked database/sidecar files and path traversal are rejected. Root-owned
+system symlink prefixes remain usable when their resolved paths pass ownership
+checks. Credentials, settings and unrelated neighboring files are not migrated.
+
+A backup contains sensitive session data and is not automatically removed.
+Restoring it is an explicit offline recovery action after closing every runtime;
+keep the matching artifact directory. Installing an older executable does not
+restore that backup and does not guarantee the older program can read current data.
 
 Root-level settings, keybindings, trust files and implicit global history
 remain unsupported home layouts; startup rejects those layouts without
@@ -76,12 +80,11 @@ through the current retention contract.
 
 ## Verification
 
-Verify fresh initialization/application ID, current-format restart, recognized
-legacy signature, safe reset of incompatible Arrodes versions and malformed
-routing/delivery status, and reset-marker recovery without effect replay.
-Foreign SQLite, mismatched/shared or ambiguously unmarked artifact roots,
-untrusted paths, hard-linked database/sidecar files, corruption and another
-owner's lock must not be deleted. Tests must show credentials/settings and
-unrelated neighbors survive. Malformed job records still fail their own
-validation rather than wiping a compatible store. No compatibility reader
-or migration fixture replaces this.
+Verify fresh initialization, current-format reopen, each supported historical
+layout and its retained WAL-inclusive backup. Meaningful history/results/jobs
+and artifact bytes must survive the upgrade. Inject migration failure and verify
+rollback, then reopen successfully without replaying effects. Unsupported/newer,
+malformed and foreign stores must remain unchanged. Exercise exclusive-owner,
+artifact ownership, hard-link, unsafe-path and incomplete legacy-reset boundaries.
+Configuration, export and RPC changes retain their existing public contracts or
+introduce explicit version handling; an application version alone is not a data format.

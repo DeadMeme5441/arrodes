@@ -1,5 +1,5 @@
 {:product "Arrodes"
- :version "0.1.7"
+ :version "0.1.8"
  :repository "https://github.com/DeadMeme5441/arrodes"
  :runtime :jvm-clojure
  :baseline {:repository "https://github.com/earendil-works/pi"
@@ -12,7 +12,7 @@
  :required
  [{:id :session-lifecycle :features [:create :open :list :resume :rename :labels :delete :ephemeral]}
   {:id :history :features [:append-only-tree :active-branch :prompt-edit :fork :clone :import :export :branch-summary]}
-  {:id :durability :features [:atomic-commit :optimistic-revision :restart-recovery :no-effect-replay :private-storage]}
+  {:id :durability :features [:atomic-commit :optimistic-revision :restart-recovery :no-effect-replay :private-storage :backed-up-schema-upgrade]}
   {:id :execution :features [:prompt :continue :stream :evaluate :cancel :steer :follow-up :function-composition :ordered-evaluations]}
   {:id :jobs :features [:background-functions :native-results :output-pages :cancellation :owned-children :restart-recovery :terminal-inspection]}
   {:id :session-agents :features [:independent-evaluators :named-delegation :peer-messages :managed-wait :operation-results :durable-value-transfer :team-stop :restart-recovery]}
@@ -25,11 +25,12 @@
   {:id :resources :features [:settings :project-trust :context-files :skills :prompts :extensions :reload]}
   {:id :mcp-client :features [:stdio :streamable-http :discovery :calls :resources :prompts :session-ownership]}
   {:id :packages :features [:install :list :configure :update :remove :pinned-references]}
+  {:id :updates :features [:published-stable :checksum-verification :atomic-replacement :explicit-version]}
   {:id :terminal :features [:multiline :completion :file-references :clipboard :external-editor :selectors :tree :themes :keybindings :extension-rendering]}
   {:id :programmatic :features [:embedding :rpc :host-requests :export :share]}]
  :excluded [:generalized-workspace :advisors :mcp-server :planning-mode :todo-manager
             :process-daemon :distributed-runtime :replication :os-sandbox
-            :jvm-checkpointing :legacy-arrodes-migration]
+            :jvm-checkpointing]
  :evaluator-lifetime {:preserved-on [:continue :model-change :compaction]
                       :reset-on [:branch-navigation :reload :close :restart]
                       :fork :fresh}

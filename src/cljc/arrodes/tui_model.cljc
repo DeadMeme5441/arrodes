@@ -1,6 +1,7 @@
 (ns arrodes.tui-model
   "Portable wire decoding and semantic transcript projection for the TUI."
-  (:require [clojure.string :as str]
+  (:require [arrodes.run :as run]
+            [clojure.string :as str]
             #?(:clj [clojure.data.json :as json])))
 
 (def ^:private max-progress-characters (* 64 1024))
@@ -103,6 +104,42 @@
       (some? (field value :content)) (str (field value :content))
       :else (pr-str value))
     :else (str value)))
+
+(def ^:private usage-labels
+  [[:usage/input-tokens "Uncached input"]
+   [:usage/cached-input-tokens "Cache read"]
+   [:usage/cache-write-tokens "Cache write"]
+   [:usage/output-tokens "Output"]
+   [:usage/total-tokens "Provider total"]])
+
+(defn usage-details
+  "Inspectable measured values; totals never imply missing provider fields
+   were zero. Cost is SDK-estimated USD, not a provider invoice."
+  [report]
+  (let [latest (:latest-usage report)
+        rows (fn [usage missing]
+               (map (fn [[key label]]
+                      (str label ": "
+                           (if (number? (get usage key))
+                             (str (get usage key)
+                                  (when (pos? (get missing key 0))
+                                    (str " (+" (get missing key) " unmeasured)")))
+                             "unknown")))
+                    usage-labels))
+        latest-total (run/context-tokens latest)
+        known-cost (:known-cost-usd report)
+        unknown-cost (:unknown-cost-count report)]
+    (str "LATEST REQUEST · current context\n"
+         (str/join "\n" (take 4 (rows latest {})))
+         "\nContext tokens: " (if (number? latest-total) latest-total "unknown")
+         "\n\nACTIVE PATH · " (:requests report) " provider requests (including summaries)\n"
+         (str/join "\n" (rows (:totals report) (:missing report)))
+         "\nEstimated spend: "
+         (if (number? known-cost) (str "$" known-cost) "unknown")
+         (when (pos? unknown-cost)
+           (str " (" unknown-cost " request" (when (not= unknown-cost 1) "s") " unpriced)"))
+         "\nOnly measured responses on this active conversation path; "
+         "title requests and inactive branches are excluded.")))
 
 (defn empty-state []
   {:session nil

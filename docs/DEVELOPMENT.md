@@ -13,7 +13,8 @@ the change:
 | `bun run test:core` | Clojure runtime and shared behavior |
 | `bun run test:tui` | TUI controller, RPC interaction, and rendering |
 | `bun run test:themes` | Theme pack parsing, preview, persistence and native repainting |
-| `bun run test` | Both suites; the pull request CI command |
+| `bun run test:release` | Offline payload compression and self-update integrity/atomic replacement |
+| `bun run test` | Release, core and TUI suites; the pull request CI command |
 
 Tests use fixtures by default and must not require real accounts or paid model calls.
 Optional diagnostics remain available for focused investigation:
@@ -28,8 +29,8 @@ that application version mirrors match `package.json`; `set X.Y.Z` updates them 
 
 ## Pull requests
 
-Pull requests to `main` run one Linux job with `bun run test`, covering the core and TUI
-suites once. There is no push pipeline for `main` and no repeated test run after merge.
+Pull requests to `main` run one Linux job with `bun run test`, covering release
+packaging/updater, core and TUI behavior once. There is no push pipeline for `main` and no repeated test run after merge.
 The protected `main` branch requires a pull request and the **Core and TUI tests** check;
 force-pushes and deletion are disabled. No second-person approval is required.
 Release builds run only from version tags. See [decision 0002](decisions/0002-lightweight-development-and-release.md).

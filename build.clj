@@ -2,7 +2,7 @@
   (:require [clojure.tools.build.api :as b]))
 
 (def lib 'io.github.DeadMeme5441/arrodes)
-(def version "0.1.7")
+(def version "0.1.8")
 (def core-source-dirs ["src/clj" "src/cljc"])
 (def host-source-dirs (conj core-source-dirs "hosts/rpc"))
 
@@ -18,7 +18,7 @@
   (b/delete {:path "target"}))
 
 (defn- package!
-  [{:keys [aliases artifact class-dir main ns-compile source-dirs]}]
+  [{:keys [aliases artifact class-dir main ns-compile source-dirs exclude]}]
   (b/delete {:path class-dir})
   (b/delete {:path artifact})
   (let [basis (b/create-basis (cond-> {:project "deps.edn"}
@@ -40,7 +40,8 @@
     (b/uber (cond-> {:class-dir class-dir
                      :uber-file artifact
                      :basis basis}
-              main (assoc :main main)))
+              main (assoc :main main)
+              (seq exclude) (assoc :exclude exclude)))
     {:artifact artifact :version version}))
 
 (defn uber
@@ -51,11 +52,24 @@
              :source-dirs core-source-dirs
              :ns-compile '[arrodes.runtime]}))
 
+(defn- native-excludes [platform arch]
+  (when (or platform arch)
+    (let [supported {:darwin #{:arm64 :x64} :linux #{:arm64 :x64} :win32 #{:x64}}
+          os ({:darwin "Mac" :linux "Linux" :win32 "Windows"} platform)
+          sqlite-arch ({:arm64 "aarch64" :x64 "x86_64"} arch)
+          jna-arch ({:arm64 "aarch64" :x64 "x86-64"} arch)]
+      (when-not (contains? (get supported platform #{}) arch)
+        (throw (ex-info "Unsupported native release target" {:platform platform :arch arch})))
+      [(str "^org/sqlite/native/(?!" os "/" sqlite-arch "/).*")
+       (str "^com/sun/jna/(?!" (name platform) "-" jna-arch
+            "/)[^/]+/[^/]+\\.(?:so|dll|jnilib|dylib|a)$")])))
+
 (defn rpc
-  "Build the standalone JSONL RPC host."
-  [_]
+  "Build the standalone JSONL RPC host; optional :platform/:arch retain only target natives."
+  [{:keys [platform arch]}]
   (package! {:aliases [:host]
              :artifact "target/arrodes-rpc.jar"
+             :exclude (native-excludes platform arch)
              :class-dir "target/classes-rpc"
              :source-dirs host-source-dirs
              :ns-compile '[arrodes.runtime arrodes.commands arrodes.rpc-main]

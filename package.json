@@ -1,6 +1,6 @@
 {
   "name": "arrodes",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "type": "module",
   "engines": {
@@ -14,7 +14,8 @@
     "tui": "bun scripts/tui.ts",
     "dev": "bun scripts/tui.ts",
     "test:core": "clojure -Srepro -M:test",
-    "test": "bun run test:core && bun run test:tui"
+    "test:release": "bun test scripts/updater.test.ts scripts/release-payload.test.ts",
+    "test": "bun run test:release && bun run test:core && bun run test:tui"
   },
   "dependencies": {
     "@opentui/core": "0.5.11",

@@ -36,6 +36,55 @@
   (is (= 700 (run/context-tokens {:usage/cached-input-tokens 500
                                  :usage/cache-write-tokens 200}))))
 
+(deftest usage-report-separates-cache-from-spend-and-preserves-unknowns
+  (let [entry (fn [usage cost]
+                {:kind :message :data {:message/role :assistant
+                                       :message/provider-data {:response/usage usage
+                                                               :response/cost cost}}})
+        first-reply (entry {:usage/input-tokens 4000 :usage/cached-input-tokens 45000
+                            :usage/cache-write-tokens 1000 :usage/output-tokens 200
+                            :usage/reasoning-tokens 100 :usage/total-tokens 50200}
+                           {:cost/usd 0.025 :cost/estimated? true})
+        summary {:kind :compaction
+                 :data {:usage {:usage/input-tokens 80 :usage/output-tokens 20
+                                :usage/total-tokens 100}
+                        :cost {:cost/usd :unknown}}}
+        last-reply (entry {:usage/input-tokens 600 :usage/output-tokens 50
+                           :usage/total-tokens 650}
+                          {:cost/usd 0.005})
+        report (run/usage-report
+                [first-reply summary last-reply
+                 {:kind :message :data {:message/role :user
+                                        :message/content "A user message is not another request"}}])]
+    (is (= (:response/usage (:message/provider-data (:data last-reply)))
+           (:latest-usage report)))
+    (is (= 3 (:requests report)))
+    (is (= {:usage/input-tokens 4680 :usage/cached-input-tokens 45000
+            :usage/cache-write-tokens 1000 :usage/output-tokens 270
+            :usage/total-tokens 50950}
+           (:totals report)))
+    (is (= {:usage/cached-input-tokens 2 :usage/cache-write-tokens 2}
+           (:missing report)))
+    (is (< (Math/abs (- 0.03 (:known-cost-usd report))) 0.0000001))
+    (is (= 1 (:unknown-cost-count report)))
+    (is (= 650 (run/context-tokens (:latest-usage report))))
+    (is (= 45000 (get-in (run/usage-report [first-reply]) [:totals :usage/cached-input-tokens]))))
+  (let [report (run/usage-report [{:kind :branch-summary
+                                   :data {:usage {:usage/cached-input-tokens 45
+                                                  :usage/output-tokens 5
+                                                  :usage/total-tokens 50}
+                                          :cost {:cost/usd 0.003}}}])]
+    (is (= 1 (:requests report)))
+    (is (= 45 (get-in report [:totals :usage/cached-input-tokens])))
+    (is (= 0.003 (:known-cost-usd report)))
+    (is (nil? (:latest-usage report))))
+  (let [report (run/usage-report [{:kind :message :data {:message/role :assistant
+                                                         :message/content "No measurements"}}])]
+    (is (= {} (:totals report)))
+    (is (= 1 (:unknown-cost-count report)))
+    (is (= 1 (get-in report [:missing :usage/cache-write-tokens])))
+    (is (nil? (:known-cost-usd report)))))
+
 (deftest context-measurements-expire-at-compaction
   (let [old {:kind :message :data {:message/role :assistant
                                  :message/provider-data {:response/usage {:usage/total-tokens 90000}}}}

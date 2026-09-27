@@ -179,8 +179,8 @@
           (is (= 2 (count (store/jobs (:store reopened) sid))))
           (finally (runtime/close! reopened)))))))
 
-(deftest incompatible-stores-reset-without-erasing-settings-or-neighbors
-  (doseq [version [0 1 2 3 4 6]]
+(deftest unsupported-stores-preserve-history-settings-and-artifacts
+  (doseq [version [0 1 2 6]]
     (let [directory (session-fixtures/temp-directory)
           path (str directory "/sessions.sqlite")
           artifact-dir (str path ".artifacts")
@@ -203,18 +203,14 @@
         (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
                     statement (.createStatement connection)]
           (.execute statement (str "PRAGMA user_version=" version)))
-        (let [reopened (store/open! {:path path})]
-          (try
-            (is (empty? (store/list-sessions reopened {})))
-            (is (= 5 (store/store-read reopened
-                        (fn [connection]
-                          (with-open [statement (.createStatement connection)
-                                      result (.executeQuery statement "PRAGMA user_version")]
-                            (.next result)
-                            (.getInt result 1)))))
-                "A replacement must use the current schema")
-            (finally (store/close! reopened))))
-        (is (false? (java.nio.file.Files/exists artifact-path (make-array java.nio.file.LinkOption 0))))
+        (let [before (java.nio.file.Files/readAllBytes (java.nio.file.Path/of path (make-array String 0)))
+              error (try (store/open! {:path path}) nil
+                         (catch clojure.lang.ExceptionInfo failure failure))]
+          (is (= "unsupported-store-format" (:error/code (ex-data error))))
+          (is (java.util.Arrays/equals before
+                                      (java.nio.file.Files/readAllBytes
+                                       (java.nio.file.Path/of path (make-array String 0))))))
+        (is (java.nio.file.Files/exists artifact-path (make-array java.nio.file.LinkOption 0)))
         (is (= "credentials belong to configuration" (java.nio.file.Files/readString settings)))
         (is (= "retain this neighbor" (java.nio.file.Files/readString neighbor)))
         (finally (session-fixtures/remove-directory! directory))))))

@@ -13,11 +13,11 @@ be able to work conversationally and inspect execution when useful.
   exchange durable peer messages, and inspect operation-scoped outcomes. Delegation
   preserves the single-`repl` provider interface; it does not turn function jobs into
   agents or share live JVM values between sessions.
-- Durable history, operations, queues and retained results survive a normal
-  process restart **when the store is current-format**. An incompatible
-  recognized Arrodes SQLite store instead triggers a destructive fresh-store
-  reset; prior session data and owned artifacts are lost, not migrated.
-  Foreign SQLite databases are rejected intact.
+- Durable history, operations, queues and retained results survive current-format
+  restart and supported backed-up schema upgrades. Unsupported, newer, malformed
+  and foreign databases are rejected intact, never reset to an empty store.
+- Packaged installations update from verified published assets without modifying
+  session data, settings or credentials.
 - Recovery records interrupted work and never automatically repeats external effects.
 - Branching selects conversation context and does not restore filesystem state.
 - Explicit connection, provider and model settings are understandable and inspectable.
