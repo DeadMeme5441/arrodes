@@ -46,6 +46,10 @@ Linux on arm64/x64. `--check` reports availability without replacing the executa
 name/URL, byte size, GitHub SHA-256 digest and checksum-file content must agree.
 These checks use the official HTTPS release endpoints, not independent code signing.
 
+HTTP-compressed responses are decoded by Fetch. Transfer `Content-Length` is
+compared only for unencoded responses; decoded byte limits and published asset
+sizes/checksums remain enforced for every response.
+
 The updater accepts only an owned regular executable, not a symlink, hard link,
 setuid/setgid file or development Bun process. It streams into a private file beside
 that executable, syncs verified bytes, checks the original file has not changed,

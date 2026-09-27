@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { linkSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { afterEach, expect, test } from "bun:test";
 import { runUpdate } from "./updater";
 
@@ -80,6 +81,64 @@ test("local HTTP fixture installs without any production endpoint override", asy
     for (const item of f.release.assets) item.browser_download_url = item.browser_download_url.replace("http://127.0.0.1:1", base);
     await runUpdate(f.options, { apiBase: base, releaseBase: base });
     expect(readFileSync(f.executable, "utf8")).toBe("new verified binary");
+  } finally {
+    server.stop(true);
+  }
+});
+
+function gzipResponse(text: string): Response {
+  const encoded = gzipSync(text);
+  return new Response(encoded, {
+    headers: { "content-encoding": "gzip", "content-length": String(encoded.byteLength) },
+  });
+}
+
+test("HTTP-compressed metadata and assets install the verified decoded executable", async () => {
+  const body = "verified executable bytes\n";
+  const f = fixture(body);
+  const server = Bun.serve({
+    port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === "/releases/latest") return gzipResponse(JSON.stringify(f.release));
+      if (path.endsWith(".sha256")) return gzipResponse(`${digest(body)}  arrodes-darwin-arm64\n`);
+      if (path.endsWith("/arrodes-darwin-arm64")) return gzipResponse(body);
+      return new Response("missing", { status: 404 });
+    },
+  });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    for (const item of f.release.assets) item.browser_download_url = item.browser_download_url.replace("http://127.0.0.1:1", base);
+    await runUpdate(f.options, { apiBase: base, releaseBase: base });
+    expect(readFileSync(f.executable, "utf8")).toBe(body);
+    expect(lstatSync(f.executable).mode & 0o777).toBe(0o750);
+    expect(readdirSync(f.root)).toEqual(["arrodes"]);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("compressed metadata still enforces the decoded size limit before installation", async () => {
+  const body = "verified executable bytes\n";
+  const f = fixture(body);
+  const server = Bun.serve({
+    port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === "/releases/latest") {
+        return gzipResponse(JSON.stringify({ ...f.release, body: "x".repeat(1024 * 1024) }));
+      }
+      if (path.endsWith(".sha256")) return gzipResponse(`${digest(body)}  arrodes-darwin-arm64\n`);
+      if (path.endsWith("/arrodes-darwin-arm64")) return gzipResponse(body);
+      return new Response("missing", { status: 404 });
+    },
+  });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    for (const item of f.release.assets) item.browser_download_url = item.browser_download_url.replace("http://127.0.0.1:1", base);
+    await expect(runUpdate(f.options, { apiBase: base, releaseBase: base })).rejects.toThrow();
+    expect(readFileSync(f.executable, "utf8")).toBe("original binary");
+    expect(readdirSync(f.root)).toEqual(["arrodes"]);
   } finally {
     server.stop(true);
   }
