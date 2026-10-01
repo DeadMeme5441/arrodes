@@ -8,7 +8,7 @@
             [arrodes.runtime :as runtime]
             [arrodes.runtime-test :as fixtures]
             [arrodes.session-test :as session-fixtures]
-            [arrodes.store :as store]))
+            [arrodes.store.agents :as store-agents]))
 
 (defn- eval! [rt sid source]
   (let [evaluated (runtime/evaluate! rt sid source)]
@@ -76,17 +76,17 @@
             _ (reset! parent-id sid)
             handle (agents/start-agent! (:agents rt) sid {:name "Worker" :task "Finish independently"})]
         (is (= :completed (:status (runtime/wait! rt (:operation-id handle) 10000))))
-        (is (true? (:paused? (store/agent-state (:store rt) sid))))
-        (is (store/pending-agent-messages? (:store rt) sid))
+        (is (true? (:paused? (store-agents/agent-state (:store rt) sid))))
+        (is (store-agents/pending-agent-messages? (:store rt) sid))
         (is (nil? (:operation-id (runtime/state rt sid))))
         (is (not (realized? root-called)))
         (is (= :completed (:status (agents/operation-result (:agents rt) sid handle (:operation-id handle)))))
         (agents/messages-for (:agents rt) sid {})
-        (is (store/pending-agent-messages? (:store rt) sid))
+        (is (store-agents/pending-agent-messages? (:store rt) sid))
         (agents/resume-agent! (:agents rt) sid sid)
         (await! root-called)
         (when-let [oid (:operation-id (runtime/state rt sid))] (runtime/wait! rt oid 10000))
-        (is (not (store/pending-agent-messages? (:store rt) sid)))))))
+        (is (not (store-agents/pending-agent-messages? (:store rt) sid)))))))
 
 (deftest cancelling-parent-preserves-child-and-function-job-until-explicit-tree-stop
   (let [parent-id (atom nil) parent-entered (promise) child-entered (promise)]
@@ -108,7 +108,7 @@
           (is (= :cancelled (:status (runtime/wait! rt (:id op) 10000))))
           (is (= :running (:status (runtime/operation rt (:operation-id child)))))
           (is (contains? #{:queued :running} (:status (jobs/inspect-job (:jobs rt) sid (:id job)))))
-          (is (true? (:paused? (store/agent-state (:store rt) sid)))))
+          (is (true? (:paused? (store-agents/agent-state (:store rt) sid)))))
         (is (= :stopped (:status (agents/stop-agent! (:agents rt) sid sid {:timeout-ms 10000}))))
         (is (= :cancelled (:status (runtime/operation rt (:operation-id child)))))
         (is (= :cancelled (:status (jobs/inspect-job (:jobs rt) sid (:id job)))))
@@ -137,7 +137,7 @@
             (await! waiting)
             (agents/send-message! (:agents rt) (:session-id child) :parent {:ratio 3/7} {})
             (is (= :message (:reason (await! worker))))
-            (is (store/pending-agent-messages? (:store rt) sid))
+            (is (store-agents/pending-agent-messages? (:store rt) sid))
             (is (some #(= {:ratio 3/7} (:content %)) (agents/messages-for (:agents rt) sid {})))
             (finally
               (agents/stop-agent! (:agents rt) sid child {:timeout-ms 10000})
@@ -159,7 +159,7 @@
           (await! second-entered)
           (is (= :completed (:status (agents/cancel-agent! (:agents rt) sid handle (:operation-id handle)))))
           (is (= :running (:status (runtime/operation rt (:id next-op)))))
-          (is (false? (:paused? (store/agent-state (:store rt) (:session-id handle)))))
+          (is (false? (:paused? (store-agents/agent-state (:store rt) (:session-id handle)))))
           (is (thrown? clojure.lang.ExceptionInfo (agents/inspect-agent (:agents rt) foreign handle)))
           (agents/cancel-agent! (:agents rt) sid (:session-id handle) (:id next-op))
           (is (= :cancelled (:status (runtime/wait! rt (:id next-op) 10000)))))))))
@@ -282,7 +282,7 @@
               (is (= :cancelled (:status (runtime/wait! rt (:id operation) 10000))))
               (case effect
                 :job (is (empty? (jobs/list-jobs (:jobs rt) sid {})))
-                :agent (is (= 1 (count (store/agent-team (:store rt) sid {}))))
+                :agent (is (= 1 (count (store-agents/agent-team (:store rt) sid {}))))
                 :message (is (empty? (agents/messages-for (:agents rt) sid {})))
-                :resume (is (true? (:paused? (store/agent-state (:store rt) sid))))))
+                :resume (is (true? (:paused? (store-agents/agent-state (:store rt) sid))))))
             (finally (.countDown ^java.util.concurrent.CountDownLatch release))))))))

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Split persistence into transaction, database/schema/filesystem ownership, record,
+  job, agent, transfer and recovery namespaces; migrate internal callers directly
+  without compatibility re-exports.
+- Split runtime orchestration from session handles, operation execution, input
+  preparation and model continuation while preserving evaluator and worker ownership.
+- Validate qualified internal transaction and prepared-run envelopes with Clojure
+  spec. Malformed or misspelled transaction keys fail before mutation; durable
+  records, native results, SQLite schema 5, RPC 1 and export format 1 are unchanged.
+
 ## 0.2.0
 
 - Fix self-update failures on HTTP-compressed release responses. Validate decoded

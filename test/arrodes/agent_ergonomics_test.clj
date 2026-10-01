@@ -5,7 +5,7 @@
             [arrodes.commands :as commands]
             [arrodes.runtime :as runtime]
             [arrodes.runtime-test :as fixtures]
-            [arrodes.store :as store]))
+            [arrodes.store.agents :as store-agents]))
 
 (defn- evaluate [rt sid source]
   (let [outcome (runtime/evaluate! rt sid source)]
@@ -74,7 +74,7 @@
         (is (= 2/3 (get-in page [:messages 1 :content :ratio])))
         (is (= (set (range 10))
                (set (keep #(get-in % [:content :index]) (concat (:messages page) (:messages older))))))
-        (is (store/pending-agent-messages? (:store rt) sid))))))
+        (is (store-agents/pending-agent-messages? (:store rt) sid))))))
 
 (deftest receipt-wait-yields-the-followup-operation-without-roster-bookkeeping
   (let [parent-id (atom nil) step (atom 0) entered (promise) release (promise)]

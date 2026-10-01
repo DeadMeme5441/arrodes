@@ -1,5 +1,7 @@
 (ns arrodes.runtime-lifecycle-test
   (:require [arrodes.runtime :as runtime]
+            [arrodes.runtime.control :as control]
+            [arrodes.runtime.operations :as operations]
             [arrodes.mcp :as mcp]
             [arrodes.platform :as u]
             [arrodes.session-test :as fixtures]
@@ -293,7 +295,7 @@
                            :data-dir (str directory "/data")
                            :complete-fn (fn [_ _] (answer "Done"))})
         sid (:id (create-test-session! rt {:config fixtures/config}))
-        release-var (ns-resolve 'arrodes.runtime 'release-foreground!)
+        release-var #'control/release-foreground!
         release-foreground @release-var
         entered (promise)
         release (promise)]
@@ -423,7 +425,7 @@
                            :data-dir (str directory "/data")
                            :complete-fn (fn [_ _] (answer "Successful result"))})
         sid (:id (create-test-session! rt {:config fixtures/config}))
-        settle-var (ns-resolve 'arrodes.runtime 'settle-operation!)
+        settle-var #'operations/settle-operation!
         settle @settle-var
         entered (CountDownLatch. 1)
         release (CountDownLatch. 1)]

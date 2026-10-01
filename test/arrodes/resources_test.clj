@@ -5,6 +5,8 @@
             [arrodes.resources :as resources]
             [arrodes.session-test :as fixtures]
             [arrodes.store :as store]
+            [arrodes.store.command :as command]
+            [arrodes.store.db :as store-db]
             [arrodes.platform :as u]
             [clojure.java.io :as io]
             [clojure.set :as set]
@@ -41,7 +43,7 @@
   (let [directory (fixtures/temp-directory)
         home (str directory "/home")
         extension-dir (str (u/project-dir home directory) "/extensions")
-        database (store/open! {:memory? true})
+        database (store-db/open! {:memory? true})
         provider-manager (provider/create! {:home home :settings {}})
         session (store/create-session! database {:cwd directory :name "Extension rollback" :config fixtures/config})
         sid (:id session)
@@ -58,7 +60,7 @@
                                                    {:session-id sid :get-session (fn [& _] (store/session database sid))
                                                     :command! (fn [& _] (throw (ex-info "No command needed" {})))
                                                     :provider provider-manager :emit! (fn [_]) :ui! (fn [& _] nil)
-                                                    :append-entry! (fn [entry] (store/commit! database sid {:entries [entry]}))})}
+                                                    :append-entry! (fn [entry] (store/commit! database sid {::command/entries [entry]}))})}
                       (catch Throwable error {:error error}))]
         (try
           (is (= before (set (map :name (capabilities/catalog registry)))))
@@ -66,7 +68,7 @@
           (is (or (:error outcome) (seq (:errors (:value outcome))) (seq (:errors (resources/catalog manager)))))
           (finally (resources/close! manager))))
       (finally (capabilities/close! registry) (provider/close! provider-manager)
-               (store/close! database) (fixtures/remove-directory! directory)))))
+               (store-db/close! database) (fixtures/remove-directory! directory)))))
 
 (defn- marker-source [marker]
   (str "(fn [api]\n  (spit (str (:cwd api) " (pr-str (str "/" marker))
@@ -89,7 +91,7 @@
         project-extension-root (str (u/project-dir home directory) "/extensions")
         markers ["global-disabled.marker" "project-disabled.marker"
                  "package-disabled.marker" "explicit-disabled.marker"]
-        database (store/open! {:memory? true})
+        database (store-db/open! {:memory? true})
         provider-manager (provider/create! {:home home :settings {}})
         session (store/create-session! database {:cwd directory :name "Disabled extensions"
                                                  :config fixtures/config})
@@ -142,7 +144,7 @@
             :provider provider-manager
             :emit! (fn [_] nil)
             :ui! (fn [& _] nil)
-            :append-entry! (fn [entry] (store/commit! database sid {:entries [entry]}))})
+            :append-entry! (fn [entry] (store/commit! database sid {::command/entries [entry]}))})
           (is (every? #(not (.exists (io/file directory %))) markers))
           (is (empty? (set/intersection
                        (set (map :name (:extensions (resources/catalog manager))))
@@ -152,7 +154,7 @@
       (finally
         (capabilities/close! registry)
         (provider/close! provider-manager)
-        (store/close! database)
+        (store-db/close! database)
         (fixtures/remove-directory! directory)))))
 
 (deftest disabled-prompt-excludes-default-discovery

@@ -3,6 +3,7 @@
             [arrodes.runtime :as runtime]
             [arrodes.session-test :as fixtures]
             [arrodes.store :as store]
+            [arrodes.store.command :as command]
             [arrodes.platform :as u]
             [clojure.java.io :as io]
             [clojure.edn :as edn]
@@ -37,13 +38,13 @@
           before (store/events-since database {:session-id sid})]
       (is (thrown? clojure.lang.ExceptionInfo
                    (store/commit! database sid
-                                  {:entries [(fixtures/message-entry :user "must roll back")]
-                                   :events [{:type "not-a-keyword"}]})))
+                                  {::command/entries [(fixtures/message-entry :user "must roll back")]
+                                   ::command/events [{:type "not-a-keyword"}]})))
       (is (empty? (store/entries database sid)))
       (is (= before (store/events-since database {:session-id sid})))
       (let [committed (:entries
                        (store/commit! database sid
-                                      {:entries [(fixtures/message-entry :user "first")
+                                      {::command/entries [(fixtures/message-entry :user "first")
                                                  (fixtures/message-entry :assistant "second")]}))
             replay (store/events-since database {:session-id sid})
             entry-events (filterv #(= :entry/committed (:type %)) replay)]
@@ -85,7 +86,7 @@
           raw-items (mapv (fn [id text]
                             {:id id :kind :follow-up :content text :options {}})
                           ids ["first" "second" "third"])]
-      (store/commit! database sid {:queue-enqueue raw-items})
+      (store/commit! database sid {::command/queue-enqueue raw-items})
       (let [before (store/pending database sid)
             update-response
             (commands/dispatch! rt "session.queue.update"
@@ -108,7 +109,7 @@
         (is (= [{:item (:item update-response)}
                 {:id (second ids)}]
                (mapv :data queue-events))))
-      (store/commit! database sid {:queue-deliver [(first ids)]})
+      (store/commit! database sid {::command/queue-deliver [(first ids)]})
       (testing "delivery wins permanently at the queue transaction boundary"
         (is (thrown? clojure.lang.ExceptionInfo
                      (commands/dispatch! rt "session.queue.update"

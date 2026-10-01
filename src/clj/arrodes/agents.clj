@@ -8,6 +8,9 @@
             [arrodes.platform :as util]
             [arrodes.run :as run]
             [arrodes.store :as store]
+            [arrodes.store.agents :as store-agents]
+            [arrodes.store.command :as command]
+            [arrodes.store.db :as store-db]
             [arrodes.value :as value])
   (:import (java.util.concurrent Executors ExecutorService RejectedExecutionException TimeUnit)))
 
@@ -60,18 +63,18 @@
 
 (defn- off-context? [db state]
   (if-let [parent-id (:parent-session-id state)]
-    (let [parent (store/agent-state db parent-id)]
+    (let [parent (store-agents/agent-state db parent-id)]
       (or (not= (:parent-context-id state) (:context-id parent))
           (recur db parent)))
     false))
 
 (defn- team-snapshot [manager sid opts]
-  (store/store-read (:store manager)
+  (store-db/store-read (:store manager)
     (fn [_]
-      {:root-id (:root-id (store/agent-state (:store manager) sid))
+      {:root-id (:root-id (store-agents/agent-state (:store manager) sid))
        :agents (mapv #(merge % (measured-usage (store/entries (:store manager) (:session-id %)))
                             {:off-context? (off-context? (:store manager) %)})
-                     (store/agent-team (:store manager) sid opts))
+                     (store-agents/agent-team (:store manager) sid opts))
        :cursor (store/latest-event-seq (:store manager))})))
 
 (defn list-agents
@@ -90,7 +93,7 @@
                 (assoc row :phase phase))) rows))))
 
 (defn- target-id [manager sid target]
-  (store/agent-target-id (:store manager) sid
+  (store-agents/agent-target-id (:store manager) sid
                          (if (map? target) (:session-id target) target)))
 
 (defn inspect-agent [manager sid target]
@@ -101,24 +104,24 @@
 (defn- wake-error! [manager sid error]
   (when-not @(:closed? manager)
     (try
-      (emit! manager (store/set-agent-paused! (:store manager) sid true))
-      (let [root (:root-id (store/agent-state (:store manager) sid))]
+      (emit! manager (store-agents/set-agent-paused! (:store manager) sid true))
+      (let [root (:root-id (store-agents/agent-state (:store manager) sid))]
         (emit! manager (store/commit! (:store manager) root
-                         {:events [{:type :agent/error
+                         {::command/events [{:type :agent/error
                                     :data {:session-id sid :root-id root
                                            :error (value/error-map error)}}]})))
       (catch Throwable _ nil))))
 
 (defn- wake-team! [manager root]
   (when-not @(:closed? manager)
-    (doseq [row (store/agent-team (:store manager) root {:limit 500})
+    (doseq [row (store-agents/agent-team (:store manager) root {:limit 500})
             :let [sid (:session-id row)]
             :when (and (not @(:closed? manager))
-                       (store/agent-wake? (:store manager) sid))]
+                       (store-agents/agent-wake? (:store manager) sid))]
       (try
         (call manager :with-session sid
           #(when (and (not @(:closed? manager))
-                      (store/agent-wake? (:store manager) sid)
+                      (store-agents/agent-wake? (:store manager) sid)
                       (nil? (:operation-id (call manager :state sid))))
              (call manager :continue! sid {:automatic? true})))
         (catch Throwable error
@@ -132,7 +135,7 @@
   [manager _sid]
   (when (and manager (not @(:closed? manager)))
     (signal! manager)
-    (doseq [root (store/agent-wake-roots (:store manager))]
+    (doseq [root (store-agents/agent-wake-roots (:store manager))]
       (let [schedule? (locking (:scheduled manager)
                         (when-not (contains? @(:scheduled manager) root)
                           (swap! (:scheduled manager) conj root)
@@ -152,23 +155,23 @@
 
 (defn pause! [manager sid]
   (when manager
-    (emit! manager (store/set-agent-paused! (:store manager) sid true))
+    (emit! manager (store-agents/set-agent-paused! (:store manager) sid true))
     (signal! manager)))
 
 (defn- resume-session!
   "Unpause an explicit foreground start. Does not compete with it for admission."
   [manager sid]
   (when manager
-    (when (:stopped? (store/agent-state (:store manager) sid))
-      (emit! manager (store/set-agent-stopped! (:store manager) sid false)))
-    (emit! manager (store/set-agent-paused! (:store manager) sid false))
+    (when (:stopped? (store-agents/agent-state (:store manager) sid))
+      (emit! manager (store-agents/set-agent-stopped! (:store manager) sid false)))
+    (emit! manager (store-agents/set-agent-paused! (:store manager) sid false))
     (signal! manager)))
 
 (defn deliver! [manager sid operation-id]
   (if-not manager
     []
     (let [outcome (call manager :with-session sid
-                       #(emit! manager (store/deliver-agent-messages! (:store manager) sid operation-id)))]
+                       #(emit! manager (store-agents/deliver-agent-messages! (:store manager) sid operation-id)))]
       (when (seq (:delivered outcome)) (signal! manager))
       (vec (:entries outcome)))))
 
@@ -200,13 +203,13 @@
                            :max-depth (max 1 (min 16 (or (:agent-max-depth settings) 4)))
                            :origin (select-keys capabilities/*invocation-context*
                                                 [:operation-id :job-id :call-id])})]
-      (if (store/agent-submission (:store manager) sid submission)
-        (:handle (store/create-agent! (:store manager) sid prepared))
+      (if (store-agents/agent-submission (:store manager) sid submission)
+        (:handle (store-agents/create-agent! (:store manager) sid prepared))
         (do
           (call manager :reserve! oid)
           (let [created (atom nil)]
             (try
-              (let [outcome (emit! manager (store/create-agent! (:store manager) sid prepared))
+              (let [outcome (emit! manager (store-agents/create-agent! (:store manager) sid prepared))
                     handle (:handle outcome)]
                 (reset! created handle)
                 (if (:existing? outcome)
@@ -222,10 +225,10 @@
                       (call manager :with-session (:session-id handle)
                         #(emit! manager
                            (store/commit! (:store manager) (:session-id handle)
-                             {:session {:status :failed}
-                              :operation {:id (:operation-id handle) :status :failed
+                             {::command/session {:status :failed}
+                              ::command/operation {:id (:operation-id handle) :status :failed
                                           :finished-at (util/now) :error (value/error-map error)}
-                              :events [{:type :operation/failed :operation-id (:operation-id handle)
+                              ::command/events [{:type :operation/failed :operation-id (:operation-id handle)
                                         :data {:error (value/error-map error)}}]}))))
                     (settled! manager (:session-id handle))
                     (assoc handle :status :failed :error (value/error-map error)))
@@ -240,14 +243,14 @@
                 :invalid-agent-options "Invalid addressed message options" {})
   (let [target (if (map? target) (:session-id target) target)
         outcome (emit! manager
-                       (store/send-agent-message! (:store manager) sid target content
+                       (store-agents/send-agent-message! (:store manager) sid target content
                                                   (assoc opts :submission-id (or (:submission-id opts) (util/id)))))]
     (settled! manager sid)
     (:receipt outcome)))
 
 (defn messages-for [manager sid opts]
   (ensure-open! manager)
-  (store/agent-messages (:store manager) sid opts))
+  (store-agents/agent-messages (:store manager) sid opts))
 
 (declare environment)
 
@@ -256,13 +259,13 @@
   ([id] (let [[manager sid] (environment)] (submission manager sid id)))
   ([manager sid id]
    (ensure-open! manager)
-   (store/agent-submission (:store manager) sid id)))
+   (store-agents/agent-submission (:store manager) sid id)))
 
 (defn operation-result [manager sid target oid]
   (ensure-open! manager)
   (value/check! (and (string? oid) (not (str/blank? oid))) :invalid-agent-operation
                 "Select a particular operation; a session's latest answer is not a stable result" {})
-  (store/agent-result (:store manager) sid (target-id manager sid target) oid))
+  (store-agents/agent-result (:store manager) sid (target-id manager sid target) oid))
 
 (defn- inspection-options! [opts allowed]
   (value/check! (and (map? opts) (every? allowed (keys opts))
@@ -298,9 +301,9 @@
   (ensure-open! manager)
   (inspection-options! opts #{:limit :offset :detailed?})
   (let [opts (page-options! opts)
-        page (store/store-read (:store manager)
+        page (store-db/store-read (:store manager)
                (fn [_]
-                 (update (store/agent-summaries (:store manager) sid (dissoc opts :detailed?))
+                 (update (store-agents/agent-summaries (:store manager) sid (dissoc opts :detailed?))
                          :agents #(mapv (partial brief-row (:store manager)) %))))]
     (if (:detailed? opts)
       (assoc page :agents (:agents (list-agents manager sid (dissoc opts :detailed?))))
@@ -312,10 +315,10 @@
   (if (:detailed? opts)
     (inspect-agent manager sid target)
     (let [id (target-id manager sid target)]
-      (store/store-read (:store manager)
+      (store-db/store-read (:store manager)
         (fn [_]
           (let [row (brief-row (:store manager)
-                               (first (:agents (store/agent-summaries (:store manager) sid
+                               (first (:agents (store-agents/agent-summaries (:store manager) sid
                                                                      {:target-id id :limit 1}))))
                 handle (pr-str (select-keys row [:session-id :operation-id]))]
             (assoc row :next
@@ -438,7 +441,7 @@
   (ensure-open! manager)
   (inspection-options! opts #{:limit :offset :detailed?})
   (let [id (receipt-id receipt)
-        page (store/agent-delivery (:store manager) sid id (page-options! opts))]
+        page (store-agents/agent-delivery (:store manager) sid id (page-options! opts))]
     (assoc page
            :deliveries (mapv (fn [delivery]
                                (cond-> delivery
@@ -497,7 +500,7 @@
   (ensure-open! manager)
   (util/check-cancelled! (:cancelled? capabilities/*invocation-context*))
   (let [target (target-id manager sid target)]
-    (emit! manager (store/set-agent-stopped! (:store manager) target false))
+    (emit! manager (store-agents/set-agent-stopped! (:store manager) target false))
     (resume-session! manager target)
     (settled! manager target)
     (inspect-agent manager sid target)))
@@ -509,8 +512,8 @@
         _ (value/check! (and (integer? timeout-ms) (<= 0 timeout-ms 300000))
                         :invalid-timeout "Stop timeout must be 0..300000 milliseconds" {})
         ids (locking (:launch-lock manager)
-              (emit! manager (store/set-agent-stopped! (:store manager) target true))
-              (store/agent-descendants (:store manager) target))
+              (emit! manager (store-agents/set-agent-stopped! (:store manager) target true))
+              (store-agents/agent-descendants (:store manager) target))
         deadline (+ (System/nanoTime) (* timeout-ms 1000000))
         remaining #(long (max 0 (quot (- deadline (System/nanoTime)) 1000000)))]
     (doseq [id ids]
@@ -543,10 +546,10 @@
       false)))
 
 (defn- summary-team [manager sid]
-  (store/store-read (:store manager)
+  (store-db/store-read (:store manager)
     (fn [_]
       (loop [offset 0 rows []]
-        (let [page (store/agent-summaries (:store manager) sid {:offset offset :limit 20})
+        (let [page (store-agents/agent-summaries (:store manager) sid {:offset offset :limit 20})
               rows (into rows (:agents page))]
           (if-let [next-offset (:next-offset page)]
             (recur next-offset rows)
@@ -607,7 +610,7 @@
         (ensure-open! manager)
         (util/check-cancelled! (:cancelled? capabilities/*invocation-context*))
         (let [version @(:version manager)
-              receipts (mapv #(store/agent-delivery (:store manager) sid %
+              receipts (mapv #(store-agents/agent-delivery (:store manager) sid %
                                                     {:internal? true :limit 500}) receipt-ids)
               deliveries (mapcat :deliveries receipts)
               mapped (vec (distinct (keep #(when (:operation-id %)
@@ -627,7 +630,7 @@
                                 {:id (:id receipt) :session-id (:session-id delivery)}))
               reason (cond
                        (some #(= :steering (:kind %)) (store/pending (:store manager) sid)) :steering
-                       (store/pending-agent-messages? (:store manager) sid) :message
+                       (store-agents/pending-agent-messages? (:store manager) sid) :message
                        (seq ready) (if (and receipts? (= :delivered until)) :delivered :completed)
                        (seq superseded) :superseded
                        (if (or explicit? receipts?) (empty? requested)
