@@ -4,6 +4,8 @@
             [arrodes.resources :as resources]
             [arrodes.session-test :as fixtures]
             [arrodes.store :as store]
+            [arrodes.store.command :as command]
+            [arrodes.store.db :as store-db]
             [arrodes.platform :as u]
             [clojure.test :refer [deftest is testing]]))
 
@@ -26,7 +28,7 @@
    :provider provider-manager
    :emit! (fn [_] nil)
    :ui! (fn [& _] nil)
-   :append-entry! (fn [entry] (store/commit! database sid {:entries [entry]}))})
+   :append-entry! (fn [entry] (store/commit! database sid {::command/entries [entry]}))})
 
 (defn- with-environment [extension-source body]
   (let [directory (fixtures/temp-directory)
@@ -34,7 +36,7 @@
         extension-dir (str (u/project-dir home directory) "/extensions")
         extension-path (str extension-dir "/replacement.clj")
         sample-path (str directory "/sample.txt")
-        database (store/open! {:memory? true})
+        database (store-db/open! {:memory? true})
         provider-manager (provider/create! {:home home :settings {}})
         session (store/create-session! database {:cwd directory :name "Extension replacement" :config fixtures/config})
         sid (:id session)
@@ -53,7 +55,7 @@
       (finally
         (capabilities/close! registry)
         (provider/close! provider-manager)
-        (store/close! database)
+        (store-db/close! database)
         (fixtures/remove-directory! directory)))))
 
 (defn- provider-value [registry name arguments]

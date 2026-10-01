@@ -145,9 +145,11 @@
 
 (defn- group-of [name]
   (if-let [prefix (namespace (symbol name))] prefix
-      (if (contains? #{"help" "workspace" "result" "result-info" "results"
-                       "artifact" "artifact-page" "invoke-tool" "register-tool!"} name)
-        "repl" "coding")))
+      (cond
+        (contains? #{"web-search" "web-read"} name) "web"
+        (contains? #{"help" "workspace" "result" "result-info" "results"
+                     "artifact" "artifact-page" "invoke-tool" "register-tool!"} name) "repl"
+        :else "coding")))
 
 (defn- params-summary [parameters]
   (let [props (or (:properties parameters) (get parameters "properties") {})

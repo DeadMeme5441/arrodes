@@ -219,6 +219,16 @@ Excluded generated/VCS directories are outside the search scope.
 `:text`, `:path`, `:offset`, `:lines`, `:next-offset`, and `:eof?`. String evaluation
 results display as readable text while retaining the original native string.
 
+Use `(help {:group "web"})` for `web-search` and `web-read`. Web research returns
+qualified native maps, separate from ordinary file reads: select `::web/sources`
+and each source's `::web/url`, or a fetched page's `::web/content`. The installed
+`web` alias resolves `arrodes.web.data`. Bind detailed results before selecting
+the fields needed in context; provider answers are distinct from source evidence.
+The usual result/artifact limits and availability descriptors apply, and reading
+a retained result does not repeat a search or refetch a page. See
+[web research](PROVIDERS.md#web-research) for hosted providers and the explicit
+MCP alternative.
+
 Use docstrings on ordinary `def` and `defn` forms to describe useful state. The
 binding name is its label; optional `^{:label "..."}` metadata adds a friendly
 label. `(workspace)` lists live binding names, docs, types and bounded size
@@ -237,6 +247,12 @@ The failing form may itself have produced effects even when zero top-level forms
 completed. Retained call details can contain effect receipts, but neither the completed
 form count nor those receipts are a complete effect log. Inspect relevant external state
 and reconcile known agent submission IDs before deliberately issuing another mutation.
+
+When Clojure wraps an attributed provider/function failure in a compiler exception,
+the immediate evaluation message includes the underlying error code and message.
+Retained failure data adds `:evaluation/cause {:code ... :message ...}` without
+changing the outer evaluation classification, progress, source diagnostics, or
+original live `*e` exception. Genuine syntax/reader failures keep their diagnostics.
 
 Individual inspection responses expose a small `:next` map of **inert Clojure source
 strings**. Copy the action you intend; inspecting a response never executes its hints.

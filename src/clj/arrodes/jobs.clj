@@ -6,12 +6,14 @@
             [arrodes.capabilities :as capabilities]
             [arrodes.platform :as util]
             [arrodes.store :as store]
+            [arrodes.store.db :as store-db]
+            [arrodes.store.jobs :as store-jobs]
             [arrodes.value :as value])
   (:import (java.io Writer)
            (java.util.concurrent Executors ExecutorService RejectedExecutionException)))
 
 (def ^:private output-limit (* 1024 1024))
-(defn terminal? [record] (contains? store/job-terminal-statuses (:status record)))
+(defn terminal? [record] (contains? store-jobs/job-terminal-statuses (:status record)))
 
 (defn create! [store emit! with-session settings]
   {:store store :emit! emit! :with-session with-session :lock (Object.) :slots (atom {}) :blocked (atom #{})
@@ -24,10 +26,10 @@
 
 (defn- transition! [manager sid id expected changes]
   ((:with-session manager) sid
-    #(publish! manager (store/transition-job! (:store manager) sid id expected changes))))
+    #(publish! manager (store-jobs/transition-job! (:store manager) sid id expected changes))))
 
 (defn inspect-job [manager sid id]
-  (let [record (store/job (:store manager) sid id)]
+  (let [record (store-jobs/job (:store manager) sid id)]
     (when (= :cancelled (:status record))
       (value/check! (= "cancelled" (get-in record [:error :code])) :invalid-job-record
                     "Cancelled job record does not match the current format" {:job-id id}))
@@ -59,13 +61,13 @@
   (:detailed? opts))
 
 (defn list-jobs [manager sid opts]
-  (mapv #(inspect-job manager sid (:id %)) (store/jobs (:store manager) sid opts)))
+  (mapv #(inspect-job manager sid (:id %)) (store-jobs/jobs (:store manager) sid opts)))
 
 (defn snapshot [manager sid opts]
-  (store/store-read (:store manager)
+  (store-db/store-read (:store manager)
     (fn [_]
       (let [page (list-jobs manager sid opts)]
-        {:jobs page :active-jobs (store/active-jobs (:store manager) sid)
+        {:jobs page :active-jobs (store-jobs/active-jobs (:store manager) sid)
          :next-before (when (= (count page) (or (:limit opts) 100)) (:id (last page)))}))))
 
 (declare cancel-job! await-job)
@@ -74,7 +76,7 @@
   (let [{:keys [sid id cancelled thread]} slot]
     (reset! cancelled true)
     (let [record (transition! manager sid id #{:queued :running}
-                              (if (= :queued (:status (store/job (:store manager) sid id)))
+                              (if (= :queued (:status (store-jobs/job (:store manager) sid id)))
                                 {:status :cancelled :finished-at (util/now)
                                  :error {:code "cancelled" :message "Job was cancelled before execution"}}
                                 {:status :cancelling}))]
@@ -85,7 +87,7 @@
 
 (defn cancel-job! [manager sid id]
   (locking (:lock manager)
-    (let [record (store/job (:store manager) sid id)]
+    (let [record (store-jobs/job (:store manager) sid id)]
       (if-let [slot (get @(:slots manager) id)]
         (if (terminal? record) record (cancel-slot! manager slot))
         record))))
@@ -97,7 +99,7 @@
       (recur (:parent-id (get @(:slots manager) current))))))
 
 (defn await-job [manager sid id timeout-ms]
-  (store/job (:store manager) sid id)
+  (store-jobs/job (:store manager) sid id)
   (value/check! (and (integer? timeout-ms) (<= 0 timeout-ms 300000)) :invalid-timeout
                 "Job wait timeout must be 0..300000 milliseconds" {})
   (validate-wait! manager id)
@@ -146,7 +148,7 @@
   (let [{:keys [sid id cancelled]} slot]
     (try
       (let [entered? (locking (:lock manager)
-                       (when (= :queued (:status (store/job (:store manager) sid id)))
+                       (when (= :queued (:status (store-jobs/job (:store manager) sid id)))
                          (reset! (:thread slot) (Thread/currentThread))
                          (transition! manager sid id #{:queued} {:status :running :started-at (util/now)})
                          true))]
@@ -201,7 +203,7 @@
       (finally
         (reset! (:thread slot) nil)
         (locking (:lock manager)
-          (when (terminal? (store/job (:store manager) sid id))
+          (when (terminal? (store-jobs/job (:store manager) sid id))
             (swap! (:slots manager) dissoc id)
             (when-let [parent (get @(:slots manager) (:parent-id slot))]
               (swap! (:children parent) dissoc id))))
@@ -236,7 +238,7 @@
             slot {:id id :sid sid :parent-id parent-id :cancelled (atom false) :thread (atom nil)
                   :done (promise) :children (atom {}) :accepting? (atom true)
                   :output (atom {:text "" :truncated? false})}]
-        ((:with-session manager) sid #(publish! manager (store/create-job! (:store manager) record)))
+        ((:with-session manager) sid #(publish! manager (store-jobs/create-job! (:store manager) record)))
         (swap! (:slots manager) assoc id slot)
         (when parent-id (swap! (:children (get @(:slots manager) parent-id)) assoc id slot))
         (try
@@ -266,9 +268,9 @@
 
 (defn output-job [manager sid id opts]
   (let [{:keys [offset limit tail? after?]} (output-options! id opts)]
-    (store/store-read (:store manager)
+    (store-db/store-read (:store manager)
       (fn [_]
-        (let [record (store/job (:store manager) sid id)
+        (let [record (store-jobs/job (:store manager) sid id)
               live (get @(:slots manager) id)
               captured (when live @(:output live))
               artifact-id (:output-artifact-id record)
@@ -301,7 +303,7 @@
 (defn cancel-session! [manager sid]
   (locking (:lock manager)
     (doseq [slot (vals @(:slots manager)) :when (= sid (:sid slot))]
-      (when-not (terminal? (store/job (:store manager) sid (:id slot))) (cancel-slot! manager slot)))))
+      (when-not (terminal? (store-jobs/job (:store manager) sid (:id slot))) (cancel-slot! manager slot)))))
 
 (defn await-session! [manager sid timeout-ms]
   (let [deadline (+ (System/nanoTime) (* timeout-ms 1000000))
@@ -380,9 +382,9 @@
   "Return a successful job's native value and acknowledge its outcome delivery, without waiting. Failed/cancelled/unfinished jobs throw."
   [handle]
   (let [[manager registry] (environment) sid (:session-id registry) id (job-id registry handle)
-        record (store/job (:store manager) sid id)]
+        record (store-jobs/job (:store manager) sid id)]
     (value/check! (= :completed (:status record)) :job-not-completed
                   "Job has not completed successfully; inspect its status and error" {:job record})
     (let [native-value (capabilities/result-value registry (:result-id record))]
-      (store/acknowledge-jobs! (:store manager) sid [id])
+      (store-jobs/acknowledge-jobs! (:store manager) sid [id])
       native-value)))

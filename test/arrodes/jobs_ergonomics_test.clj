@@ -6,7 +6,8 @@
             [arrodes.jobs-test :refer [eval! await!]]
             [arrodes.runtime :as runtime]
             [arrodes.runtime-test :as fixtures]
-            [arrodes.store :as store]))
+            [arrodes.store.db :as store-db]
+            [arrodes.store.jobs :as store-jobs]))
 
 (deftest status-views-are-compact-and-detailed-records-and-native-values-remain-accessible
   (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
@@ -39,10 +40,10 @@
               info (eval! rt sid (get-in completed [:next :result-info]))
               other (:id (fixtures/create-session rt))]
           (is (= {:ratio 2/3} (eval! rt sid (get-in info [:next :value]))))
-          (is (false? (:delivered? (store/job (:store rt) sid (:id handle)))))
+          (is (false? (:delivered? (store-jobs/job (:store rt) sid (:id handle)))))
           (is (:error? (runtime/evaluate! rt other (get-in completed [:next :value-and-ack]))))
           (is (= {:ratio 2/3} (eval! rt sid (get-in completed [:next :value-and-ack]))))
-          (is (:delivered? (store/job (:store rt) sid (:id handle))))
+          (is (:delivered? (store-jobs/job (:store rt) sid (:id handle))))
           (is (every? #(not (contains? % :next)) (eval! rt sid "(jobs/list)"))))
         (finally (eval! rt sid "(deliver release true)"))))))
 
@@ -57,7 +58,7 @@
         (is (nil? (get-in info [:next :value])))
         (is (:error? (:details info)))
         (is (= "failure" (:workflow (eval! rt sid (get-in info [:next :reconcile])))))
-        (is (false? (:delivered? (store/job (:store rt) sid (:id handle)))))))))
+        (is (false? (:delivered? (store-jobs/job (:store rt) sid (:id handle)))))))))
 
 (deftest inspection-does-not-offer-an-expired-live-job-value
   (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
@@ -96,10 +97,10 @@
   (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
     (let [sid (:id (fixtures/create-session rt)) id (str (java.util.UUID/randomUUID))
           original {:code "job-failed" :message "sleep interrupted"}]
-      (store/create-job! (:store rt) {:id id :session-id sid :status :queued :name "Invalid cancellation" :created-at 1})
-      (store/transition-job! (:store rt) sid id #{:queued} {:status :cancelled :error original :finished-at 2})
+      (store-jobs/create-job! (:store rt) {:id id :session-id sid :status :queued :name "Invalid cancellation" :created-at 1})
+      (store-jobs/transition-job! (:store rt) sid id #{:queued} {:status :cancelled :error original :finished-at 2})
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"current format" (jobs/inspect-job (:jobs rt) sid id)))
-      (is (= original (:error (store/job (:store rt) sid id)))))))
+      (is (= original (:error (store-jobs/job (:store rt) sid id)))))))
 
 (deftest incremental-output-has-independent-cursors-and-preserves-unicode-across-settlement
   (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
@@ -127,7 +128,7 @@
         (is (:eof? last-page))
         (is (= 7 (get-in last-page [:cursor :offset])))
         (is (= "" (:text (jobs/output-job (:jobs rt) sid (:id handle) {:after (:cursor last-page)})))))
-      (is (false? (:delivered? (store/job (:store rt) sid (:id handle)))))
+      (is (false? (:delivered? (store-jobs/job (:store rt) sid (:id handle)))))
       (let [options {:cwd (:cwd rt) :home (:home rt) :data-dir (:data-dir rt)}]
         (runtime/close! rt)
         (let [reopened (runtime/open! options)]
@@ -177,8 +178,8 @@
     (let [sid (:id (fixtures/create-session rt))
           handle (eval! rt sid "(jobs/start! #(print \"αβγ終\\n\"))")
           record (await! rt sid handle)
-          invalid (dissoc (store/job (:store rt) sid (:id handle)) :output-characters)]
-      (store/transact! (:store rt)
+          invalid (dissoc (store-jobs/job (:store rt) sid (:id handle)) :output-characters)]
+      (store-db/transact! (:store rt)
         (fn [connection]
           (with-open [statement (.prepareStatement connection "UPDATE jobs SET record=? WHERE id=?")]
             (.setString statement 1 (pr-str invalid))
@@ -186,4 +187,4 @@
             (.executeUpdate statement))))
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"character count"
                            (jobs/output-job (:jobs rt) sid (:id handle) {:tail? true :limit 2})))
-      (is (= invalid (store/job (:store rt) sid (:id handle)))))))
+      (is (= invalid (store-jobs/job (:store rt) sid (:id handle)))))))

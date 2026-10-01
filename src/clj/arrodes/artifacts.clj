@@ -3,6 +3,7 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [arrodes.store :as store]
+            [arrodes.store.db :as store-db]
             [arrodes.platform :as util]
             [arrodes.value :as value])
   (:import (java.io BufferedInputStream ByteArrayOutputStream InputStreamReader)
@@ -143,7 +144,7 @@
 
 (defn- actual-availability [store descriptor]
   (assoc descriptor :available?
-         (store/store-read store #(artifact-content-present? store % descriptor))))
+         (store-db/store-read store #(artifact-content-present? store % descriptor))))
 
 (defn put!
   "Stores immutable content and returns its session-authorized descriptor."
@@ -162,7 +163,7 @@
         descriptor (cond-> {:id id :session-id sid :sha256 sha :bytes (alength ^bytes bytes)
                             :kind kind :available? true :created-at now}
                      artifact-name (assoc :name artifact-name))]
-    (store/transact! store
+    (store-db/transact! store
       (fn [connection]
         (authorize-session! connection sid)
         (execute! connection
@@ -178,7 +179,7 @@
                     (try (UUID/fromString id) true (catch IllegalArgumentException _ false)))
                :invalid-id "Expected a UUID artifact ID" {:artifact-id id})
   (let [descriptor
-        (store/store-read store
+        (store-db/store-read store
           (fn [connection]
             (authorize-session! connection sid)
             (let [found (find-artifact connection id)]
@@ -190,7 +191,7 @@
 
 (defn list-artifacts [store sid]
   (let [descriptors
-        (store/store-read store
+        (store-db/store-read store
           (fn [connection]
             (authorize-session! connection sid)
             (query connection "SELECT * FROM artifacts WHERE session_id=? ORDER BY created_at,id"
@@ -198,7 +199,7 @@
     (mapv #(actual-availability store %) descriptors)))
 
 (defn- memory-artifact-bytes [store descriptor]
-  (store/store-read store
+  (store-db/store-read store
     (fn [connection]
       (first (query connection "SELECT content FROM artifacts WHERE id=? AND session_id=?"
                     [(:id descriptor) (:session-id descriptor)]
@@ -420,7 +421,7 @@
 (defn put-result!
   "Persists a normalized result and assigns the next positive per-session integer ID."
   [store sid descriptor]
-  (store/transact! store
+  (store-db/transact! store
     (fn [connection]
       (authorize-session! connection sid)
       (let [normalized (normalize-result store connection sid descriptor)
@@ -451,7 +452,7 @@
                  false)))))
 
 (defn result [store sid id]
-  (store/store-read store
+  (store-db/store-read store
     (fn [connection]
       (authorize-session! connection sid)
       (let [id (require-result-id! id)
@@ -463,7 +464,7 @@
                       {:session-id sid :result-id id}))))))
 
 (defn results [store sid]
-  (store/store-read store
+  (store-db/store-read store
     (fn [connection]
       (authorize-session! connection sid)
       (mapv #(with-actual-result-availability store connection (decode %))
@@ -476,7 +477,7 @@
   (value/check! (and (integer? before-id) (pos? before-id)
                      (integer? limit) (<= 1 limit 100))
                 :invalid-arguments "results expects a positive before-id and limit 1..100" {})
-  (store/store-read store
+  (store-db/store-read store
     (fn [connection]
       (authorize-session! connection sid)
       (let [rows (mapv #(with-actual-result-availability store connection (decode %))
@@ -489,7 +490,7 @@
 (defn release-live-results!
   "Marks a session's live-only result descriptors unavailable when its live registry closes."
   [store sid]
-  (store/transact! store
+  (store-db/transact! store
     (fn [connection]
       (authorize-session! connection sid)
       (let [rows (query connection

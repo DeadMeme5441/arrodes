@@ -1,6 +1,7 @@
 {:paths ["src/clj" "src/cljc" "resources"]
  :deps {org.clojure/clojure {:mvn/version "1.12.5"}
         org.clojure/data.json {:mvn/version "2.5.1"}
+        org.jsoup/jsoup {:mvn/version "1.23.2"}
         org.xerial/sqlite-jdbc {:mvn/version "3.53.4.0"}
         org.slf4j/slf4j-nop {:mvn/version "2.0.17"}
         clj-commons/clj-yaml {:mvn/version "1.0.29"}

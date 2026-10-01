@@ -5,6 +5,8 @@
             [arrodes.runtime-test :as fixtures]
             [arrodes.session-test :as session-fixtures]
             [arrodes.store :as store]
+            [arrodes.store.db :as store-db]
+            [arrodes.store.jobs :as store-jobs]
             [arrodes.artifacts :as artifacts]
             [arrodes.commands :as commands])
   (:import (java.util.concurrent CountDownLatch TimeUnit)))
@@ -28,7 +30,7 @@
       (is (= {:ratio 2/3} (eval! rt sid "(jobs/result j)")))
       (is (= "job output\n" (:text (jobs/output-job (:jobs rt) sid (:id handle) {}))))
       (is (true? (:eof? (jobs/output-job (:jobs rt) sid (:id handle) {}))))
-      (is (empty? (store/pending-job-results (:store rt) sid)))
+      (is (empty? (store-jobs/pending-job-results (:store rt) sid)))
       (let [other (:id (fixtures/create-session rt))]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"this session"
                              (jobs/inspect-job (:jobs rt) other (:id handle))))))))
@@ -169,14 +171,14 @@
           unfinished {:id (str (java.util.UUID/randomUUID)) :session-id sid :name "Interrupted fixture"
                       :kind :clojure :status :queued :created-at 1 :origin {}}
           options {:cwd (:cwd rt) :home (:home rt) :data-dir (:data-dir rt)}]
-      (store/create-job! (:store rt) unfinished)
+      (store-jobs/create-job! (:store rt) unfinished)
       (runtime/close! rt)
       (let [reopened (runtime/open! options)]
         (try
           (is (= :interrupted (:status (jobs/inspect-job (:jobs reopened) sid (:id unfinished)))))
           (is (= :completed (:status (jobs/inspect-job (:jobs reopened) sid (:id handle)))))
           (is (= {:native 3/7} (eval! reopened sid (str "(jobs/result " (pr-str (:id handle)) ")"))))
-          (is (= 2 (count (store/jobs (:store reopened) sid))))
+          (is (= 2 (count (store-jobs/jobs (:store reopened) sid))))
           (finally (runtime/close! reopened)))))))
 
 (deftest unsupported-stores-preserve-history-settings-and-artifacts
@@ -186,13 +188,13 @@
           artifact-dir (str path ".artifacts")
           settings (java.nio.file.Path/of directory (into-array String ["config" "settings.edn"]))
           neighbor (java.nio.file.Path/of directory (into-array String ["notes.txt"]))
-          storage (store/open! {:path path})
+          storage (store-db/open! {:path path})
           sid (:id (store/create-session! storage {:cwd directory :name "Prior history"}))
           artifact (artifacts/put! storage sid "old artifact" {:name "old"})
           artifact-path (java.nio.file.Path/of artifact-dir
                                                (into-array String [(subs (:sha256 artifact) 0 2)
                                                                    (:sha256 artifact)]))]
-      (store/close! storage)
+      (store-db/close! storage)
       (try
         (java.nio.file.Files/createDirectories (.getParent settings)
                                                 (make-array java.nio.file.attribute.FileAttribute 0))
@@ -204,7 +206,7 @@
                     statement (.createStatement connection)]
           (.execute statement (str "PRAGMA user_version=" version)))
         (let [before (java.nio.file.Files/readAllBytes (java.nio.file.Path/of path (make-array String 0)))
-              error (try (store/open! {:path path}) nil
+              error (try (store-db/open! {:path path}) nil
                          (catch clojure.lang.ExceptionInfo failure failure))]
           (is (= "unsupported-store-format" (:error/code (ex-data error))))
           (is (java.util.Arrays/equals before
@@ -224,7 +226,7 @@
       (eval! rt sid "(def effect (atom 0)) (jobs/start! #(Thread/sleep 30000))")
       (is (:error? (runtime/evaluate! rt sid "(jobs/start! #(swap! effect inc))")))
       (is (= 0 (eval! rt sid "@effect")))
-      (is (= 1 (count (store/jobs (:store rt) sid))))
+      (is (= 1 (count (store-jobs/jobs (:store rt) sid))))
       (finally (runtime/close! rt) (session-fixtures/remove-directory! directory)))))
 
 (deftest cancelling-a-foreground-turn-leaves-accepted-jobs-running
@@ -250,16 +252,16 @@
       (dotimes [n 23]
         (await! rt sid (eval! rt sid (str "(jobs/start! (fn [] " n "))"))))
       (runtime/branch! rt sid nil {})
-      (is (empty? (store/pending-job-results (:store rt) sid)))
+      (is (empty? (store-jobs/pending-job-results (:store rt) sid)))
       (runtime/run! rt sid "New branch" {})
       (is (empty? (filter #(get-in % [:data :message/job-id]) (runtime/active-path rt sid)))))))
 
 (deftest admission-persistence-failure-settles-without-executing-the-function
   (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
     (let [sid (:id (fixtures/create-session rt))
-          transition store/transition-job!
+          transition store-jobs/transition-job!
           failed (atom false)]
-      (with-redefs [store/transition-job!
+      (with-redefs [store-jobs/transition-job!
                     (fn [storage session-id id expected changes]
                       (when (and (= :running (:status changes)) (compare-and-set! failed false true))
                         (throw (ex-info "Synthetic admission write failure" {})))

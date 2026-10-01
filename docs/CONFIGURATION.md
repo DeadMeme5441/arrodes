@@ -120,6 +120,27 @@ in a separate tool-free request with a 1,024-output-token cap and no requested
 reasoning. Only an excerpt of the first message is sent. These settings are also
 accepted under a session configuration's `:settings` map.
 
+Web research has independent defaults under `:web`; it never changes the coding
+provider/model:
+
+```clojure
+{:web {:provider :codex-backend
+       :model "EXACT_ACCOUNT_VISIBLE_SEARCH_MODEL"
+       :limit 5
+       :timeout-ms 30000
+       :max-tokens 2048}}
+```
+
+Omit `:provider`/`:model` to use the session's exact pair. Per-session
+`:config :settings :web` overrides resource settings, and function arguments
+override both. A provider change does not inherit another provider's search model.
+`:backend :mcp`, `:server`, `:search-tool` and `:read-tool` configure an explicit
+MCP alternative; `web-read` independently defaults to HTTP unless
+`:read-backend :mcp` is selected. The MCP server's own timeout applies.
+See [web research](PROVIDERS.md#web-research) for supported providers, limits,
+native return fields and examples. Search credentials stay in the existing
+provider/MCP credential sources, never in this settings map.
+
 The older nested maps `:session-defaults`, `:session`, and `:session-config` are still read when opening existing configuration. Setup writes canonical top-level defaults and removes overlapping values from those nested maps.
 
 ### Updating settings over RPC

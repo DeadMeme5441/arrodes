@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.2.1
+
+- Split persistence into transaction, database/schema/filesystem ownership, record,
+  job, agent, transfer and recovery namespaces; migrate internal callers directly
+  without compatibility re-exports.
+- Split runtime orchestration from session handles, operation execution, input
+  preparation and model continuation while preserving evaluator and worker ownership.
+- Validate qualified internal transaction and prepared-run envelopes with Clojure
+  spec. Malformed or misspelled transaction keys fail before mutation; durable
+  records, native results, SQLite schema 5, RPC 1 and export format 1 are unchanged.
+- Add discoverable native `web-search` and `web-read` functions with qualified,
+  spec-checked source/page results, existing provider credentials and independent
+  search provider/model selection. Support Codex/OpenAI Responses, Gemini,
+  OpenRouter, Perplexity Agent and Anthropic API-key hosted search.
+- Add bounded inert HTTP source reading with HTML/code/link extraction and an
+  explicit configured MCP alternative. Preserve native remote content, source
+  provenance and truthful limits; reject ungrounded answers and unsupported
+  options rather than silently switching backends or replaying requests.
+- Preserve Codex hosted-search sources and citations delivered in completed SSE
+  output-item events when the terminal response has empty output. Prioritize
+  answer-cited URLs before consulted pages under source caps.
+- Surface attributed provider/function error codes and messages in REPL failures
+  instead of hiding them behind compiler-wrapper syntax messages; retain original
+  evaluation classification, source/progress diagnostics and live exceptions.
+
 ## 0.2.0
 
 - Fix self-update failures on HTTP-compressed release responses. Validate decoded
