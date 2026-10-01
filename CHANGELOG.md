@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.1
+
 - Split persistence into transaction, database/schema/filesystem ownership, record,
   job, agent, transfer and recovery namespaces; migrate internal callers directly
   without compatibility re-exports.
