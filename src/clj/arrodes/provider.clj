@@ -5,6 +5,8 @@
             [arrodes.auth :as auth]
             [arrodes.platform :as u]
             [arrodes.run :as run]
+            [arrodes.web.data :as web]
+            [arrodes.web.hosted :as hosted-web]
             [llm.sdk :as sdk]
             [llm.sdk.errors :as sdk-errors]
             [llm.sdk.http :as sdk-http]
@@ -875,6 +877,75 @@
           (if (auth/cancelled? options)
             (throw (cancelled-ex))
             (throw (classified-ex provider-id e))))))))
+
+(defn web-search!
+  "Perform one bounded hosted search with the selected provider's credentials.
+   This search-only request never exposes REPL/function tools or changes a model."
+  [manager params options]
+  (binding [models-dev/*cache-dir* (u/resolve-path (:home manager) "cache/models")]
+    (open-manager! manager)
+    (let [{:keys [provider model query limit timeout-ms max-tokens recency] :as params}
+          (merge {:limit 5 :timeout-ms 30000 :max-tokens 2048} params)
+          provider-id (when provider (keyword provider))]
+      (when-not (and provider-id (string? model) (not (str/blank? model))
+                     (string? query) (not (str/blank? query))
+                     (integer? limit) (<= 1 limit 20)
+                     (integer? timeout-ms) (<= 1 timeout-ms 120000)
+                     (integer? max-tokens) (<= 1 max-tokens 8192)
+                     (or (nil? recency) (contains? #{:hour :day :week :month :year} recency)))
+        (fail! :provider/request "Invalid hosted web-search parameters" {}))
+      (let [p (profile manager provider-id)
+            family (hosted-web/family (:sdk-id p))
+            params (assoc params :provider provider-id)
+            canonical (hosted-web/request family params)]
+        (validate-request! manager provider-id canonical)
+        (when (auth/cancelled? options) (throw (cancelled-ex)))
+        (try
+          (hosted-web/bounded!
+           timeout-ms options
+           (fn [options body-owner]
+             (if-let [complete-fn (:complete-fn manager)]
+               (let [response (complete-fn canonical
+                                           (assoc options :provider provider-id :web-search? true))]
+                 (when (auth/cancelled? options) (throw (cancelled-ex)))
+                 (if (::web/backend response)
+                   (let [response (web/validate! ::web/search-result response)]
+                     (when (empty? (::web/sources response))
+                       (fail! :provider/no-search-evidence
+                              "Hosted search returned no genuine source URLs" {}))
+                     (let [sources (vec (take limit (::web/sources response)))
+                           urls (set (map ::web/url sources))]
+                       (assoc response ::web/backend :hosted ::web/provider provider-id
+                              ::web/model model ::web/query query ::web/sources sources
+                              ::web/citations (vec (filter #(contains? urls (::web/url %))
+                                                         (::web/citations response))))))
+                   (hosted-web/normalize family params (:response/raw response) response)))
+               (let [resolution (require-auth! manager provider-id p true options)
+                     sdk-id (if (= :openai (:sdk-id p)) :codex (:sdk-id p))
+                     config (-> (merge {:base-url (:base-url p)}
+                                       (sdk-runtime-config manager provider-id p resolution))
+                                (assoc :timeout-ms timeout-ms))
+                     sdk-profile (-> (sdk/provider-profile sdk-id)
+                                     (assoc :profile/env-var-names [])
+                                     (sdk-auth/apply-runtime-config config))
+                     http-options (assoc (direct-http-options manager provider-id)
+                                         :timeout-ms timeout-ms)]
+                 (when (auth/cancelled? options) (throw (cancelled-ex)))
+                 (let [result (hosted-web/complete! family sdk-profile canonical params
+                                                   http-options options body-owner)]
+                   (cond-> result
+                     (= sdk-id :codex-backend)
+                     (update ::web/notes conj
+                             "Codex OAuth does not accept a token cap; the total deadline and response-size bound still apply.")))))))
+          (catch clojure.lang.ExceptionInfo e
+            (case (:error/type (ex-data e))
+              :provider/cancelled (throw e)
+              :auth/cancelled (throw (cancelled-ex))
+              (throw (classified-ex provider-id e))))
+          (catch Exception e
+            (if (auth/cancelled? options)
+              (throw (cancelled-ex))
+              (throw (classified-ex provider-id e)))))))))
 
 (defn close!
   "Close a provider manager or session view. Idempotent.

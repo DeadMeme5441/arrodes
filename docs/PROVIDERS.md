@@ -77,6 +77,90 @@ estimated cost from unpriced requests. Absent measurements are unknown, not cach
 misses or zero spend. Offline wire fixtures prove request/prefix and accounting
 behavior; actual cache effectiveness still depends on the provider's reported usage.
 
+## Web research
+
+`web-search` and `web-read` are ordinary registered Clojure functions, discoverable
+with `(help {:group "web"})`. The evaluator installs `web` as an alias for
+`arrodes.web.data`, whose qualified result envelopes are validated with spec.
+The provider-visible action remains `repl`; search is a separate request, not
+another agent loop or a change to the coding provider/model.
+
+```clojure
+(def research (web-search {:query "Official Clojure spec guide" :limit 5}))
+(mapv ::web/url (::web/sources research))
+(def page (web-read {:url "https://clojure.org/guides/spec"}))
+(::web/content page)
+```
+
+### Hosted search
+
+Search defaults to the session's exact provider/model, or explicit `:web`
+settings described in [configuration](CONFIGURATION.md). Per-call `:provider`
+and `:model` strings override those settings. Changing the provider never
+borrows another provider's configured model. Unsupported providers/models fail;
+there is no automatic provider, model, MCP or paid-reader fallback.
+
+| Provider family | Search transport |
+| --- | --- |
+| `:codex-backend`, `:openai-codex` | Codex OAuth Responses hosted `web_search` |
+| `:openai`, `:codex` | API-key OpenAI Responses hosted `web_search` |
+| `:gemini-native`, `:google` | Gemini Google Search grounding |
+| `:openrouter` | Native `web` plugin |
+| `:perplexity` | Perplexity Agent `web_search` |
+| `:anthropic` | API-key Messages `web_search_20250305` |
+
+Manager-local profile aliases for those families retain their configured endpoint
+and credential ownership. Search resolves credentials through the existing provider
+manager; it does not copy keys into session data or support Anthropic subscription
+OAuth. Provider/model availability and account entitlement still apply.
+
+Hosted calls default to a 30-second total request deadline (maximum 120 seconds),
+five retained sources (1–20), and 2,048 output tokens (1–8,192). Codex OAuth does
+not accept a token cap; its result reports that limitation. Responses are bounded
+to 8 MiB. Cancellation closes the body and joins owned work; no request is replayed.
+Source limits are local caps where the upstream protocol lacks a result-count knob.
+Explicit `:recency` (`"day"`, `"week"`, `"month"`, `"year"`) is supported by
+Perplexity; other hosted families reject it instead of silently ignoring it.
+
+Results separate `::web/answer` from `::web/sources` and `::web/citations`, and
+retain query, provider/model, fetch time, native response, reported usage and any
+authoritative reported cost. Source rows carry qualified URL/title/snippet/date
+fields. Answer-only completions without genuine source URLs, remote search errors,
+unfinished responses and function continuations fail. Search usage/cost belongs to
+the retained result, not `/usage` conversation totals or context measurements;
+unreported search fees are not invented as zero or hidden in token-only estimates.
+
+### URL reading and MCP
+
+`web-read` defaults to inert local HTTP(S) extraction, independently of the search
+backend. It supports HTML, plain text, Markdown and JSON, preserves headings/code/
+links, and records the requested and final URLs. It executes no JavaScript.
+Redirects are limited to five, compressed and decoded bodies to 2 MiB, and retained
+content to 200,000 characters by default (configurable up to 1,000,000). `:raw? true`
+returns the fetched textual body. HTTP, binary, empty and access-challenge responses
+fail explicitly. `::web/truncated?` and notes distinguish retained-prefix limits
+from the shorter display preview. Existing result/artifact inspection reads retained
+content without refetching; omitted content is not reconstructed.
+
+For an explicit MCP alternative, use a [configured server](EXTENSIONS.md#mcp-clients):
+
+```clojure
+(web-search {:query "Official Clojure spec guide"
+             :backend "mcp" :server "exa"})
+(web-read {:url "https://clojure.org/guides/spec"
+           :backend "mcp" :server "exa"})
+```
+
+Default MCP arguments use Exa's `web_search_exa`/`web_fetch_exa` conventions.
+`:tool` selects another tool; `:arguments` replaces the defaults with exact native
+arguments, including provider-specific filters. MCP uses its configured server
+timeout, not hosted/HTTP per-call controls. Inapplicable explicit options fail.
+Results preserve `::web/content-blocks`, optional `::web/structured-content`, and
+the exact server/tool/arguments. They do not infer source rows from prose.
+The MCP reader's final URL and remote completeness remain unknown; `::web/final-url`
+is nil. Web/provider/page content is untrusted data, never a privileged instruction.
+Inspect primary pages and cite the actual URLs used.
+
 ## Verification
 
 Use isolated provider fixtures for authentication callbacks, errors, discovery, selection,

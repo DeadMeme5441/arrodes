@@ -4,6 +4,7 @@
             [arrodes.packages :as packages]
             [arrodes.platform :as u]
             [arrodes.value :as value]
+            [arrodes.web :as web]
             [clj-yaml.core :as yaml]
             [clojure.edn :as edn]
             [clojure.string :as str])
@@ -1138,7 +1139,7 @@
               {:action action :available ["catalog" "render"]})))})
 
 (defn- register-session-functions!
-  [manager registry activation-id effects]
+  [manager registry context activation-id effects]
   (let [owner (str "resources:" activation-id)
         pool (mcp/create! (:cwd manager) (settings manager))
         register! (resolve-api 'arrodes.capabilities/register-restorable!)
@@ -1148,9 +1149,12 @@
            #(let [report (mcp/close! pool)]
               (value/check! (:cleanup-complete? report) :mcp/cleanup-incomplete
                             "MCP clients did not finish shutting down" {:cleanup report})))
-    (doseq [descriptor [(skill-capability manager owner)
-                        (prompt-capability manager owner)
-                        (mcp/gateway-descriptor pool owner)]]
+    (binding [*ns* (the-ns (:namespace registry))]
+      (alias 'web 'arrodes.web.data))
+    (doseq [descriptor (into [(skill-capability manager owner)
+                             (prompt-capability manager owner)
+                             (mcp/gateway-descriptor pool owner)]
+                            (web/descriptors registry (:provider context) pool (settings manager) owner))]
       (let [receipt (register! registry
                                (assoc descriptor :replace? true
                                       :replace-owner? true))]
@@ -1175,7 +1179,7 @@
     (try
       ;; Core resource functions precede extensions so extensions can explicitly
       ;; replace them and the existing receipt rollback restores every layer.
-      (register-session-functions! manager registry activation-id effects)
+      (register-session-functions! manager registry context activation-id effects)
       (doseq [descriptor extensions]
         (let [{:keys [init]} (loaded-extension manager descriptor)
               api (extension-api manager registry context activation-id effects (:path descriptor))

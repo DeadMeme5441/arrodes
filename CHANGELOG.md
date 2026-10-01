@@ -10,6 +10,14 @@
 - Validate qualified internal transaction and prepared-run envelopes with Clojure
   spec. Malformed or misspelled transaction keys fail before mutation; durable
   records, native results, SQLite schema 5, RPC 1 and export format 1 are unchanged.
+- Add discoverable native `web-search` and `web-read` functions with qualified,
+  spec-checked source/page results, existing provider credentials and independent
+  search provider/model selection. Support Codex/OpenAI Responses, Gemini,
+  OpenRouter, Perplexity Agent and Anthropic API-key hosted search.
+- Add bounded inert HTTP source reading with HTML/code/link extraction and an
+  explicit configured MCP alternative. Preserve native remote content, source
+  provenance and truthful limits; reject ungrounded answers and unsupported
+  options rather than silently switching backends or replaying requests.
 
 ## 0.2.0
 

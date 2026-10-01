@@ -22,6 +22,7 @@ net.java.dev.jna:jna:5.16.0                                    Apache-2.0 (selec
 net.java.dev.jna:jna-platform:5.16.0                           Apache-2.0 (selected from Apache-2.0 OR LGPL-2.1)
 org.clojure:clojure:1.12.5                                     EPL-1.0
 org.clojure:data.json:2.5.1                                    EPL-1.0
+org.jsoup:jsoup:1.23.2                                        MIT
 org.slf4j:slf4j-nop:2.0.17                                     MIT
 org.xerial:sqlite-jdbc:3.53.4.0                                Apache-2.0; BSD-style Zentus notice; bundled SQLite public domain
 org.flatland:ordered:1.15.12                                   EPL-1.0

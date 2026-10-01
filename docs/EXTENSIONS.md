@@ -158,6 +158,12 @@ identifies the server and tool. A tool-reported error has `:outcome :reported-er
 and includes the remote result; a timed-out or interrupted call has an unknown remote
 outcome. Inspect retained error details before deciding whether to repeat a call.
 
+`web-search` and `web-read` expose an explicit `:backend "mcp"` alternative
+through this same session-owned pool; no server is connected as an automatic
+fallback. They preserve native remote content and structured data without
+inventing normalized source rows. See [web research](PROVIDERS.md#web-research)
+for argument mapping and unknown remote provenance/completeness.
+
 ## Packages
 
 A package is a directory or archive with an `arrodes.edn` manifest:
