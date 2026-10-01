@@ -248,6 +248,12 @@ completed. Retained call details can contain effect receipts, but neither the co
 form count nor those receipts are a complete effect log. Inspect relevant external state
 and reconcile known agent submission IDs before deliberately issuing another mutation.
 
+When Clojure wraps an attributed provider/function failure in a compiler exception,
+the immediate evaluation message includes the underlying error code and message.
+Retained failure data adds `:evaluation/cause {:code ... :message ...}` without
+changing the outer evaluation classification, progress, source diagnostics, or
+original live `*e` exception. Genuine syntax/reader failures keep their diagnostics.
+
 Individual inspection responses expose a small `:next` map of **inert Clojure source
 strings**. Copy the action you intend; inspecting a response never executes its hints.
 `result-info` links to an available value, artifact pages, or failure reconciliation;

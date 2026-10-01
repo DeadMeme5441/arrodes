@@ -4,7 +4,7 @@
             [arrodes.help :as help]
             [arrodes.platform :as util]
             [arrodes.value :as value])
-  (:import (clojure.lang LineNumberingPushbackReader Var)
+  (:import (clojure.lang Compiler$CompilerException LineNumberingPushbackReader Var)
            (java.io StringReader)))
 
 (def ^:private eof (Object.))
@@ -60,6 +60,13 @@
                  (flush [] (.flush ^java.io.Writer writer))
                  (close [] (.close ^java.io.Writer writer)))))
       state)))
+(defn- attributed-cause [error]
+  (loop [cause error]
+    (if (and (instance? Compiler$CompilerException cause)
+             (.getCause ^Throwable cause))
+      (recur (.getCause ^Throwable cause))
+      (when (:error/code (ex-data cause)) cause))))
+
 
 (defn evaluate!
   "Evaluate forms in order, preserving native values and the session's REPL history.
@@ -122,16 +129,20 @@
           (value/fail! :cancelled "Clojure evaluation was cancelled"
                       {:stdout (writer-text out-state "stdout")
                        :stderr (writer-text err-state "stderr")})
-          (throw
-           (ex-info
-            (str "Clojure evaluation failed: "
-                 (or (ex-message error) (.getName (class error))))
-            (merge {:error/code "evaluation-failed"
-                    :stdout (writer-text out-state "stdout")
-                    :stderr (writer-text err-state "stderr")
-                    :exception (.getName (class error))}
-                   (ex-data error) @progress)
-            error)))))))
+          (let [cause (attributed-cause error)
+                diagnostic (when cause (select-keys (value/error-map cause) [:code :message]))]
+            (throw
+             (ex-info
+              (str "Clojure evaluation failed"
+                   (when diagnostic (str " [" (:code diagnostic) "]"))
+                   ": " (or (:message diagnostic) (ex-message error) (.getName (class error))))
+              (cond-> (merge {:error/code "evaluation-failed"
+                              :stdout (writer-text out-state "stdout")
+                              :stderr (writer-text err-state "stderr")
+                              :exception (.getName (class error))}
+                             (ex-data error) @progress)
+                diagnostic (assoc :evaluation/cause diagnostic))
+              error))))))))
 
 (defn- tool-name-for-var [^Var var descriptor]
   (or (:name descriptor)

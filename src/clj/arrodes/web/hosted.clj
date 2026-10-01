@@ -145,7 +145,8 @@
       (close [] (.close input)))))
 
 (defn- responses-stream! [input options]
-  (loop [records (seq (sse/event-seq (http/line-seq-closeable input)))]
+  (loop [records (seq (sse/event-seq (http/line-seq-closeable input)))
+         completed-items (sorted-map)]
     (active! options)
     (if-let [record (first records)]
       (let [data (sse/parse-json-data record)
@@ -157,10 +158,22 @@
         (when-let [delta (when (= "response.output_text.delta" type) (:delta data))]
           (when-let [on-event (:on-event options)] (on-event (stream/content-delta delta)))
           (active! options))
-        (if (= "response.completed" type)
-          (or (:response data)
-              (fail! :provider/incomplete-stream "Hosted search completed without a response"))
-          (recur (next records))))
+        (let [completed-items
+              (if (= "response.output_item.done" type)
+                (let [index (:output_index data) item (:item data)]
+                  (when-not (and (nat-int? index) (map? item))
+                    (fail! :provider/incomplete-stream "Hosted search returned an invalid completed output item"))
+                  (assoc completed-items index item))
+                completed-items)]
+          (if (= "response.completed" type)
+            (let [response (:response data)
+                  output (:output response)]
+              (when-not (and (map? response) (or (nil? output) (vector? output)))
+                (fail! :provider/incomplete-stream "Hosted search completed without a valid response"))
+              (let [items (reduce-kv assoc completed-items (or output []))]
+                (cond-> response
+                  (seq items) (assoc :output (vec (vals items))))))
+            (recur (next records) completed-items))))
       (fail! :provider/incomplete-stream "Hosted search stream ended before response.completed"))))
 
 (defn- usable-url? [url]
@@ -270,8 +283,13 @@
     (fail! :provider/search-failed "Hosted search returned an unfinished/function-tool completion"))
   (let [{:keys [sources citations answer queries]} (native-evidence family raw)
         citations (vec (keep citation citations))
-        sources (unique-sources (concat (keep source sources)
-                                        (map #(select-keys % [::web/url ::web/title]) citations)) limit)
+        source-rows (keep source sources)
+        cited-urls (set (map ::web/url citations))
+        sources (unique-sources
+                 (concat (filter #(contains? cited-urls (::web/url %)) source-rows)
+                         (map #(select-keys % [::web/url ::web/title]) citations)
+                         source-rows)
+                 limit)
         urls (set (map ::web/url sources))
         citations (vec (distinct (filter #(contains? urls (::web/url %)) citations)))
         notes (cond-> []

@@ -122,6 +122,11 @@ Source limits are local caps where the upstream protocol lacks a result-count kn
 Explicit `:recency` (`"day"`, `"week"`, `"month"`, `"year"`) is supported by
 Perplexity; other hosted families reject it instead of silently ignoring it.
 
+Codex search retains completed SSE output items in output-index order and merges
+the terminal response metadata, including when its `output` array is empty.
+Source limits prioritize answer-cited URLs before merely consulted pages, retaining
+available source snippets rather than discarding citations behind the cap.
+
 Results separate `::web/answer` from `::web/sources` and `::web/citations`, and
 retain query, provider/model, fetch time, native response, reported usage and any
 authoritative reported cost. Source rows carry qualified URL/title/snippet/date

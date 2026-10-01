@@ -141,7 +141,11 @@
                   rejected (runtime/evaluate! rt sid "(web-search {:query \"Find report\" :backend \"mcp\" :server \"research\" :tool \"probe\" :recency \"day\"})")]
               (is (:error? rejected))
               (is (= before (slurp call-file)))))
-          (finally (runtime/close! rt))))
+          (finally
+            (let [report (runtime/close! rt)
+                  report (if (= :closing (:status report)) (runtime/close! rt) report)]
+              (when-not (= :closed (:status report))
+                (throw (ex-info "MCP test runtime cleanup did not finish" report)))))))
       (finally (fixtures/remove-directory! directory)))))
 
 (deftest native-recency-option-reaches-the-provider-filter

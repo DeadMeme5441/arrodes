@@ -1,5 +1,6 @@
 (ns arrodes.repl-test
   (:require [arrodes.runtime :as runtime]
+            [arrodes.capabilities :as capabilities]
             [arrodes.runtime-test :as fixtures]
             [clojure.string :as str]
             [clojure.test :refer [deftest is]]))
@@ -15,6 +16,35 @@
       (is (= 42 (:value (runtime/evaluate! rt sid "(inc retained)"))))
       (is (= [nil nil] (:value (runtime/evaluate! rt other "[*1 (resolve 'retained)]"))))
       (is (= 42 (:value (runtime/evaluate! rt sid "*1")))))))
+
+(deftest wrapped-capability-failure-exposes-its-cause-without-losing-evaluation-progress
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))]
+      (capabilities/register! (runtime/registry rt sid)
+        {:name "reject-research" :description "Reject missing provider evidence"
+         :parameters {:type "object"} :permission :read :execution :parallel
+         :fn (fn [_]
+               (throw (ex-info "Hosted search returned no genuine source URLs"
+                               {:error/code "provider/no-search-evidence" :provider :codex-backend})))})
+      (let [failed (runtime/evaluate! rt sid
+                     "(def effects (atom 0))\n(swap! effects inc)\n(def research (reject-research {}))")
+            id (get-in failed [:result :id])
+            data (get-in failed [:details :data])]
+        (is (:error? failed))
+        (is (= "evaluation-failed" (get-in failed [:details :code])))
+        (is (str/includes? (:content failed) "provider/no-search-evidence"))
+        (is (= "provider/no-search-evidence" (get-in data [:evaluation/cause :code])))
+        (is (str/includes? (get-in data [:evaluation/cause :message]) "Hosted search returned no genuine source URLs"))
+        (is (= {:completed-forms 2 :form-index 3 :phase :evaluating}
+               (select-keys data [:completed-forms :form-index :phase])))
+        (is (= 1 (:value (runtime/evaluate! rt sid "@effects"))))
+        (runtime/reload! rt sid)
+        (let [info (:value (runtime/evaluate! rt sid (str "(result-info " id ")")))]
+          (is (= "provider/no-search-evidence" (get-in info [:details :data :evaluation/cause :code])))))
+      (let [syntax (runtime/evaluate! rt sid "(missing_research_function {})")]
+        (is (:error? syntax))
+        (is (nil? (get-in syntax [:details :data :evaluation/cause])))
+        (is (= :compile-syntax-check (get-in syntax [:details :data :clojure.error/phase])))))))
 
 (deftest nested-function-events-replay-with-native-result-references
   (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]

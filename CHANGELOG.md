@@ -18,6 +18,12 @@
   explicit configured MCP alternative. Preserve native remote content, source
   provenance and truthful limits; reject ungrounded answers and unsupported
   options rather than silently switching backends or replaying requests.
+- Preserve Codex hosted-search sources and citations delivered in completed SSE
+  output-item events when the terminal response has empty output. Prioritize
+  answer-cited URLs before consulted pages under source caps.
+- Surface attributed provider/function error codes and messages in REPL failures
+  instead of hiding them behind compiler-wrapper syntax messages; retain original
+  evaluation classification, source/progress diagnostics and live exceptions.
 
 ## 0.2.0
 

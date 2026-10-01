@@ -93,7 +93,13 @@
 
 (defn- reply-for [{:keys [result sse?]}]
   {:status 200 :content-type (if sse? "text/event-stream" "application/json")
-   :payload (if sse? (sse {:type "response.completed" :response result})
+   :payload (if sse?
+              (str (apply str
+                          (map-indexed (fn [index item]
+                                         (sse {:type "response.output_item.done"
+                                               :output_index index :item item}))
+                                       (:output result)))
+                   (sse {:type "response.completed" :response (assoc result :output [])}))
                 (json/write-str result))})
 
 (defn- serve [f]
@@ -160,6 +166,50 @@
 
 (defn- failure [f]
   (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))
+
+(deftest codex-streamed-evidence-survives-empty-terminal-output
+  (serve
+   (fn [manager _ replies]
+     (let [family (first (filter :sse? families))
+           search-item (first (:output responses-result))
+           message-item (second (:output responses-result))
+           terminal (assoc responses-result :output []
+                           :usage {:input_tokens 17 :output_tokens 9 :total_tokens 26})
+           payload (str
+                    (sse {:type "response.output_item.added" :output_index 0
+                          :item {:type "web_search_call" :status "in_progress"}})
+                    (sse {:type "response.output_item.done" :output_index 1
+                          :item (assoc-in message-item [:content 0 :text] "Superseded answer")})
+                    (sse {:type "response.output_item.done" :output_index 0 :item search-item})
+                    (sse {:type "response.output_item.done" :output_index 1 :item message-item})
+                    (sse {:type "response.completed" :response terminal}))]
+       (swap! replies assoc (:route family) {:status 200 :content-type "text/event-stream" :payload payload})
+       (let [result (provider/web-search! manager {:provider (:id family) :model (:model family)
+                                                  :query query :limit 2 :timeout-ms 3000} {})]
+         (is (= [url url-two] (mapv ::web/url (::web/sources result))))
+         (is (= [url] (mapv ::web/url (::web/citations result))))
+         (is (= answer (::web/answer result)))
+         (is (= [query] (::web/search-queries result)))
+         (is (= 17 (get-in result [::web/usage :usage/input-tokens]))))
+       (swap! replies assoc (:route family)
+              {:status 200 :content-type "text/event-stream"
+               :payload (str
+                          (sse {:type "response.output_item.done" :output_index 0 :item search-item})
+                          (sse {:type "response.output_item.done" :output_index 1 :item message-item})
+                          (sse {:type "response.completed"
+                                :response (assoc-in responses-result [:output 1 :content 0 :text]
+                                                    "Terminal authoritative answer")}))})
+       (is (= "Terminal authoritative answer" (::web/answer (search manager family {}))))
+       (doseq [[ending code] [["" "provider/incomplete-stream"]
+                              [(sse {:type "response.completed" :response (assoc terminal :status "incomplete")})
+                               "provider/search-failed"]]]
+         (swap! replies assoc (:route family)
+                {:status 200 :content-type "text/event-stream"
+                 :payload (str (sse {:type "response.output_item.done" :output_index 0 :item search-item})
+                               ending)})
+         (let [error (failure #(search manager family {}))]
+           (is (= code (:error/code error)))
+           (is (false? (:retryable? error)))))))))
 
 (deftest native-search-protocols-produce-grounded-qualified-results
   (serve
@@ -241,6 +291,26 @@
                                      :query query :limit 2 :recency :week} {})
        (is (= {:type "web_search" :max_results 2 :filters {:search_recency_filter "week"}}
               (get-in (last @requests) [:body :tools 0])))))))
+
+(deftest source-limit-retains-cited-urls-before-merely-consulted-pages
+  (serve
+   (fn [manager _ replies]
+     (let [family (first families)
+           cited-url (str url "?utm_source=openai")
+           tracked (assoc-in responses-result [:output 1 :content 0 :annotations 0 :url] cited-url)]
+       (swap! replies assoc (:route family) (reply-for (assoc family :result tracked)))
+       (let [result (search manager family {})]
+         (is (= [cited-url] (mapv ::web/url (::web/sources result))))
+         (is (= [cited-url] (mapv ::web/url (::web/citations result)))))
+       (swap! replies assoc (:route family)
+              (reply-for (assoc family :result
+                               (-> responses-result
+                                   (assoc-in [:output 0 :action :sources 1 :snippet] "Cited page evidence")
+                                   (assoc-in [:output 1 :content 0 :annotations 0 :url] url-two)))))
+       (let [result (search manager family {})]
+         (is (= [url-two] (mapv ::web/url (::web/sources result))))
+         (is (= "Cited page evidence" (::web/snippet (first (::web/sources result)))))
+         (is (= [url-two] (mapv ::web/url (::web/citations result)))))))))
 
 (defn- without-evidence [{:keys [sdk-id result]}]
   (case sdk-id
