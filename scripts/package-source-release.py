@@ -76,7 +76,7 @@ SOURCES = [
     github("test.check", "clojure/test.check", "50f816191dfa6185d8b72b5c7fd84fc56241d359", "1.1.1", "EPL-1.0", "EPL component source and build files"),
     github("tools.reader", "clojure/tools.reader", "bebdbc81924ebf967583284bd31d3853e920f230", "1.3.4", "EPL-1.0", "EPL component source and build files"),
     github("core.rrb-vector", "clojure/core.rrb-vector", "d90812665b7f5af502efd881d8a100c5b2186fd9", "0.1.2", "EPL-1.0", "EPL component source and build files"),
-    github("clojure-llm-sdk", "DeadMeme5441/clojure-llm-sdk", "00867145047a6073ec630961f4db6cff37553bfc", "0.6.2", "MIT", "Bundled pure-Clojure component source and build files"),
+    github("clojure-llm-sdk", "DeadMeme5441/clojure-llm-sdk", "b6806f37f58c8ff106498670969971d859270368", "0.6.3", "MIT", "Bundled pure-Clojure component source and build files"),
     github("arrangement", "greglook/clj-arrangement", "4428958f130e93a170735c4b792a801041fdf23e", "2.1.0", "Unlicense", "Bundled pure-Clojure component source and build files"),
 ]
 

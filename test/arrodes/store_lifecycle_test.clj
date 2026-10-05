@@ -1,10 +1,12 @@
 (ns arrodes.store-lifecycle-test
   (:require [arrodes.artifacts :as artifacts]
+            [arrodes.context-tree :as tree]
             [arrodes.store :as store]
             [arrodes.store.sql :as store-sql]
             [arrodes.store.agents :as store-agents]
             [arrodes.store.command :as command]
             [arrodes.store.db :as store-db]
+            [arrodes.store.context-tree :as store-tree]
             [arrodes.store.jobs :as store-jobs]
             [arrodes.store.recovery :as store-recovery]
             [arrodes.store.transfer :as store-transfer]
@@ -763,7 +765,7 @@
     (.getInt result 1)))
 
 (deftest schema-four-retains-current-shape-history-and-backup
-  ;; Schema 4 is evidenced as the present tables with the prior version marker.
+  ;; Schema 4 includes the complete historical agent-table layout, without context nodes.
   (let [directory (temp-directory)
         path (str directory "/sessions.sqlite")
         neighbor (util/path (str directory "/keep.txt"))]
@@ -773,12 +775,12 @@
         (store/commit! database sid {::command/entries [(message-entry :user "Keep prior history")]})
         (store-db/close! database)
         (Files/writeString neighbor "unrelated" (make-array java.nio.file.OpenOption 0))
-        (sqlite-statements! path ["PRAGMA user_version=4"])
+        (sqlite-statements! path ["DROP TABLE context_nodes" "PRAGMA user_version=4"])
         (let [reopened (store-db/open! {:path path})]
           (try
             (is (= ["Keep prior history"]
                    (mapv :message/content (store/context-messages reopened sid))))
-            (is (= 5 (sqlite-version path)))
+            (is (= 6 (sqlite-version path)))
             (is (= "unrelated" (Files/readString neighbor)))
             (finally (store-db/close! reopened))))
         (with-open [files (Files/list (util/path directory))]
@@ -840,6 +842,7 @@
         (store-db/store-read first-store
           (fn [connection]
             (with-open [statement (.createStatement connection)]
+              (.execute statement "DROP TABLE context_nodes")
               (.execute statement "PRAGMA user_version=4"))))
         (let [error (try (store-db/open! {:path path}) nil
                          (catch clojure.lang.ExceptionInfo failure failure))]
@@ -865,6 +868,7 @@
         (store-db/close! database))
       (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
                   statement (.createStatement connection)]
+        (.execute statement "DROP TABLE context_nodes")
         (.execute statement "PRAGMA user_version=4"))
       (Files/createDirectory outside (make-array FileAttribute 0))
       (Files/writeString (.resolve outside "untouched") "Keep this"
@@ -926,6 +930,7 @@
           (finally (store-db/close! second)))
         (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" second-path))
                     statement (.createStatement connection)]
+          (.execute statement "DROP TABLE context_nodes")
           (.execute statement "PRAGMA user_version=4"))
         (let [error (try (store-db/open! {:path second-path :artifact-dir shared}) nil
                          (catch clojure.lang.ExceptionInfo failure failure))]
@@ -1004,12 +1009,12 @@
                                      :name "Retained job" :created-at 1})
         (store-db/close! database)
         (sqlite-statements!
-         path ["DROP TABLE agent_deliveries" "DROP TABLE agent_messages"
+         path ["DROP TABLE context_nodes" "DROP TABLE agent_deliveries" "DROP TABLE agent_messages"
                "DROP TABLE agent_submissions" "DROP TABLE agent_routes"
                "PRAGMA application_id=0" "PRAGMA user_version=3"])
         (let [reopened (store-db/open! {:path path})]
           (try
-            (is (= 5 (sqlite-version path)))
+            (is (= 6 (sqlite-version path)))
             (is (= ["Keep the history"]
                    (mapv :message/content (store/context-messages reopened sid))))
             (is (= config (:config (store/session reopened sid))))
@@ -1048,7 +1053,7 @@
       (store/commit! database sid {::command/entries [(message-entry :user "Survive failed migration")]})
       (store-db/close! database)
       (sqlite-statements!
-       path ["DROP TABLE agent_deliveries" "DROP TABLE agent_messages"
+       path ["DROP TABLE context_nodes" "DROP TABLE agent_deliveries" "DROP TABLE agent_messages"
              "DROP TABLE agent_submissions" "DROP TABLE agent_routes"
              "PRAGMA application_id=0" "PRAGMA user_version=3"])
       (let [target-var #'store-sql/execute-command!
@@ -1056,7 +1061,7 @@
             error (try
                     (with-redefs-fn
                       {target-var (fn [connection sql]
-                                    (if (= sql "PRAGMA user_version = 5")
+                                    (if (= sql "PRAGMA user_version = 6")
                                       (throw (ex-info "simulated migration interruption" {}))
                                       (original connection sql)))}
                       #(store-db/open! {:path path}))
@@ -1067,14 +1072,14 @@
         (with-open [connection (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
                     statement (.createStatement connection)
                     result (.executeQuery statement
-                                          "SELECT COUNT(*) FROM sqlite_master WHERE name='agent_routes'")]
+                                          "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('agent_routes','context_nodes')")]
           (.next result)
           (is (zero? (.getInt result 1)))))
       (let [reopened (store-db/open! {:path path})]
         (try
           (is (= ["Survive failed migration"]
                  (mapv :message/content (store/context-messages reopened sid))))
-          (is (= 5 (sqlite-version path)))
+          (is (= 6 (sqlite-version path)))
           (finally (store-db/close! reopened))))
       (with-open [files (Files/list (util/path directory))]
         (is (= 2 (count (filter #(re-find #"\.schema3-.*\.backup$" (str %))
@@ -1092,6 +1097,7 @@
         (store-db/close! database)
         (with-open [writer (java.sql.DriverManager/getConnection (str "jdbc:sqlite:" path))
                     statement (.createStatement writer)]
+          (.execute statement "DROP TABLE context_nodes")
           (.execute statement "PRAGMA journal_mode=WAL")
           (.execute statement "UPDATE sessions SET name='Committed in WAL'")
           (.execute statement "PRAGMA user_version=4")
@@ -1134,3 +1140,198 @@
                                           "/" (:sha256 artifact)))
                           (make-array java.nio.file.LinkOption 0))))
       (finally (remove-directory! directory)))))
+
+(deftest historical-schema-four-base-layout-retains-canonical-identities
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")
+        database (store-db/open! {:path path})]
+    (try
+      (let [sid (:id (new-session database))
+            artifact (artifacts/put! database sid "Schema four retained artifact" {})
+            queue-id (util/id)
+            committed (store/commit! database sid
+                                      {::command/entries [(message-entry :user "Schema four original")]
+                                       ::command/queue-enqueue [{:id queue-id :kind :follow-up
+                                                                :content "Keep queued input" :options {}}]})
+            snapshot (store/session database sid)]
+        (store-db/close! database)
+        (sqlite-statements!
+         path ["DROP TABLE context_nodes" "DROP TABLE agent_deliveries" "DROP TABLE agent_messages"
+               "DROP TABLE agent_submissions" "DROP TABLE agent_routes"
+               "PRAGMA application_id=0" "PRAGMA user_version=4"])
+        (let [reopened (store-db/open! {:path path})]
+          (try
+            (is (= 6 (sqlite-version path)))
+            (is (= snapshot (store/session reopened sid)))
+            (is (= (:entries committed) (store/entries reopened sid)))
+            (is (= queue-id (:id (first (store/pending reopened sid)))))
+            (is (= "Schema four retained artifact"
+                   (:content (artifacts/read! reopened sid (:id artifact) {}))))
+            (is (= sid (:root-id (store-agents/agent-state reopened sid))))
+            (is (= {} (store-tree/nodes reopened sid)))
+            (finally (store-db/close! reopened))))
+        (with-open [files (Files/list (util/path directory))]
+          (let [backup (first (filter #(re-find #"\.schema4-.*\.backup$" (str %))
+                                     (iterator-seq (.iterator files))))]
+            (is backup)
+            (when backup (is (= 4 (sqlite-version (str backup))))))))
+      (finally (store-db/close! database) (remove-directory! directory)))))
+
+(defn- durable-agent-snapshot [database root child receipt-id]
+  {:sessions (mapv #(store/session database %) [root child])
+   :entries (mapv #(store/entries database %) [root child])
+   :operations (mapv #(store/operations database {:session-id %}) [root child])
+   :queues (mapv #(store/pending database %) [root child])
+   :events (mapv #(store/events-since database {:session-id %}) [root child])
+   :routes (mapv #(store-agents/agent-state database %) [root child])
+   :receipt (store-agents/agent-delivery database root receipt-id {:detailed? true})})
+
+(deftest schema-five-adds-only-derived-cache-and-keeps-agent-and-retention-records
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")
+        database (store-db/open! {:path path})]
+    (try
+      (let [root (:id (new-session database))
+            child (:session-id (:handle (create-child database root "Upgrade child")))
+            artifact (artifacts/put! database root "Original artifact bytes" {})
+            result (artifacts/put-result! database root
+                                          {:kind :inline :content "native result" :details {}
+                                           :value {:ratio 3/7 :retained true}})
+            job-id (util/id)
+            receipt-id (:id (:receipt
+                             (store-agents/send-agent-message! database root child
+                                                               "Preserve receipt ownership"
+                                                               {:submission-id (util/id)})))
+            operation-id (delivery-operation-id database child)
+            entry-id (:id (first (:entries (store-agents/deliver-agent-messages!
+                                            database child operation-id))))]
+        (store/commit! database root
+                       {::command/entries [(message-entry :user "Canonical schema five history")]
+                        ::command/queue-enqueue [{:id (util/id) :kind :follow-up
+                                                 :content "Retained queue" :options {}}]})
+        (store-jobs/create-job! database {:id job-id :session-id root :status :queued
+                                         :name "Retained native job" :created-at 9})
+        (let [snapshot (durable-agent-snapshot database root child receipt-id)
+              retained-result (artifacts/result database root (:id result))
+              retained-job (store-jobs/job database root job-id)]
+          (store-db/close! database)
+          (sqlite-statements! path ["DROP TABLE context_nodes" "PRAGMA user_version=5"])
+          (let [reopened (store-db/open! {:path path})]
+            (try
+              (is (= 6 (sqlite-version path)))
+              (is (= snapshot (durable-agent-snapshot reopened root child receipt-id)))
+              (is (= retained-result (artifacts/result reopened root (:id result))))
+              (is (= retained-job (store-jobs/job reopened root job-id)))
+              (is (= "Original artifact bytes"
+                     (:content (artifacts/read! reopened root (:id artifact) {}))))
+              (is (= {} (store-tree/nodes reopened root)))
+              (is (= {} (store-tree/nodes reopened child)))
+              (finally (store-db/close! reopened))))
+          (with-open [files (Files/list (util/path directory))]
+            (let [backups (filter #(re-find #"\.schema5-.*\.backup$" (str %))
+                                  (iterator-seq (.iterator files)))
+                  backup (first backups)]
+              (is (= 1 (count backups)))
+              (when backup
+                (is (= 5 (sqlite-version (str backup))))
+                (with-open [connection (java.sql.DriverManager/getConnection
+                                        (str "jdbc:sqlite:" (.toUri backup) "?mode=ro"))]
+                  (is (= 2 (store-sql/scalar connection "SELECT COUNT(*) FROM agent_routes" [])))
+                  (is (= entry-id (store-sql/scalar connection
+                                                   "SELECT entry_id FROM agent_deliveries WHERE message_id=?"
+                                                   [receipt-id])))
+                  (is (= operation-id (store-sql/scalar connection
+                                                       "SELECT operation_id FROM agent_deliveries WHERE message_id=?"
+                                                       [receipt-id])))
+                  (is (= 0 (store-sql/scalar connection
+                                            "SELECT COUNT(*) FROM sqlite_master WHERE name='context_nodes'" [])))))))))
+      (finally (store-db/close! database) (remove-directory! directory)))))
+
+(deftest schema-five-context-migration-rolls-back-with-a-retained-backup
+  (let [directory (temp-directory)
+        path (str directory "/sessions.sqlite")
+        database (store-db/open! {:path path})]
+    (try
+      (let [root (:id (new-session database))
+            child (:session-id (:handle (create-child database root "Rollback child")))
+            receipt-id (:id (:receipt
+                             (store-agents/send-agent-message! database root child "Keep routing"
+                                                               {:submission-id (util/id)})))
+            _ (deliver! database child)
+            snapshot (durable-agent-snapshot database root child receipt-id)
+            artifact (artifacts/put! database root "Keep artifact after rollback" {})]
+        (store-db/close! database)
+        (sqlite-statements! path ["DROP TABLE context_nodes" "PRAGMA user_version=5"])
+        (let [original store-sql/execute-command!
+              error (try
+                      (with-redefs [store-sql/execute-command!
+                                    (fn [connection sql]
+                                      (if (= sql "PRAGMA user_version = 6")
+                                        (throw (ex-info "context migration interrupted" {}))
+                                        (original connection sql)))]
+                        (store-db/open! {:path path}))
+                      nil
+                      (catch clojure.lang.ExceptionInfo failure failure))]
+          (is (= "context migration interrupted" (ex-message error)))
+          (is (= 5 (sqlite-version path)))
+          (with-open [connection (java.sql.DriverManager/getConnection
+                                  (str "jdbc:sqlite:" (.toUri (util/path path)) "?mode=ro"))]
+            (is (= 0 (store-sql/scalar connection
+                                      "SELECT COUNT(*) FROM sqlite_master WHERE name='context_nodes'" [])))
+            (is (= 2 (store-sql/scalar connection "SELECT COUNT(*) FROM agent_routes" [])))))
+        (with-open [files (Files/list (util/path directory))]
+          (is (= 1 (count (filter #(re-find #"\.schema5-.*\.backup$" (str %))
+                                  (iterator-seq (.iterator files)))))))
+        (let [reopened (store-db/open! {:path path})]
+          (try
+            (is (= snapshot (durable-agent-snapshot reopened root child receipt-id)))
+            (is (= "Keep artifact after rollback"
+                   (:content (artifacts/read! reopened root (:id artifact) {}))))
+            (is (= {} (store-tree/nodes reopened root)))
+            (finally (store-db/close! reopened)))))
+      (finally (store-db/close! database) (remove-directory! directory)))))
+
+(deftest unsupported-and-malformed-context-formats-fail-before-mutating-the-store
+  (doseq [[description statements code]
+          [["missing current derived table" ["DROP TABLE context_nodes"] "unsupported-store-format"]
+           ["partial current derived table"
+            ["DROP TABLE context_nodes" "CREATE TABLE context_nodes (id TEXT, session_id TEXT)"]
+            "unsupported-store-format"]
+           ["same-column derived table without ownership constraints"
+            ["DROP TABLE context_nodes"
+             "CREATE TABLE context_nodes (session_id TEXT NOT NULL, id TEXT NOT NULL, start INTEGER NOT NULL, count INTEGER NOT NULL, first_entry_id TEXT NOT NULL, last_entry_id TEXT NOT NULL, left_id TEXT, right_id TEXT, text TEXT NOT NULL, bytes INTEGER NOT NULL, metadata TEXT NOT NULL, PRIMARY KEY(session_id,id))"]
+            "unsupported-store-format"]
+           ["partial current agent tables" ["DROP TABLE agent_deliveries"] "unsupported-store-format"]
+           ["older marker with unrecognized new layout" ["PRAGMA user_version=5"] "unsupported-store-format"]
+           ["newer format" ["PRAGMA user_version=7"] "unsupported-store-format"]
+           ["unsupported old format" ["PRAGMA user_version=2"] "unsupported-store-format"]
+           ["unversioned nonempty store" ["PRAGMA user_version=0" "PRAGMA application_id=0"]
+            "unsupported-store-format"]
+           ["foreign owner marker" ["PRAGMA application_id=123456"] "unrecognized-store"]
+           ["corrupt summary byte count" ["UPDATE context_nodes SET bytes=bytes+1"] "unsupported-store-format"]
+           ["corrupt source position" ["UPDATE context_nodes SET start=start+1"] "unsupported-store-format"]
+           ["orphaned derived owner"
+            ["UPDATE context_nodes SET session_id='00000000-0000-0000-0000-000000000000'"]
+            "unsupported-store-format"]
+           ["corrupt leaf child linkage" ["UPDATE context_nodes SET left_id=id"] "unsupported-store-format"]
+           ["malformed usage metadata" ["UPDATE context_nodes SET metadata='{:usage 42}'"]
+            "unsupported-store-format"]]]
+    (testing description
+      (let [directory (temp-directory)
+            path (str directory "/sessions.sqlite")
+            database (store-db/open! {:path path})]
+        (try
+          (let [sid (:id (new-session database))
+                entries (:entries (store/commit! database sid
+                                                 {::command/entries [(message-entry :user "Keep original")]}))]
+            (store-tree/put-node! database sid (tree/leaf-node entries 0 "retained original")))
+          (store-db/close! database)
+          (sqlite-statements! path statements)
+          (let [before (Files/readAllBytes (util/path path))
+                error (try (store-db/open! {:path path}) nil
+                           (catch clojure.lang.ExceptionInfo failure failure))]
+            (is (= code (:error/code (ex-data error))))
+            (is (java.util.Arrays/equals before (Files/readAllBytes (util/path path))))
+            (with-open [files (Files/list (util/path directory))]
+              (is (not-any? #(re-find #"\.backup$" (str %)) (iterator-seq (.iterator files))))))
+          (finally (store-db/close! database) (remove-directory! directory)))))))

@@ -3,12 +3,15 @@
   (:require [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [arrodes.capabilities :as capabilities]
+            [arrodes.context-tree :as context-tree]
             [arrodes.provider :as provider]
             [arrodes.run :as run]
             [arrodes.runtime.control :as control]
             [arrodes.runtime.handles :as handles]
             [arrodes.store :as store]
             [arrodes.store.command :as command]
+            [arrodes.store.db :as db]
+            [arrodes.store.sql :as sql]
             [arrodes.titles :as titles]
             [arrodes.resources :as resources]
             [arrodes.platform :as util]
@@ -32,7 +35,8 @@
 
 (defn provider-config [runtime sid config]
   (let [manager (:provider (handles/handle! runtime sid))]
-    (if (provider/model manager (:provider config) (:model config))
+    (if (or (context-tree/enabled? config)
+            (provider/model manager (:provider config) (:model config)))
       config
       (if (true? (get-in config [:settings :fallback-model?]))
         (if-let [fallback (first (filter #(= (:provider config) (:provider %))
@@ -72,11 +76,15 @@
 (defn prepare-run! [runtime sid slot prompt overrides]
   (let [registry (:registry (handles/handle! runtime sid))
         manager (:resources (handles/handle! runtime sid))
+        initial (locking (control/session-lock runtime sid)
+                  {:session (store/session (:store runtime) sid)
+                   :setting-revisions (get (some-> (:context-setting-revisions runtime) deref) sid {})})
         config (provider-config runtime sid
                                 (run/effective-config
-                                 (store/session (:store runtime) sid) overrides))
+                                 (:session initial) overrides))
         context {:runtime runtime :session-id sid :operation-id (:operation-id slot)
-                 :session (store/session (:store runtime) sid)}
+                 :session (:session initial)}
+        setting-revisions (:setting-revisions initial)
         input (when (some? prompt)
                 (let [expanded (if (string? prompt)
                                  (resources/expand-input manager prompt) prompt)]
@@ -90,10 +98,20 @@
                                    (store/session (:store runtime) sid)
                                    (:config prepared)))
           title (atom nil)
+          prior-path (atom [])
+          committed-entries (atom [])
+          cursor (atom 0)
+          context-baseline (atom {:settings (select-keys (get-in initial [:session :config :settings])
+                                                        context-tree/setting-keys)
+                                  :revisions setting-revisions})
           initial-intents
           (locking (control/session-lock runtime sid)
             (util/check-cancelled! (:cancelled slot))
             (let [snapshot (store/session (:store runtime) sid)
+                  path (store/active-path (:store runtime) sid)
+                  _ (reset! prior-path path)
+                  _ (reset! cursor (db/store-read (:store runtime)
+                                      #(long (or (sql/scalar % "SELECT MAX(seq) FROM entries WHERE session_id=?" [sid]) 0))))
                   running? (contains? #{:run :continue} (:kind slot))
                   new-generation? (and running?
                                        (not= (:generation registry)
@@ -109,6 +127,20 @@
                           (run/select-intents (store/pending (:store runtime) sid)
                                               :start-boundary)
                           [])
+                  delivered-settings (into #{} (mapcat #(keys (get-in % [:options :config :settings]))) items)
+                  revisions (get (some-> (:context-setting-revisions runtime) deref) sid {})
+                  _ (swap! context-baseline
+                           (fn [baseline]
+                             (reduce (fn [baseline key]
+                                       (if (contains? context-tree/setting-keys key)
+                                         (-> baseline
+                                             (update :settings
+                                                     #(if (contains? (get-in snapshot [:config :settings]) key)
+                                                        (assoc % key (get-in snapshot [:config :settings key]))
+                                                        (dissoc % key)))
+                                             (assoc-in [:revisions key] (get revisions key 0)))
+                                         baseline))
+                                     baseline delivered-settings)))
                   entries (cond-> (run/intent-entries items)
                             (some? prompt)
                             (conj {:kind :message
@@ -131,12 +163,18 @@
                                   :type :message/user :data {}})
                            naming (conj {:type :session/named :data {:name (:name naming) :source :auto}}))]
               (when (or (seq entries) (seq items) (seq session-changes))
-                (control/commit! runtime sid
-                         {::command/entries entries
-                          ::command/queue-deliver (mapv :id items)
-                          ::command/events events
-                          ::command/session session-changes}))
+                (reset! committed-entries
+                        (:entries
+                         (control/commit! runtime sid
+                                          {::command/entries entries
+                                           ::command/queue-deliver (mapv :id items)
+                                           ::command/events events
+                                           ::command/session session-changes}))))
               items))]
       (when @title (start-title! runtime sid config @title))
       {::registry registry ::manager manager ::config config
-       ::hook-context context ::initial-intents initial-intents})))
+       ::hook-context context ::initial-intents initial-intents
+       ::session-context-settings (:settings @context-baseline)
+       ::session-context-setting-revisions (:revisions @context-baseline)
+       ::prior-path @prior-path ::committed-entries @committed-entries
+       ::cursor (or (:seq (peek @committed-entries)) @cursor)})))

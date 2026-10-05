@@ -139,8 +139,8 @@ team browser for navigation, messages, results and explicit cancel/stop/resume;
 the ordinary composer retains its unsent text across navigation. Children share
 the working checkout and process permissions, **not** the parent's live REPL
 bindings. Foreground cancellation does not cancel accepted jobs or children.
-See the [agent/session contract](docs/SESSIONS.md). Current schema-5 stores reopen
-directly; supported schema-3/4 layouts upgrade transactionally after a retained
+See the [agent/session contract](docs/SESSIONS.md). Current schema-6 stores reopen
+directly; supported schema-3/4/5 layouts upgrade transactionally after a retained
 backup. Unknown/newer, malformed and foreign stores are rejected intact, not reset.
 See [compatibility](docs/COMPATIBILITY.md) for supported layouts and recovery.
 

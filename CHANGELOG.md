@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+## 0.2.2
+
+- Add opt-in OptChat-style chronological summary-tree context with a frozen,
+  recency-shaped historical view per outer turn, owned bounded background summary
+  inference and reuse across restart. Preserve canonical history, unfinished native
+  turns, evaluator/results/jobs/child semantics and no-replay context recovery.
+- Add ordinary REPL `history/view`, `history/zoom`, `history/read` and `history/date`
+  navigation with bounded contextual retrieval associations, plus `/context` controls
+  and read-only `session.context` inspection. Linear context remains the default;
+  opening or inspecting a session never starts paid summary rebuilding.
+- Upgrade persistence to schema 6 with retained backups for supported schema-3/4/5
+  stores. Keep RPC framing 1 and ordinary session exports 1; use export 2 only for
+  typed retrieval references, remap included sources honestly on fork/import, and
+  omit derived summary nodes/frontier IDs from transfers.
+- Handle macOS MCP shutdown races where signaling a zombie-only process group
+  reports a permission error. Confirm whole-group exit before completing cleanup;
+  retain ownership and report failures while any owned processes remain.
+- Update clojure-llm-sdk from 0.6.2 to 0.6.3 and align the corresponding-source
+  revision and third-party notices.
+- Preserve native image presentation through REPL evaluation and provider replay
+  without replacing ordinary native return values with presentation wrappers.
+- Include prior captured output and source positions in REPL failures while keeping
+  evaluator-owned diagnostics authoritative over conflicting exception metadata.
+- Add an on-demand coding workflow and targeted guidance for contract discovery,
+  native file operations, bounded inspection and user-facing verification.
+- Let chronological summary leaves and eligible parents progress concurrently,
+  wake foreground requests on a complete fitting view, and apply deadlines per
+  node rather than to the whole backlog. Preserve actual-exit ownership, explicit
+  retries, cache-clear correctness and no-replay overflow recovery.
+- Give compaction its incremental summarized context, independent byte-scale
+  calibration and measured shortening feedback; preserve source authorship and
+  distinguish requested actions from observed outcomes.
+
 ## 0.2.1
 
 - Split persistence into transaction, database/schema/filesystem ownership, record,

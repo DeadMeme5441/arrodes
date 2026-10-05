@@ -11,6 +11,7 @@
 (def ^:private max-source-characters (* 1024 1024))
 (def ^:private max-evaluation-output-characters (* 1024 1024))
 (def ^:private max-printed-value-characters (* 32 1024))
+(def ^:private max-failure-stream-characters 4096)
 
 
 (defn- writer-text [{:keys [buffer truncated?]} label]
@@ -22,7 +23,10 @@
 (defn- bounded-pr-str [value]
   (let [{:keys [writer buffer truncated?]} (util/bounded-writer max-printed-value-characters)]
     (binding [*out* writer *print-length* 200 *print-level* 20]
-      (if (string? value) (print value) (pr value)))
+      (cond
+        (string? value) (print value)
+        (bytes? value) (print (str "[" (alength ^bytes value) " native bytes; value retained]"))
+        :else (pr value)))
     {:text (str buffer
                 (when @truncated?
                   (str "\n[value preview truncated at " max-printed-value-characters
@@ -67,6 +71,31 @@
       (recur (.getCause ^Throwable cause))
       (when (:error/code (ex-data cause)) cause))))
 
+(defn- failure-message [text]
+  (if (> (count text) max-failure-stream-characters)
+    (str (subs text 0 max-failure-stream-characters) "\n[Exception message truncated.]")
+    text))
+
+(defn- failure-content [message data error]
+  (let [source-error? (or (instance? Compiler$CompilerException error)
+                          (= :reading (:phase data)))
+        coordinate (fn [key fallback]
+                     (let [n (when source-error? (get data key))]
+                       (if (and (integer? n) (pos? n)) n (get data fallback))))
+        line (coordinate :clojure.error/line :line)
+        column (coordinate :clojure.error/column :column)
+        stream-preview (fn [text]
+                         (if (> (count text) max-failure-stream-characters)
+                           (str (subs text 0 max-failure-stream-characters)
+                                "\n[Preview truncated; captured output is retained in failure details or their output artifact.]")
+                           text))]
+    (str message
+         (when (:form-index data) (str "\nForm " (:form-index data) ", " (name (:phase data))))
+         (when line (str ", line " line))
+         (when column (str ", column " column))
+         (when (seq (:stdout data)) (str "\nstdout:\n" (stream-preview (:stdout data))))
+         (when (seq (:stderr data)) (str "\nstderr:\n" (stream-preview (:stderr data)))))))
+
 
 (defn evaluate!
   "Evaluate forms in order, preserving native values and the session's REPL history.
@@ -93,13 +122,14 @@
                 (loop [value nil form-count 0]
                   (util/check-cancelled! (:cancelled? (current-context)))
                   (swap! progress assoc :phase :reading :form-index (inc form-count)
-                         :line (.getLineNumber reader))
+                         :line (.getLineNumber reader) :column (.getColumnNumber reader))
                   (let [form (read {:eof eof :read-cond :allow :features #{:clj}} reader)]
                     (if (identical? eof form)
                       (do (swap! progress assoc :phase :printing :form-index nil)
                           [value form-count])
                       (let [_ (swap! progress assoc :phase :evaluating
-                                     :line (or (:line (meta form)) (.getLineNumber reader)))
+                                     :line (or (:line (meta form)) (.getLineNumber reader))
+                                     :column (or (:column (meta form)) (.getColumnNumber reader)))
                             next-value (eval form)]
                         (swap! progress assoc :completed-forms (inc form-count))
                         (set! *3 *2)
@@ -125,24 +155,28 @@
                    :forms form-count}})
       (catch Throwable error
         (swap! history assoc :error error)
-        (if (util/cancelled? (:cancelled? (current-context)))
-          (value/fail! :cancelled "Clojure evaluation was cancelled"
-                      {:stdout (writer-text out-state "stdout")
-                       :stderr (writer-text err-state "stderr")})
-          (let [cause (attributed-cause error)
-                diagnostic (when cause (select-keys (value/error-map cause) [:code :message]))]
-            (throw
-             (ex-info
-              (str "Clojure evaluation failed"
-                   (when diagnostic (str " [" (:code diagnostic) "]"))
-                   ": " (or (:message diagnostic) (ex-message error) (.getName (class error))))
-              (cond-> (merge {:error/code "evaluation-failed"
-                              :stdout (writer-text out-state "stdout")
-                              :stderr (writer-text err-state "stderr")
-                              :exception (.getName (class error))}
-                             (ex-data error) @progress)
-                diagnostic (assoc :evaluation/cause diagnostic))
-              error))))))))
+        (let [cancelled? (util/cancelled? (:cancelled? (current-context)))
+              cause (when-not cancelled? (attributed-cause error))
+              diagnostic (when cause
+                           {:code (:error/code (ex-data cause))
+                            :message (failure-message (or (ex-message cause) (.getName (class cause))))})
+              data (cond-> (merge {:error/code "evaluation-failed"}
+                                 (ex-data error)
+                                 {:stdout (writer-text out-state "stdout")
+                                  :stderr (writer-text err-state "stderr")
+                                  :stdout-truncated? @(:truncated? out-state)
+                                  :stderr-truncated? @(:truncated? err-state)
+                                  :exception (.getName (class error))}
+                                 @progress)
+                     diagnostic (assoc :evaluation/cause diagnostic)
+                     cancelled? (assoc :error/code "cancelled"))
+              message (if cancelled?
+                        "Clojure evaluation was cancelled"
+                        (str "Clojure evaluation failed"
+                             (when diagnostic (str " [" (failure-message (str (:code diagnostic))) "]"))
+                             ": " (failure-message (or (:message diagnostic) (ex-message error)
+                                                       (.getName (class error))))))]
+          (throw (ex-info (failure-content message data error) data error)))))))
 
 (defn- tool-name-for-var [^Var var descriptor]
   (or (:name descriptor)

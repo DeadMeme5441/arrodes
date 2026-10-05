@@ -9,6 +9,7 @@
             [arrodes.tui-view :as view]
             [arrodes.tui.agents :as agents]
             [arrodes.tui.context :as c]
+            [arrodes.tui.commands :as commands]
             [arrodes.tui.input :as key-input]
             [arrodes.tui.screens :as screens]
             [arrodes.theme-ui-test :as theme-test]
@@ -1115,6 +1116,155 @@
                     (not (str/includes? frame "◇ You"))))
             "The delivered completion must be attributed and show only its bounded final reply")))
 
+
+(defn- context-save-ownership! [application mounted terminal]
+  (let [replies (atom [])
+        saves (atom [])
+        token (atom nil)
+        before (:ui @(:state application))
+        notice {:kind :error :message "Newer context feedback"}
+        choose! (fn []
+                  (swap! (:state application) assoc-in [:ui :overlay :index] 1)
+                  (screens/choose-overlay! mounted))]
+    (commands/open-context! mounted)
+    (with-redefs [c/invoke! (fn [_ action _]
+                             (when-not (= :configure-context action)
+                               (throw (js/Error. "Context choices must use the configuration controller")))
+                             (js/Promise. (fn [resolve _] (swap! replies conj resolve))))]
+      (swap! saves conj (choose!))
+      (let [first-token (get-in @(:state application) [:ui :overlay :token])]
+        (swap! saves conj (choose!))
+        (reset! token (get-in @(:state application) [:ui :overlay :token]))
+        (when (= first-token @token)
+          (throw (js/Error. "Each context save must own its completion within the same menu")))))
+    (swap! (:state application) assoc :notice notice)
+    ((first @replies) {:id "old-context-save"})
+    (-> (first @saves)
+        (.then (fn [_]
+                 (until! terminal
+                         #(and (= @token (get-in @(:state application) [:ui :overlay :token]))
+                               (= notice (:notice @(:state application))))
+                         "An older save must not close the newer same-menu interaction or replace its notice")))
+        (.then (fn [_]
+                 ;; A controller save superseded by a newer configured event returns nil.
+                 ((second @replies) nil)
+                 (second @saves)))
+        (.then (fn [_]
+                 (when-not (and (= @token (get-in @(:state application) [:ui :overlay :token]))
+                                (= (:draft before) (get-in @(:state application) [:ui :draft]))
+                                (= (:selected before) (get-in @(:state application) [:ui :selected])))
+                   (throw (js/Error. "An event-superseded context save must retain the menu, draft and selection")))
+                 (screens/close-overlay! mounted)
+                 (swap! (:state application) assoc :notice nil))))))
+
+(defn- context-controls! [application mounted terminal]
+  (let [main-context (atom nil)
+        main-entries [{:id "original" :kind :message
+                       :data {:message/role :assistant :message/content "Original main answer"
+                              :message/provider-data {:response/usage {:usage/total-tokens 1234}}}}]
+        key! (fn [name] (key-input/key! mounted #js {:eventType "press" :name name
+                                                    :preventDefault (fn []) :stopPropagation (fn [])}))
+        open! #(commands/open-context! mounted)
+        choose! (fn [index]
+                  (swap! (:state application) assoc-in [:ui :overlay :index] index)
+                  (screens/choose-overlay! mounted))
+        inspection {:policy :summary-tree
+                    :settings {:summary-model "gpt-6-luna" :summary-provider :codex-backend :summary-view-bytes 128000}
+                    :summary {:status :failed :node-count 2 :error {:message "Summary fixture failed"}
+                              :usage {:usage/input-tokens 9999} :cost {:cost/total 0.125}}
+                    :view {:ready? false :fits? false :bytes 512 :budget 128000 :source-count 2
+                           :nodes [{:id "ct:1:original:original" :count 1 :start 0
+                                    :first-entry-id "original" :last-entry-id "original"
+                                    :text "Retained historical evidence"}]}}]
+    (.resize terminal 58 20)
+    (swap! (:state application)
+           #(-> %
+                (assoc :connection {:status :ready} :notice nil :host-requests []
+                       :view (assoc (model/empty-state)
+                                    :session {:name "Unsent" :cwd "/tmp/project"
+                                              :config {:provider :codex-backend :model "main"}}))
+                (update :ui merge {:draft "Keep my context draft" :overlay nil :inspector? false :focus :composer})))
+    (open!)
+    (-> (visible! application terminal)
+        (.then (fn [_]
+                 (choose! 2)
+                 (until! terminal #(and (screen-fits? terminal)
+                                        (str/includes? (.captureCharFrame terminal) "Background summaries may call")
+                                        (str/includes? (.captureCharFrame terminal) "gpt-6-luna"))
+                         "Enabling context must explain background model work on a narrow terminal")))
+        (.then (fn [_]
+                 (key! "escape")
+                 (open!)
+                 (choose! 3)
+                 (until! terminal #(= "gpt-6-luna" (.-plainText (node terminal "dialog-input")))
+                         "Summarizer model must open the native exact-model editor")))
+        (.then (fn [_]
+                 (.setText (node terminal "dialog-input") "")
+                 (key! "return")
+                 (until! terminal #(and (= :input (get-in @(:state application) [:ui :overlay :kind]))
+                                        (str/includes? (.captureCharFrame terminal) "non-empty"))
+                         "Invalid model must remain editable with a visible failure")))
+        (.then (fn [_]
+                 (.setText (node terminal "dialog-input") "exact-summary-model")
+                 (key! "return")
+                 (until! terminal #(and (nil? (get-in @(:state application) [:ui :overlay]))
+                                        (= "exact-summary-model" (get-in @(:state application) [:view :session :config :settings :summary-model]))
+                                        (nil? (get-in @(:state application) [:view :session :id]))
+                                        (= "Keep my context draft" (.-plainText (node terminal "composer"))))
+                         "Exact-model save must preserve the empty composer and draft")))
+        (.then (fn [_] (context-save-ownership! application mounted terminal)))
+        (.then (fn [_]
+                 (.resize terminal 120 45)
+                 (swap! (:state application)
+                        #(-> %
+                             (assoc :notice nil :models [{:provider :codex-backend :id "main" :context-window 128000}])
+                             (assoc-in [:view :entries] main-entries)))
+                 (until! terminal #(and (nil? (get-in @(:state application) [:ui :overlay]))
+                                        (str/includes? (.captureCharFrame terminal) "Original main answer"))
+                         "Main-request context baseline must come from the rendered conversation")))
+        (.then (fn [_]
+                 (reset! main-context (.-plainText (node terminal "footer-context")))
+                 (open!)
+                 (with-redefs [c/invoke! (fn [_ action _]
+                                          (when-not (= :context action) (throw (js/Error. "Inspection must be read-only")))
+                                          (js/Promise.resolve inspection))]
+                   (choose! 0))
+                 (until! terminal #(let [frame (.captureCharFrame terminal)]
+                                    (and (screen-fits? terminal)
+                                         (str/includes? frame "Summary fixture failed")
+                                         (str/includes? frame "Ready: not yet")
+                                         (str/includes? frame "9999")
+                                         (str/includes? frame "0.125")
+                                         (str/includes? frame "Retained historical evidence")))
+                         "Context inspector must expose bounded evidence, failure, readiness and separate accounting")))
+        (.then (fn [_]
+                 (when-not (= main-entries (get-in @(:state application) [:view :entries]))
+                   (throw (js/Error. "Summary inspection must preserve original main-request usage data")))
+                 (key! "escape")
+                 (until! terminal #(and (nil? (get-in @(:state application) [:ui :overlay]))
+                                        (str/includes? (.captureCharFrame terminal) "Original main answer")
+                                        (= "Keep my context draft" (.-plainText (node terminal "composer"))))
+                         "Closing context inspection must restore the rendered conversation and draft")))
+        (.then (fn [_]
+                 (when-not (and (= main-entries (get-in @(:state application) [:view :entries]))
+                                (= @main-context (.-plainText (node terminal "footer-context"))))
+                   (throw (js/Error. "Summary usage must not replace or aggregate the latest main-request context measurement")))
+                 (swap! (:state application)
+                        #(-> %
+                             (assoc :notice nil)
+                             (assoc-in [:view :operation] {:id "context-op" :status :running})
+                             (assoc-in [:view :phase] :preparing-context)))
+                 (until! terminal #(str/includes? (.-plainText (node terminal "footer-feedback")) "Preparing history…")
+                         "Preparing context must have a readable foreground phase")))
+        (.then (fn [_]
+                 (let [cancelled (atom nil)]
+                   (with-redefs [c/fire! (fn [_ action _] (reset! cancelled action))]
+                     (key! "escape"))
+                   (when-not (= :cancel @cancelled)
+                     (throw (js/Error. "Escape during context preparation must retain ordinary cancellation"))))
+                 (swap! (:state application) update :view dissoc :operation :phase)
+                 (until! terminal #(= "Keep my context draft" (get-in @(:state application) [:ui :draft]))
+                         "Context inspection and cancellation must preserve the composer draft"))))))
 (defn- exercise! [terminal]
   (let [application (app/create! {:runtime-root (.cwd js/process) :cwd (.cwd js/process)
                                   :setup? false})
@@ -1175,6 +1325,7 @@
         (.then (fn [_] (agent-browser! application terminal)))
         (.then (fn [_] (agent-selection-controls! application mounted terminal)))
         (.then (fn [_] (agent-transcript! application terminal)))
+        (.then (fn [_] (context-controls! application mounted terminal)))
         (.then (fn [_] (assistant-turn-ownership! application terminal)))
         (.then (fn [] (println "Native TUI passed: full-screen layout, inspector selection ownership, session widgets, render/editor requests and cancelled overlay cleanup.")))
         (.finally (fn []

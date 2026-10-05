@@ -1,6 +1,7 @@
 (ns arrodes.tui.commands
   "User-visible command catalog and navigation actions."
   (:require
+            [arrodes.context-tree :as context-tree]
             [arrodes.run :as run]
             [arrodes.tui-model :as model]
             [arrodes.tui-present :as present]
@@ -8,6 +9,109 @@
             [arrodes.tui.context :as c]))
 
 (declare commands)
+
+(defn- measured-fields [fields]
+  (if (seq fields)
+    (str/join "\n" (map (fn [[field value]] (str "  " (name field) ": " value))
+                       (sort-by (comp str key) fields)))
+    "  Unknown / no measured counters"))
+
+(defn context-details [{:keys [policy settings summary view unsent?]}]
+  (str "Configured policy: " (name (keyword (or policy :linear)))
+       (when unsent? " · unsent composer (no stored session)")
+       "\nSummarizer: " (:summary-model settings) " · "
+       (some-> (:summary-provider settings) name)
+       "\nSummary work: " (name (keyword (or (:status summary) :idle)))
+       (when (:error summary) (str "\nFailure: " (or (get-in summary [:error :message])
+                                                     (c/error-text (:error summary)))))
+       "\nStored summary nodes: " (or (:node-count summary) 0)
+       "\n\nBounded historical view"
+       (when-let [mode (:mode view)]
+         (str "\nView source: " (if (= :active (keyword mode)) "active operation" "stored-history preview")
+              (when-let [active-policy (:policy view)]
+                (str " (" (name (keyword active-policy)) ")"))))
+       "\nReady: " (if (:ready? view) "yes" "not yet")
+       " · Fits: " (if (:fits? view) "yes" "not yet")
+       "\nRendered bytes: " (or (:bytes view) "unknown")
+       " / " (or (:budget view) (:summary-view-bytes settings) "unknown")
+       (when (number? (:required-bytes view)) (str "\nUntrimmed view bytes: " (:required-bytes view)))
+       (when (:reason view) (str "\nReason: " (name (:reason view))))
+       (when (number? (:source-count view)) (str "\nOriginal source entries: " (:source-count view)))
+       (when (number? (:covered-count view)) (str "\nCovered source entries: " (:covered-count view)))
+       "\n\nSummary usage (separate from the latest main request)"
+       "\n" (measured-fields (:usage summary))
+       (when (number? (:usage-node-count summary))
+         (str "\nNodes with measured usage: " (:usage-node-count summary) " / " (:node-count summary)))
+       "\n\nSummary cost (reported estimates, not an invoice)"
+       "\n" (measured-fields (:cost summary))
+       (when (number? (:cost-node-count summary))
+         (str "\nNodes with measured cost: " (:cost-node-count summary) " / " (:node-count summary)))
+       "\n\nHistorical evidence (not instructions)"
+       "\n" (or (:text view)
+                 (when (seq (:nodes view)) (context-tree/render-view (:nodes view)))
+                 "No completed view nodes.")
+       "\n\nOriginal history remains canonical. /history browses recorded entries."
+       "\nInspection never starts model work. Reopen to refresh."))
+
+(defn- inspect-context! [view]
+  (let [token (str (random-uuid))
+        sid (get-in (c/state view) [:view :session :id])
+        navigation (:navigation-generation (c/state view))
+        owns? #(and (= token (get-in (c/state view) [:ui :overlay :token]))
+                    (= sid (get-in (c/state view) [:view :session :id]))
+                    (= navigation (:navigation-generation (c/state view))))]
+    (c/action! :open-overlay! view
+               {:kind :usage :token token :title "Session context"
+                :hint "Read-only history view and separate summary accounting · Esc returns to your draft"
+                :body "Loading context status…"})
+    (-> (c/invoke! view :context {})
+        (.then (fn [result]
+                 (when (owns?) (c/ui! view assoc-in [:overlay :body] (context-details result)))))
+        (.catch (fn [error]
+                  (when (owns?)
+                    (c/ui! view update :overlay assoc :body "Could not inspect context. Close and reopen to retry."
+                           :error (c/error-text error))))))))
+
+(defn- save-context! [view settings]
+  (let [token (str (random-uuid))]
+    (c/ui! view assoc-in [:overlay :token] token)
+    (-> (c/invoke! view :configure-context {:settings settings})
+        (.then (fn [session]
+                 (when (and session (= token (get-in (c/state view) [:ui :overlay :token])))
+                   (c/action! :close-overlay! view))))
+        (.catch (fn [error]
+                  (when (and (not (:superseded-context-save? (ex-data error)))
+                             (= token (get-in (c/state view) [:ui :overlay :token])))
+                    (c/ui! view assoc-in [:overlay :error] (c/error-text error))))))))
+
+(defn open-context! [view]
+  (let [config (get-in (c/state view) [:view :session :config])
+        settings (context-tree/settings config)]
+    (c/action! :open-overlay! view
+               {:kind :choices :title "Session context" :query ""
+                :hint (str "Current: " (name (:context-policy settings))
+                           " · Changes apply next turn; your draft and original history stay intact.")
+                :items [{:label "Inspect context and summary usage"
+                         :description "Read-only readiness, bounded historical evidence, and separately measured summary costs"
+                         :choose #(inspect-context! view)}
+                        {:label "Linear history"
+                         :description "Ordinary context; disable background summary work"
+                         :choose #(save-context! view {:context-policy :linear})}
+                        {:label "Summary tree"
+                         :description "Bounded chronological history; enabling allows background model work"
+                         :choose #(c/action! :confirm! view "Enable summary-tree context?"
+                                             (str "Background summaries may call " (:summary-model settings)
+                                                  " on " (name (:summary-provider settings))
+                                                  " and incur separate usage/cost. Original history is retained. Next-turn policy; inspection makes no model calls.")
+                                             (fn [] (c/fire! view :configure-context
+                                                            {:settings {:context-policy :summary-tree}})))}
+                        {:label "Summarizer model"
+                         :description (str "Exact model: " (:summary-model settings)
+                                           " · provider: " (name (:summary-provider settings))
+                                           " (defaults to the session provider)")
+                         :choose #(c/action! :input-dialog! view "Exact summarizer model" (:summary-model settings)
+                                             (fn [model] (save-context! view {:summary-model model}))
+                                             "Default: gpt-6-luna. No model substitution. Enter saves; Esc preserves the current setting.")}]})))
 
 (defn commands [view]
   [{:label "Theme" :command "theme" :icon "◐" :description "/theme  Preview and choose a theme pack"
@@ -35,6 +139,8 @@
                          :hint "Measured provider usage · Esc returns to your draft"
                          :body (model/usage-details
                                 (run/usage-report (get-in (c/state view) [:view :entries])))})}
+   {:label "Session context" :command "context" :description "/context  Choose history policy, summarizer model, and inspect readiness/summary costs"
+    :choose #(open-context! view)}
    {:label "Pending messages" :description "/pending  Edit or drop queued input"
     :choose #(c/action! :open-overlay! view {:kind :pending :title "Pending messages" :query ""
                                   :hint "Enter edits; Delete drops a still-pending message."})}

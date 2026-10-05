@@ -2,6 +2,7 @@
   "Portable history copies and validated session export/import."
   (:require [clojure.set :as set]
             [clojure.string :as str]
+            [arrodes.context-tree :as context-tree]
             [arrodes.session :as session-model]
             [arrodes.platform :as util]
             [arrodes.value :as value]
@@ -12,9 +13,222 @@
             [arrodes.store.sql :as sql])
   (:import (java.sql Connection ResultSet)
            (java.nio.file Files LinkOption)
+           (java.nio.charset StandardCharsets)
            (java.util Base64)))
 
 (def ^:private max-transfer-artifact-bytes (* 256 1024 1024))
+
+(def ^:private retrieval-span-keys
+  [:source-first-entry-id :source-last-entry-id :source-count])
+
+(defn- map-retrieval-markers
+  "Transforms explicit markers in finite stored EDN, sharing unchanged collections.
+  Native artifacts are governed by byte limits, not durable-inline shape limits."
+  [item transform]
+  (letfn [(visit [item]
+            (cond
+              (map? item)
+              (reduce-kv
+               (fn [result key nested]
+                 (let [mapped-key (visit key)
+                       mapped
+                       (case key
+                         :history/retrieval (transform nested)
+                         :history/retrievals
+                         (do
+                           (value/check! (vector? nested) :invalid-import
+                                        "History retrievals must be a vector" {})
+                           (reduce-kv
+                            (fn [result index reference]
+                              (let [mapped (transform reference)]
+                                (if (identical? reference mapped)
+                                  result
+                                  (assoc result index mapped))))
+                            nested nested))
+                         (visit nested))]
+                   (cond
+                     (not (identical? key mapped-key))
+                     (assoc (dissoc result key) mapped-key mapped)
+                     (not (identical? nested mapped)) (assoc result key mapped)
+                     :else result)))
+               item item)
+
+              (vector? item)
+              (reduce-kv (fn [result index nested]
+                           (let [mapped (visit nested)]
+                             (if (identical? nested mapped)
+                               result
+                               (assoc result index mapped))))
+                         item item)
+
+              (set? item)
+              (reduce (fn [result nested]
+                        (let [mapped (visit nested)]
+                          (if (identical? nested mapped)
+                            result
+                            (conj (disj result nested) mapped))))
+                      item item)
+
+              (list? item)
+              (loop [remaining (seq item) index 0]
+                (if-let [remaining remaining]
+                  (let [nested (first remaining)
+                        mapped (visit nested)]
+                    (if (identical? nested mapped)
+                      (recur (next remaining) (inc index))
+                      (with-meta
+                        (apply list (concat (take index item)
+                                            [mapped] (map visit (next remaining))))
+                        (meta item))))
+                  item))
+
+              :else item))]
+    (visit item)))
+
+(defn- retrieval-entry? [entry]
+  (contains? #{:message :custom-context :evaluation :custom} (:kind entry)))
+
+(defn- validate-retrieval-shape! [reference]
+  (value/check! (map? reference) :invalid-import "History retrieval must be a map" {})
+  (value/check! (codec/uuid? (:session-id reference)) :invalid-import
+               "History retrieval session must be a UUID" {})
+  (doseq [key [:context-entry-ids :source-entry-ids]]
+    (let [ids (get reference key)]
+      (value/check! (and (vector? ids) (every? codec/uuid? ids)
+                        (= (count ids) (count (set ids))))
+                   :invalid-import "History retrieval entry references must be distinct UUIDs"
+                   {:field key})))
+  (value/check! (boolean? (:available? reference)) :invalid-import
+               "History retrieval availability must be boolean" {})
+  (when (contains? reference :query)
+    (value/check! (or (nil? (:query reference)) (string? (:query reference)))
+                 :invalid-import "History retrieval query must be text" {}))
+  (when (contains? reference :context-head-entry-id)
+    (value/check! (codec/uuid? (:context-head-entry-id reference)) :invalid-import
+                 "History retrieval context head must be a UUID" {}))
+  (when (some? (:operation-id reference))
+    (value/check! (codec/uuid? (:operation-id reference)) :invalid-import
+                 "History retrieval operation must be a UUID" {}))
+  (when (some? (:call-id reference))
+    (value/check! (and (string? (:call-id reference))
+                      (not (str/blank? (:call-id reference))))
+                 :invalid-import "History retrieval call must be nonblank text" {}))
+  (when (contains? reference :mode)
+    (value/check! (contains? #{:view :zoom :read} (:mode reference)) :invalid-import
+                 "History retrieval mode must be :view, :zoom or :read" {}))
+  (when (some #(contains? reference %) retrieval-span-keys)
+    (value/check! (and (every? #(contains? reference %) retrieval-span-keys)
+                      (codec/uuid? (:source-first-entry-id reference))
+                      (codec/uuid? (:source-last-entry-id reference))
+                      (integer? (:source-count reference))
+                      (pos? (:source-count reference)))
+                 :invalid-import "History retrieval span must contain UUID endpoints and a positive count" {}))
+  (codec/encode reference)
+  reference)
+
+(defn- validate-retrieval! [reference sid entries id-set]
+  (validate-retrieval-shape! reference)
+  (let [ids (concat (:context-entry-ids reference) (:source-entry-ids reference)
+                    (keep reference [:context-head-entry-id
+                                     :source-first-entry-id :source-last-entry-id]))]
+    (value/check! (= sid (:session-id reference)) :invalid-import
+                 "Active history retrieval belongs to another session" {})
+    (value/check! (every? #(contains? id-set %) ids) :invalid-import
+                 "Active history retrieval references a missing entry" {})
+    (when (contains? reference :source-count)
+      (let [sources (context-tree/source-entries
+                     (session-model/active-path entries (:source-last-entry-id reference)))
+            covered (drop-while #(not= (:source-first-entry-id reference) (:id %)) sources)]
+        (value/check! (and (seq covered)
+                          (= (:source-last-entry-id reference) (:id (last covered)))
+                          (= (:source-count reference) (count covered)))
+                     :invalid-import "History retrieval span does not match its original sources" {})))
+    (when (contains? reference :source-reference)
+      (validate-retrieval-shape! (:source-reference reference)))
+    reference))
+
+(defn- remap-retrieval [reference old-sid new-sid id-map]
+  (validate-retrieval-shape! reference)
+  (when (contains? reference :source-reference)
+    (validate-retrieval-shape! (:source-reference reference)))
+  (let [local? (= old-sid (:session-id reference))
+        context-ids (if local? (into [] (keep id-map) (:context-entry-ids reference)) [])
+        source-ids (if local? (into [] (keep id-map) (:source-entry-ids reference)) [])
+        head? (contains? reference :context-head-entry-id)
+        head-id (when local? (get id-map (:context-head-entry-id reference)))
+        span? (contains? reference :source-count)
+        first-id (get id-map (:source-first-entry-id reference))
+        last-id (get id-map (:source-last-entry-id reference))
+        span-complete? (and local? (or (not span?) (and first-id last-id)))
+        complete? (and (= old-sid (:session-id reference))
+                       (= (count context-ids) (count (:context-entry-ids reference)))
+                       (= (count source-ids) (count (:source-entry-ids reference)))
+                       (or (not head?) head-id)
+                       span-complete?)
+        provenance (or (:source-reference reference)
+                       (dissoc reference :source-reference))
+        remapped (-> reference
+                     (dissoc :operation-id :call-id :context-head-entry-id
+                             :source-first-entry-id :source-last-entry-id :source-count)
+                     (assoc :session-id new-sid
+                            :context-entry-ids context-ids
+                            :source-entry-ids source-ids
+                            :available? (boolean (and (:available? reference) complete?))
+                            :source-reference provenance))]
+    (cond-> remapped
+      (and head? head-id)
+      (assoc :context-head-entry-id head-id)
+      (and span? span-complete?)
+      (assoc :source-first-entry-id first-id
+             :source-last-entry-id last-id
+             :source-count (:source-count reference)))))
+
+(defn- remap-entry-retrievals [entry old-sid new-sid id-map]
+  (if (retrieval-entry? entry)
+    (update entry :data map-retrieval-markers
+            #(remap-retrieval % old-sid new-sid id-map))
+    entry))
+
+(defn- native-artifact-ids [results]
+  (into #{} (keep #(when (= :artifact (:kind %)) (:artifact-id %))) results))
+
+(defn- native-artifact-value [descriptor bytes native-ids strict?]
+  (when (and bytes (= :edn (:kind descriptor))
+             (contains? native-ids (:id descriptor)))
+    (try
+      {:value (codec/decode (String. ^bytes bytes StandardCharsets/UTF_8))}
+      (catch Exception error
+        (when strict?
+          (value/fail! :invalid-import "Native EDN artifact cannot be checked for history retrievals"
+                       {:artifact-id (:id descriptor) :cause (ex-message error)}))))))
+
+(defn- remap-native-artifact [descriptor bytes native-ids transform]
+  (if-let [native (native-artifact-value descriptor bytes native-ids false)]
+    (let [mapped (map-retrieval-markers (:value native) transform)]
+      (if (identical? mapped (:value native))
+        {:descriptor descriptor :bytes bytes}
+        (let [bytes (.getBytes ^String (binding [*print-length* nil *print-level* nil
+                                               *print-dup* false]
+                                        (pr-str mapped))
+                               StandardCharsets/UTF_8)]
+          {:descriptor (assoc descriptor :bytes (alength bytes) :sha256 (util/sha256 bytes))
+           :bytes bytes})))
+    {:descriptor descriptor :bytes bytes}))
+
+(defn- visit-retrievals
+  ([entries results artifact-records transform]
+   (visit-retrievals entries results artifact-records transform false))
+  ([entries results artifact-records transform strict?]
+   (doseq [entry entries :when (retrieval-entry? entry)]
+     (map-retrieval-markers (:data entry) transform))
+   (doseq [descriptor results]
+     (map-retrieval-markers (:details descriptor) transform)
+     (when (= :inline (:kind descriptor))
+       (map-retrieval-markers (:value descriptor) transform)))
+   (let [native-ids (native-artifact-ids results)]
+     (doseq [{:keys [descriptor bytes]} artifact-records]
+       (when-let [native (native-artifact-value descriptor bytes native-ids strict?)]
+         (map-retrieval-markers (:value native) transform))))))
 (defn- persisted-artifact-bytes [store ^Connection connection descriptor]
   (if (:memory? store)
     (first (sql/query-sql connection "SELECT content FROM artifacts WHERE id=? AND session_id=?"
@@ -111,7 +325,7 @@
                 (remap-result-details details artifact-by-old))
       entry)))
 
-(defn- copy-value-records! [store ^Connection connection old-sid new-sid entries now]
+(defn- copy-value-records! [store ^Connection connection old-sid new-sid entries id-map now]
   (let [wanted (referenced-result-ids entries)
         source-results (->> (sql/query-sql connection
                                        "SELECT descriptor FROM results WHERE session_id=? ORDER BY id"
@@ -140,7 +354,10 @@
                                {:artifact-id artifact-id})
                   row))
               artifact-ids)
+        source-shas (set (map :sha256 source-artifacts))
         artifact-id-map (into {} (map (fn [descriptor] [(:id descriptor) (util/id)]) source-artifacts))
+        native-ids (native-artifact-ids source-results)
+        transform #(remap-retrieval % old-sid new-sid id-map)
         imported-artifacts
         (mapv (fn [descriptor]
                 (let [source-bytes (when (:available? descriptor)
@@ -148,16 +365,15 @@
                       available? (and source-bytes
                                       (= (:bytes descriptor) (alength ^bytes source-bytes))
                                       (= (:sha256 descriptor) (util/sha256 source-bytes)))
-                      copied (cond-> {:id (get artifact-id-map (:id descriptor))
-                                      :session-id new-sid
-                                      :sha256 (:sha256 descriptor)
-                                      :bytes (:bytes descriptor)
-                                      :kind (:kind descriptor)
-                                      :available? (boolean available?)
-                                      :created-at now}
+                      remapped (remap-native-artifact descriptor (when available? source-bytes)
+                                                     native-ids transform)
+                      copied (cond-> (assoc (:descriptor remapped)
+                                            :id (get artifact-id-map (:id descriptor))
+                                            :session-id new-sid
+                                            :available? (boolean available?)
+                                            :created-at now)
                                (:name descriptor) (assoc :name (:name descriptor)))]
-                  {:descriptor copied
-                   :bytes (when (:memory? store) source-bytes)}))
+                  {:descriptor copied :bytes (:bytes remapped)}))
               source-artifacts)
         artifact-by-old (into {} (map (fn [old copied] [(:id old) (:descriptor copied)])
                                       source-artifacts imported-artifacts))
@@ -171,19 +387,24 @@
                                            :session-id new-sid
                                            :kind (:kind descriptor)
                                            :content (or (:content descriptor) "")
-                                           :details (remap-result-details
-                                                     (or (:details descriptor) {})
-                                                     artifact-by-old)
+                                           :details (map-retrieval-markers
+                                                     (remap-result-details
+                                                      (or (:details descriptor) {}) artifact-by-old)
+                                                     transform)
                                            :available? (case (:kind descriptor)
                                                          :live false
                                                          :artifact (and (:available? descriptor)
                                                                         (:available? artifact))
                                                          (boolean (:available? descriptor)))}
-                                    (= :inline (:kind descriptor)) (assoc :value (:value descriptor))
+                                    (= :inline (:kind descriptor))
+                                    (assoc :value (map-retrieval-markers (:value descriptor) transform))
                                     (= :artifact (:kind descriptor)) (assoc :artifact-id (:id artifact)))]
                        [(:id descriptor) copied])))
               source-results)]
     (doseq [{:keys [descriptor bytes]} imported-artifacts]
+      (when (and bytes (not (:memory? store))
+                 (not (contains? source-shas (:sha256 descriptor))))
+        (files/write-content-addressed! store (:sha256 descriptor) bytes))
       (sql/execute-sql! connection
                     "INSERT INTO artifacts(id,session_id,sha256,bytes,kind,available,created_at,name,content) VALUES(?,?,?,?,?,?,?,?,?)"
                     [(:id descriptor) new-sid (:sha256 descriptor) (:bytes descriptor)
@@ -232,7 +453,7 @@
                         :status :idle
                         :created-at now
                         :metadata (dissoc (or (:metadata opts) (:metadata source-row))
-                                          :agent/origin)
+                                          :agent/origin :context/view-node-ids)
                         :labels (remap-labels (:labels source-row) id-map)
                         :parent-id (:id source-row)
                         :fork-entry (:source-leaf opts)}))
@@ -241,7 +462,7 @@
                  "Session ID already exists" {:session-id new-sid})
     (records/insert-session! connection snapshot (:arrodes.store/base-config source-row))
     (let [value-records (copy-value-records! store connection (:id source-row)
-                                             new-sid copy-path now)
+                                             new-sid copy-path id-map now)
           imported-results (:results value-records)
           copied-source
           (mapv (fn [index entry]
@@ -251,6 +472,7 @@
                              :parent-id (when (pos? index)
                                           (get id-map (:id (nth copy-path (dec index))))))
                       (remap-entry-refs id-map compaction-id-map)
+                      (remap-entry-retrievals (:id source-row) new-sid id-map)
                       (remap-entry-result-refs imported-results)
                       (remap-entry-artifact-refs (:artifacts value-records))))
                 (range) copy-path)
@@ -370,13 +592,27 @@
   (db/store-read store
     (fn [connection]
       (let [snapshot (records/require-session connection sid)
-            artifacts (export-artifacts store connection sid)]
+            artifacts (export-artifacts store connection sid)
+            entries (records/all-entries connection sid)
+            results (export-results connection sid artifacts)
+            native-ids (native-artifact-ids results)
+            typed? (volatile! false)
+            _ (visit-retrievals
+               entries results
+               (mapv (fn [record]
+                       {:descriptor (:descriptor record)
+                        :bytes (when (and (= :edn (get-in record [:descriptor :kind]))
+                                          (contains? native-ids (get-in record [:descriptor :id])))
+                                 (when-let [content (:content record)]
+                                   (.decode (Base64/getDecoder) ^String content)))})
+                     artifacts)
+               (fn [reference] (vreset! typed? true) reference))]
         {:format "arrodes-session"
-         :version 1
-         :session (records/public-session snapshot)
+         :version (if @typed? 2 1)
+         :session (update (records/public-session snapshot) :metadata dissoc :context/view-node-ids)
          :base-config (:arrodes.store/base-config snapshot)
-         :entries (records/all-entries connection sid)
-         :results (export-results connection sid artifacts)
+         :entries entries
+         :results results
          :artifacts artifacts}))))
 (defn- decode-transfer-bytes [record]
   (when (contains? record :content)
@@ -487,7 +723,7 @@
   (value/check! (map? packet) :invalid-import "Session export must be a map" {})
   (value/check! (= "arrodes-session" (:format packet)) :invalid-import
                "Unsupported session export format" {:format (:format packet)})
-  (value/check! (= 1 (:version packet)) :invalid-import
+  (value/check! (contains? #{1 2} (:version packet)) :invalid-import
                "Unsupported session export version" {:version (:version packet)})
   (value/check! (vector? (:entries packet)) :invalid-import
                "Export entries must be a vector" {})
@@ -608,6 +844,13 @@
                    "History or results reference artifacts missing from the export"
                    {:artifact-ids
                     (vec (sort (set/difference artifact-referenced artifact-present)))})
+      (visit-retrievals
+       entries results artifacts
+       (fn [reference]
+         (value/check! (= 2 (:version packet)) :invalid-import
+                      "History retrieval metadata requires session export version 2" {})
+         (validate-retrieval! reference (:id snapshot) entries id-set))
+       (= 2 (:version packet)))
       {:snapshot snapshot :base-config base-config :entries entries
        :artifacts artifacts :results results})))
 
@@ -616,7 +859,7 @@
   (let [source-entries (vec (sort-by :seq source-entries))
         new-sid (or (:id opts) (util/id))
         _ (codec/require-uuid! new-sid :session-id)
-        id-map (into {} (map (fn [entry] [(:id entry) (util/id)]) source-entries))
+        id-map (:entry-id-map opts)
         now (util/now)
         base-config (session-model/normalize-config (:arrodes.store/base-config source-row))
         copied-source-head (get id-map (:head source-row))
@@ -631,7 +874,7 @@
                        :status :idle
                        :created-at now
                        :metadata (dissoc (or (:metadata opts) (:metadata source-row))
-                                         :agent/origin)
+                                         :agent/origin :context/view-node-ids)
                        :labels (remap-labels (:labels source-row) id-map)})
                      (assoc :head final-head))
         copied-source (mapv (fn [entry]
@@ -640,6 +883,7 @@
                                          :session-id new-sid
                                          :parent-id (get id-map (:parent-id entry)))
                                   (remap-entry-refs id-map id-map)
+                                  (remap-entry-retrievals (:id source-row) new-sid id-map)
                                   (remap-entry-result-refs (:imported-results opts))
                                   (remap-entry-artifact-refs (:imported-artifacts opts))))
                             source-entries)
@@ -654,15 +898,16 @@
                                :seq seq :created-at now)]
               (recur (next remaining) (:id entry) (inc seq) (conj result entry)))
             result))
-        copied (into copied-source boundary)]
+        copied (mapv (fn [entry] [entry (codec/encode (:data entry))])
+                     (into copied-source boundary))]
     (value/check! (nil? (records/find-session connection new-sid)) :session-exists
                  "Session ID already exists" {:session-id new-sid})
     (records/insert-session! connection snapshot base-config)
-    (doseq [entry copied]
+    (doseq [[entry encoded-data] copied]
       (sql/execute-sql! connection
                     "INSERT INTO entries(id,session_id,parent_id,seq,kind,data,created_at) VALUES(?,?,?,?,?,?,?)"
                     [(:id entry) new-sid (:parent-id entry) (:seq entry) (name (:kind entry))
-                     (codec/encode (:data entry)) (:created-at entry)]))
+                     encoded-data (:created-at entry)]))
     snapshot))
 
 (defn import-session!
@@ -673,21 +918,23 @@
         new-sid (or (:id opts) (util/id))
         _ (codec/require-uuid! new-sid :session-id)
         now (util/now)
+        entry-id-map (into {} (map (fn [entry] [(:id entry) (util/id)]) source-entries))
+        native-ids (native-artifact-ids source-results)
+        transform #(remap-retrieval % (:id source) new-sid entry-id-map)
         artifact-id-map (into {} (map (fn [{:keys [descriptor]}]
                                         [(:id descriptor) (util/id)])
                                       source-artifacts))
         imported-artifacts
         (mapv (fn [{:keys [descriptor bytes]}]
-                {:descriptor
-                 (cond-> {:id (get artifact-id-map (:id descriptor))
-                          :session-id new-sid
-                          :sha256 (:sha256 descriptor)
-                          :bytes (:bytes descriptor)
-                          :kind (:kind descriptor)
-                          :available? (boolean bytes)
-                          :created-at now}
-                   (:name descriptor) (assoc :name (:name descriptor)))
-                 :bytes bytes})
+                (let [remapped (remap-native-artifact descriptor bytes native-ids transform)]
+                  {:descriptor
+                   (cond-> (assoc (:descriptor remapped)
+                                  :id (get artifact-id-map (:id descriptor))
+                                  :session-id new-sid
+                                  :available? (boolean bytes)
+                                  :created-at now)
+                     (:name descriptor) (assoc :name (:name descriptor)))
+                   :bytes (:bytes remapped)}))
               source-artifacts)
         artifact-by-old-id (into {}
                                  (map (fn [source-record imported-record]
@@ -707,18 +954,22 @@
                                           :session-id new-sid
                                           :kind kind
                                           :content (or (:content descriptor) "")
-                                          :details (remap-result-details
-                                                    (or (:details descriptor) {})
-                                                    artifact-by-old-id)
+                                          :details (map-retrieval-markers
+                                                    (remap-result-details
+                                                     (or (:details descriptor) {}) artifact-by-old-id)
+                                                    transform)
                                           :available? (case kind
                                                         :live false
                                                         :artifact (and (:available? descriptor)
                                                                        (:available? artifact))
                                                         (boolean (:available? descriptor)))}
-                                    (= :inline kind) (assoc :value (:value descriptor))
+                                    (= :inline kind)
+                                    (assoc :value (map-retrieval-markers (:value descriptor) transform))
                                     (= :artifact kind) (assoc :artifact-id (:id artifact)))]
                        [(:id descriptor) result])))
-              source-results)]
+              source-results)
+        encoded-results (mapv (fn [descriptor] [descriptor (codec/encode descriptor)])
+                              (sort-by :id (vals imported-results)))]
     (db/transact! store
       (fn [connection]
         (let [source-row (assoc source :arrodes.store/base-config source-base-config)
@@ -729,6 +980,7 @@
                                                             (or (:metadata opts) {}))
                                                      :imported-from (:id source))
                                     :labels (:labels source)
+                                    :entry-id-map entry-id-map
                                     :imported-results imported-results
                                     :imported-artifacts artifact-by-old-id}
                                    (select-keys opts [:name :cwd]))
@@ -742,9 +994,9 @@
                            (name (:kind descriptor)) (if (:available? descriptor) 1 0)
                            (:created-at descriptor) (:name descriptor)
                            (when (:memory? store) bytes)]))
-          (doseq [descriptor (sort-by :id (vals imported-results))]
+          (doseq [[descriptor encoded] encoded-results]
             (sql/execute-sql! connection
                           "INSERT INTO results(session_id,id,kind,descriptor,created_at) VALUES(?,?,?,?,?)"
                           [new-sid (:id descriptor) (name (:kind descriptor))
-                           (codec/encode descriptor) now]))
+                           encoded now]))
           snapshot)))))

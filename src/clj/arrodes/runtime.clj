@@ -5,6 +5,7 @@
             [arrodes.capabilities :as capabilities]
             [arrodes.agents :as agents]
             [arrodes.coordination :as coordination]
+            [arrodes.context-tree :as context-tree]
             [arrodes.jobs :as jobs]
             [arrodes.provider :as provider]
             [arrodes.resources :as resources]
@@ -15,10 +16,12 @@
             [arrodes.runtime.operations :as operations]
             [arrodes.store :as store]
             [arrodes.store.command :as command]
+            [arrodes.store.context-tree :as tree-store]
             [arrodes.store.db :as db]
             [arrodes.store.jobs :as store-jobs]
             [arrodes.store.recovery :as recovery]
             [arrodes.store.transfer :as transfer]
+            [arrodes.summaries :as summaries]
             [arrodes.titles :as titles]
             [arrodes.platform :as util]
             [arrodes.value :as value])
@@ -118,6 +121,7 @@
                      :trust trust :initial-settings settings
                      :settings (atom (resources/settings root-resources))
                      :handles (atom {}) :failed-handles (atom {}) :handle-attempts (atom {})
+                     :context-views (atom {}) :context-setting-revisions (atom {})
                      :operations (atom {}) :listeners (atom {})
                      :foreground (atom {}) :admission (atom {}) :operation-limit limit
                      :settlement-failures (atom {})
@@ -151,7 +155,24 @@
                                       (jobs/await-session! (:jobs @agents-holder) sid timeout-ms))
                        :delete! (fn [sid] (delete! @agents-holder sid))}
             agent-manager (agents/create! runtime callbacks)
-            runtime (assoc runtime :agents agent-manager)]
+            runtime (assoc runtime :agents agent-manager)
+            summary-manager
+            (summaries/create!
+             {:store store
+              :provider-manager
+              (fn [sid]
+                (let [live @agents-holder]
+                  (control/ensure-open! live)
+                  (value/check! (not (contains? @(:resetting live) sid))
+                                :summary-cancelled "Session context is being reset" {:session-id sid})
+                  (or (get-in @(:handles live) [sid :provider])
+                      (value/fail! :session-not-active "Summarization requires an active session provider"
+                                   {:session-id sid}))))
+              :emit! (fn [sid type data]
+                       (control/transient-event! @agents-holder sid nil type data nil))})
+            _ (swap! opened conj #(do (summaries/stop! summary-manager)
+                                      (summaries/await-closed! summary-manager 10000)))
+            runtime (assoc runtime :summaries summary-manager)]
         (reset! agents-holder runtime)
         (reset! opened [])
         runtime)
@@ -189,6 +210,99 @@
 (defn usage [runtime sid]
   (run/usage-from-entries (store/active-path (:store runtime) sid)))
 
+(defn- inspection-nodes [entries nodes]
+  (reduce
+   (fn [available [id {:keys [start count first-entry-id last-entry-id text bytes
+                             left-id right-id] :as node}]]
+     (if (and (integer? start) (<= 0 start (clojure.core/count entries))
+              (integer? count) (<= 1 count (- (clojure.core/count entries) start))
+              (zero? (bit-and count (dec count))) (zero? (mod start count))
+              (= id (:id node) (context-tree/node-key entries start count))
+              (= first-entry-id (:id (nth entries start)))
+              (= last-entry-id (:id (nth entries (dec (+ start count)))))
+              (string? text) (= bytes (context-tree/utf8-bytes text))
+              (if (= count 1)
+                (and (nil? left-id) (nil? right-id))
+                (let [half (quot count 2)]
+                  (and (= left-id (context-tree/node-key entries start half))
+                       (= right-id (context-tree/node-key entries (+ start half) half))
+                       (contains? available left-id) (contains? available right-id)))))
+       (assoc available id node)
+       available))
+   {} (sort-by (comp :count val) nodes)))
+
+(defn- bounded-inspection-frontier [frontier budget]
+  (if (<= (:bytes (meta frontier)) budget)
+    frontier
+    (loop [remaining (seq frontier) selected [] bytes 0]
+      (if-let [node (first remaining)]
+        (let [size (if (seq selected)
+                     (+ bytes (:render-bytes (meta node)))
+                     (:bytes (meta (context-tree/fit-view [node] {} (:count node) budget))))]
+          (if (<= size budget)
+            (recur (next remaining) (conj selected node) size)
+            (with-meta selected (assoc (meta frontier) :bytes bytes))))
+        (with-meta selected (assoc (meta frontier) :bytes bytes))))))
+
+(defn- inspection-preview [entries nodes settings prior-view-ids]
+  (let [budget (:summary-view-bytes settings)
+        frontier (context-tree/restore-frontier nil entries nodes prior-view-ids budget)
+        info (meta frontier)
+        bounded (bounded-inspection-frontier frontier budget)
+        covered (reduce + 0 (map :count bounded))]
+    (cond-> {:mode :preview :policy (:context-policy settings)
+             :nodes bounded :bytes (:bytes (meta bounded)) :budget budget
+             :source-count (count entries) :covered-count covered
+             :ready? (and (= :summary-tree (:context-policy settings))
+                          (:fits? info) (= covered (count entries)))
+             :fits? (:fits? info)}
+      (:reason info) (assoc :reason (:reason info))
+      (> (:bytes info) budget) (assoc :required-bytes (:bytes info))
+      (contains? info :next-index) (assoc :next-index (:next-index info)))))
+
+(defn- active-inspection-view [runtime sid entries nodes]
+  (let [slot (control/foreground runtime sid)
+        {:keys [budget source-count] :as published} (get @(:context-views runtime) sid)
+        frontier (:nodes published)]
+    (when (and (contains? #{:run :continue :compact} (:kind slot))
+               (= (:operation-id slot) (:operation-id published))
+               (vector? frontier) (integer? budget) (<= 1 budget 16777216)
+               (integer? source-count) (<= 0 source-count (count entries))
+               (every? #(= % (select-keys (get nodes (:id %))
+                                        [:id :start :count :first-entry-id :last-entry-id :text :bytes]))
+                       frontier)
+               (= source-count (reduce + 0 (map :count frontier)))
+               (= (mapv :start frontier)
+                  (vec (butlast (reductions + 0 (map :count frontier))))))
+      (let [fitted (context-tree/fit-view frontier {} source-count budget)]
+        (when (:fits? (meta fitted))
+          (assoc published :mode :active :policy :summary-tree
+                 :bytes (:bytes (meta fitted)) :covered-count source-count
+                 :ready? true :fits? true))))))
+
+(defn context-inspect
+  "Read-only context policy, persisted summary accounting and bounded view.
+   :active views belong to the current operation and retain its frozen budget;
+   :preview views restore valid persisted frontiers and append sources without model work."
+  [runtime sid]
+  (control/ensure-open! runtime)
+  (locking (control/session-lock runtime sid)
+    (db/store-read (:store runtime)
+      (fn [_]
+        (let [snapshot (store/session (:store runtime) sid)
+              config (:config snapshot)
+              settings (context-tree/settings config)
+              entries (context-tree/source-entries (store/active-path (:store runtime) sid))
+              nodes (inspection-nodes entries (tree-store/nodes (:store runtime) sid))
+              summary (summaries/inspect (:summaries runtime) sid)
+              active (active-inspection-view runtime sid entries nodes)
+              preview (when (or (nil? active) (:view summary))
+                        (inspection-preview entries nodes settings
+                                            (get-in snapshot [:metadata :context/view-node-ids])))]
+          {:policy (:context-policy settings) :settings settings
+           :summary (cond-> summary (:view summary) (assoc :view preview))
+           :view (or active preview)})))))
+
 (defn state [runtime sid]
   (locking (control/session-lock runtime sid)
     (db/store-read (:store runtime)
@@ -209,6 +323,8 @@
                                   (concat (jobs/list-jobs (:jobs runtime) sid {})
                                           (store-jobs/active-jobs (:store runtime) sid)))))
            :usage (usage runtime sid)
+           :context (when (context-tree/enabled? (:config snapshot))
+                      (context-inspect runtime sid))
            :event-seq event-seq
            :repl (when registry
                    {:namespace (str (:namespace registry)) :generation (:generation registry)})
@@ -229,17 +345,39 @@
 (defn configure! [runtime sid changes]
   (control/ensure-open! runtime)
   (let [registry (get-in @(:handles runtime) [sid :registry])
-        requested-tools (get-in changes [:config :tools])]
+        requested-tools (get-in changes [:config :tools])
+        wrapped? (or (contains? changes :config) (contains? changes :name) (contains? changes :metadata))
+        config-changes (if wrapped? (:config changes) changes)
+        context-keys (keys (select-keys (:settings config-changes) context-tree/setting-keys))]
     (when (and registry requested-tools)
       (capabilities/selected-catalog registry requested-tools))
-    (let [result (locking (control/session-lock runtime sid)
-                   (let [result (store/configure! (:store runtime) sid changes)]
+    (let [{:keys [result summary-targets]}
+          (locking (control/session-lock runtime sid)
+                   (let [result (store/configure! (:store runtime) sid changes)
+                         admitted (control/foreground runtime sid)]
+                     (when (seq context-keys)
+                       (swap! (:context-setting-revisions runtime) update sid
+                              (fn [revisions]
+                                (reduce #(update %1 %2 (fnil inc 0)) (or revisions {}) context-keys))))
                      (when registry
                        (capabilities/set-tools! registry
                                                 (get-in result [:session :config :tools])))
-                     result))
+                     {:result result
+                      :summary-targets
+                      (when (and (not (context-tree/enabled? (get-in result [:session :config])))
+                                 (not (contains? #{:run :continue :compact} (:kind admitted))))
+                        (swap! (:context-views runtime) dissoc sid)
+                        (summaries/cancel-admission! (:summaries runtime) sid))}))
           snapshot (:session result)]
       (control/emit-events! runtime (:events result))
+      (when (some? summary-targets)
+        (summaries/cancel-session! (:summaries runtime) sid summary-targets)
+        (value/check! (summaries/await-session!
+                       (:summaries runtime) sid
+                       (long (or (:close-timeout-ms (:initial-settings runtime)) 10000))
+                       summary-targets)
+                      :summaries-still-running "History summarization has not exited; evaluator retained."
+                      {:session-id sid}))
       snapshot)))
 
 (defn label! [runtime sid entry-id label opts]
@@ -321,7 +459,9 @@
     #(do
        (handles/close-handle! runtime sid)
        (locking (control/session-lock runtime sid)
-         (store/delete-session! (:store runtime) sid)))))
+         (let [result (store/delete-session! (:store runtime) sid)]
+           (swap! (:context-setting-revisions runtime) dissoc sid)
+           result)))))
 
 (defn import! [runtime packet opts]
   (control/ensure-open! runtime)
@@ -463,7 +603,7 @@
 
 (defn cancel-operation! [runtime oid]
   (let [sid (:session-id (store/operation (:store runtime) oid))
-        {:keys [operation thread]}
+        {:keys [operation summary-targets]}
         (locking (control/session-lock runtime sid)
           (let [op (store/operation (:store runtime) oid)]
             (if (run/terminal-operation? op)
@@ -484,18 +624,31 @@
                                                       :data {}}]})))]
                     (agents/pause! (:agents runtime) sid)
                     (reset! (:cancelled slot) true)
-                    {:operation record :thread @(:thread slot)}))))))]
-    (when (and thread (not (identical? thread (Thread/currentThread))))
-      (.interrupt ^Thread thread))
+                    (let [targets (summaries/cancel-admission! (:summaries runtime) sid)]
+                      ;; Interrupt while the original foreground identity still
+                      ;; owns the gate; its executor thread may later be reused.
+                      (when-let [thread @(:thread slot)]
+                        (when-not (identical? thread (Thread/currentThread))
+                          (.interrupt ^Thread thread)))
+                      {:operation record :summary-targets targets})))))))]
+    (when (some? summary-targets)
+      (summaries/cancel-session! (:summaries runtime) sid summary-targets))
     operation))
 
 (defn cancel! [runtime sid]
-  (if-let [oid (:operation-id (control/foreground runtime sid))]
-    (cancel-operation! runtime oid)
-    (do
-      (store/session (:store runtime) sid)
-      (agents/pause! (:agents runtime) sid)
-      {:session-id sid :operation-id nil :status :idle})))
+  (let [{:keys [operation-id summary-targets]}
+        (locking (control/session-lock runtime sid)
+          (store/session (:store runtime) sid)
+          (if-let [oid (:operation-id (control/foreground runtime sid))]
+            {:operation-id oid}
+            (do
+              (agents/pause! (:agents runtime) sid)
+              {:summary-targets (summaries/cancel-admission! (:summaries runtime) sid)})))]
+    (if operation-id
+      (cancel-operation! runtime operation-id)
+      (do
+        (summaries/cancel-session! (:summaries runtime) sid summary-targets)
+        {:session-id sid :operation-id nil :status :idle}))))
 
 
 (defn wait!
@@ -533,6 +686,9 @@
                     ::command/events [{:operation-id (:operation-id slot)
                               :type :session/evaluated
                               :data {:result (:result result) :error? (:error? result)}}]}))
+        (when (context-tree/enabled? (:config (store/session (:store runtime) sid)))
+          (summaries/request! (:summaries runtime) sid (:config (store/session (:store runtime) sid))
+                              {:cancelled? (:cancelled slot)}))
         result)))))
 
 (defn invoke!
@@ -560,6 +716,9 @@
                               :type :capability/invoked
                               :data {:name name :result (:result result)
                                      :error? (:error? result)}}]}))
+        (when (context-tree/enabled? (:config (store/session (:store runtime) sid)))
+          (summaries/request! (:summaries runtime) sid (:config (store/session (:store runtime) sid))
+                              {:cancelled? (:cancelled slot)}))
         result)))))
 
 
@@ -594,6 +753,7 @@
           (let [agent-close (agents/close! (:agents runtime))]
           (jobs/stop! (:jobs runtime))
           (titles/stop! (:titles runtime))
+          (summaries/stop! (:summaries runtime))
           (.shutdown ^ExecutorService (:executor runtime))
           (let [timeout-ms (long (max 0 (or (:close-timeout-ms (:initial-settings runtime))
                                             10000)))
@@ -603,6 +763,8 @@
                           :when (not (some #(identical? slot %) self-slots))]
                     (operations/await-operation! slot deadline))
                 jobs-complete? (jobs/await-session! (:jobs runtime) nil (control/remaining-close-millis deadline))
+                summaries-complete? (summaries/await-closed!
+                                     (:summaries runtime) (control/remaining-close-millis deadline))
                 incomplete (filterv #(not (realized? (:finished %))) slots)
                 settlements-complete? (operations/reconcile-settlements! runtime)
                 handles-ready? (handles/await-handles! runtime deadline)
@@ -618,17 +780,21 @@
                       (.interrupt current)
                       false))
                   (.isTerminated ^ExecutorService (:executor runtime)))]
-            (if-not (and foreground-complete? executor-terminated? jobs-complete?
+            (if-not (and foreground-complete? executor-terminated? jobs-complete? summaries-complete?
                          settlements-complete? handles-ready? (= :closed (:status agent-close)))
               {:status :closing :already-closed? false
                :foreground-complete? foreground-complete?
                :active-operation-ids (mapv :operation-id incomplete)
                :jobs-complete? jobs-complete?
+               :summaries-complete? summaries-complete?
                :executor-terminated? executor-terminated?
                :store-closed? false :handles-closed? false
                :errors
                (into @cancellation-errors
                      (cond-> []
+                       (not summaries-complete?)
+                       (conj {:code "summaries-timeout"
+                              :message "History summarization has not exited; live state retained"})
                        (not jobs-complete?)
                        (conj {:code "jobs-timeout" :message "Background jobs have not exited; live state retained"})
                        (not foreground-complete?)
@@ -685,6 +851,7 @@
                               closed? (empty? @errors)]
                           (when closed?
                             (reset! (:listeners runtime) {})
+                            (reset! (:context-setting-revisions runtime) {})
                             (reset! (:lifecycle runtime) :closed))
                           {:status (if closed? :closed :closing) :already-closed? false
                            :foreground-complete? true :executor-terminated? true

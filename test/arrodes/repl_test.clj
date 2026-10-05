@@ -126,3 +126,168 @@
                   (runtime/evaluate!
                    rt sid
                    (str "(= (nth (iterate vector 0) 30) (result " result-id "))"))))))))
+
+(deftest later-reader-and-compiler-failures-show-captured-output-and-source-location
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))]
+      (doseq [[source phase]
+              [["(println \"prior stdout\")\n(binding [*out* *err*] (println \"prior stderr\"))\n("
+                :reading]
+               ["(println \"prior stdout\")\n(binding [*out* *err*] (println \"prior stderr\"))\n(missing-function)"
+                :evaluating]]]
+        (let [failure (runtime/evaluate! rt sid source)
+              data (get-in failure [:details :data])]
+          (is (:error? failure))
+          (is (= "evaluation-failed" (get-in failure [:details :code])))
+          (is (= {:completed-forms 2 :form-index 3 :phase phase}
+                 (select-keys data [:completed-forms :form-index :phase])))
+          (is (= "prior stdout\n" (:stdout data)))
+          (is (= "prior stderr\n" (:stderr data)))
+          (is (str/includes? (:content failure) "stdout:\nprior stdout"))
+          (is (str/includes? (:content failure) "stderr:\nprior stderr"))
+          (is (str/includes? (:content failure) "Form 3"))
+          (is (pos-int? (or (:clojure.error/line data) (:line data))))
+          (is (pos-int? (or (:clojure.error/column data) (:column data))))
+          (is (string? (:exception data))))))))
+
+(deftest native-exception-metadata-cannot-replace-captured-output-or-source-progress
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))]
+      (doseq [[stdout stderr line column]
+              [[42 {:not "a stream"} {:not "a line"} ["not a column"]]
+               [{:not "a stream"} 42 "not a line" -1]
+               [42 42 999 999]]]
+        (let [metadata {:stdout stdout :stderr stderr
+                        :stdout-truncated? true :stderr-truncated? true
+                        :form-index 999 :completed-forms 999 :phase "not a phase"
+                        :line "not a line" :column {}
+                        :clojure.error/line line :clojure.error/column column
+                        :exception "not the exception class"
+                        :error/code "primary/native-failure"
+                        :reason {:kind :original :values [1 2 3]}}
+              source (str "(def retained-effects (atom 0))\n"
+                          "(swap! retained-effects inc)\n"
+                          "(println \"prior stdout\")\n"
+                          "(binding [*out* *err*] (println \"prior stderr\"))\n"
+                          "(def primary-exception (ex-info \"primary failure\" "
+                          (pr-str metadata) "))\n"
+                          "(throw primary-exception)")
+              failure (runtime/evaluate! rt sid source)
+              data (get-in failure [:details :data])]
+          (is (:error? failure))
+          (is (= "primary/native-failure" (get-in failure [:details :code])))
+          (is (str/includes? (:content failure) "primary failure"))
+          (is (= "primary/native-failure" (get-in data [:evaluation/cause :code])))
+          (is (= {:completed-forms 5 :form-index 6 :phase :evaluating :line 6 :column 1}
+                 (select-keys data [:completed-forms :form-index :phase :line :column])))
+          (is (= "prior stdout\n" (:stdout data)))
+          (is (= "prior stderr\n" (:stderr data)))
+          (is (false? (:stdout-truncated? data)))
+          (is (false? (:stderr-truncated? data)))
+          (is (= "clojure.lang.ExceptionInfo" (:exception data)))
+          (is (= (:reason metadata) (:reason data)))
+          (is (str/includes? (:content failure) "Form 6"))
+          (is (str/includes? (:content failure) "line 6"))
+          (is (str/includes? (:content failure) "column 1"))
+          (is (str/includes? (:content failure) "stdout:\nprior stdout"))
+          (is (str/includes? (:content failure) "stderr:\nprior stderr"))
+          (is (= [true "primary failure" metadata 1]
+                 (:value (runtime/evaluate! rt sid
+                           "[(identical? *e primary-exception) (ex-message *e) (ex-data *e) @retained-effects]")))))))))
+
+(deftest failure-stream-previews-remain-bounded-with-full-retained-diagnostics
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))
+          failure (runtime/evaluate! rt sid
+                    "(print (apply str (repeat 10000 \"x\"))) (throw (ex-info \"primary failure\" {:reason :original :stdout 42 :stderr {:not \"a stream\"} :stdout-truncated? true}))")
+          result-id (get-in failure [:result :id])]
+      (is (str/includes? (:content failure) "primary failure"))
+      (is (str/includes? (:content failure) "Preview truncated"))
+      (is (< (count (:content failure)) 5000))
+      (is (= (apply str (repeat 10000 "x")) (get-in failure [:details :data :stdout])))
+      (is (= :original (get-in failure [:details :data :reason])))
+      (is (false? (get-in failure [:details :data :stdout-truncated?])))
+      (is (= "" (get-in failure [:details :data :stderr])))
+      (runtime/reload! rt sid)
+      (let [retained (:value (runtime/evaluate! rt sid (str "(result-info " result-id ")")))]
+        (is (= (get-in failure [:details :data :stdout]) (get-in retained [:details :data :stdout])))
+        (is (= (get-in failure [:details :data :exception]) (get-in retained [:details :data :exception])))))))
+
+(deftest native-exception-values-do-not-collapse-owned-failure-diagnostics
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))
+          failure (runtime/evaluate! rt sid
+                    "(def native-object (Object.))\n(println \"before native failure\")\n(throw (ex-info \"native failure\" {:object native-object :reason {:kind :original}}))")
+          data (get-in failure [:details :data])
+          result-id (get-in failure [:result :id])]
+      (is (:error? failure))
+      (is (str/includes? (:content failure) "native failure"))
+      (is (= "before native failure\n" (:stdout data)))
+      (is (= {:completed-forms 2 :form-index 3 :phase :evaluating :line 3}
+             (select-keys data [:completed-forms :form-index :phase :line])))
+      (is (= {:kind :original} (:reason data)))
+      (is (true? (get-in data [:object :live-only?])))
+      (is (true? (:value (runtime/evaluate! rt sid
+                           "(identical? native-object (:object (ex-data *e)))"))))
+      (runtime/reload! rt sid)
+      (is (= data (get-in (:value (runtime/evaluate! rt sid (str "(result-info " result-id ")")))
+                          [:details :data]))))))
+
+(deftest oversized-captured-failure-output-is-paged-with-honest-capture-limits
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))
+          failure (runtime/evaluate! rt sid
+                    "(println \"prior effect\")\n(print (apply str (repeat 1100000 \"x\")))\n(binding [*out* *err*] (println \"captured stderr\"))\n(throw (ex-info (str \"primary failure \" (apply str (repeat 100000 \"m\"))) {:object (Object.) :oversized (apply str (repeat 1100000 \"z\")) :reason :original}))")
+          data (get-in failure [:details :data])
+          artifact-id (get-in failure [:details :artifact :id])
+          result-id (get-in failure [:result :id])]
+      (is (:error? failure))
+      (is (str/includes? (:content failure) "primary failure"))
+      (is (str/includes? (:content failure) "Exception message truncated"))
+      (is (< (count (:content failure)) 10000))
+      (is (some? artifact-id))
+      (is (str/includes? (:content failure) (str artifact-id)))
+      (is (true? (get-in failure [:details :output-hard-truncated?])))
+      (is (true? (:stdout-truncated? data)))
+      (is (false? (:stderr-truncated? data)))
+      (is (true? (:stdout-preview? data)))
+      (is (= 4096 (count (:stdout data))))
+      (is (= "captured stderr\n" (:stderr data)))
+      (is (= :original (:reason data)))
+      (is (true? (get-in data [:object :live-only?])))
+      (is (= {:completed-forms 3 :form-index 4 :phase :evaluating :line 4}
+             (select-keys data [:completed-forms :form-index :phase :line])))
+      (is (= 100016 (:value (runtime/evaluate! rt sid "(count (ex-message *e))"))))
+      (runtime/reload! rt sid)
+      (let [retained (:value (runtime/evaluate! rt sid (str "(result-info " result-id ")")))
+            paged (:value (runtime/evaluate! rt sid
+                           (str "(artifact-page " (pr-str artifact-id) " {:limit 4096})")))
+            inspected (:value (runtime/evaluate! rt sid
+                               (str "(let [text (artifact " (pr-str artifact-id) ")] "
+                                    "[(clojure.string/starts-with? text \"stdout:\\nprior effect\\n\") "
+                                    "(clojure.string/ends-with? text \"\\n[stdout truncated at 1048576 characters]\\nstderr:\\ncaptured stderr\\n\")])")))]
+        (is (= data (get-in retained [:details :data])))
+        (is (= artifact-id (get-in retained [:details :artifact :id])))
+        (is (= 4096 (count (:content paged))))
+        (is (= [true true] inspected))))))
+
+(deftest primary-cause-survives-foreign-metadata-budget-and-reload
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))
+          source (str "(println \"before primary cause\")\n"
+                      (pr-str '(throw
+                                 (ex-info "primary-cause"
+                                          (into {:error/code "fixture/primary"}
+                                                (map (fn [i] [(keyword (str "field-" i)) i])
+                                                     (range 2000)))))))
+          failure (runtime/evaluate! rt sid source)
+          result-id (get-in failure [:result :id])
+          data (get-in failure [:details :data])]
+      (is (= {:code "fixture/primary" :message "primary-cause"} (:evaluation/cause data)))
+      (is (= "before primary cause\n" (:stdout data)))
+      (is (= 1 (:completed-forms data)))
+      (is (pos? (:exception-data-omitted data)))
+      (runtime/reload! rt sid)
+      (is (= (:evaluation/cause data)
+             (get-in (:value (runtime/evaluate! rt sid (str "(result-info " result-id ")")))
+                     [:details :data :evaluation/cause]))))))

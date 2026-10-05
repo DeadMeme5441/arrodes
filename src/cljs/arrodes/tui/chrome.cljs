@@ -76,6 +76,7 @@
                     (= connection :closing) "Closing"
                     (= :cancelling (:status operation)) "Stopping…"
                     (and running (= :compacting (get-in s [:view :phase]))) "Compacting context…"
+                    (and running (= :preparing-context (get-in s [:view :phase]))) "Preparing history…"
                     running (str "Working" elapsed)
                     (= :failed (:status operation)) "Failed"
                     (= :cancelled (:status operation)) "Stopped"

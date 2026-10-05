@@ -1,7 +1,8 @@
 (ns arrodes.session
   "Pure session construction and history projections."
   (:require [clojure.string :as str]
-            [arrodes.value :as value]))
+            [arrodes.value :as value]
+            [arrodes.context-tree :as context-tree]))
 
 (def default-config
   {:provider :codex-backend
@@ -59,7 +60,10 @@
                   :invalid-config "Session tools must be :all or a vector of names" {:field :tools})
     (value/check! (string? (:instructions result)) :invalid-config "Session instructions must be a string" {:field :instructions})
     (value/check! (map? (:settings result)) :invalid-config "Session settings must be a map" {:field :settings})
-    result))
+    (let [normalized (context-tree/settings result)]
+      (if (some #(contains? (:settings result) %) context-tree/setting-keys)
+        (update result :settings merge normalized)
+        result))))
 
 (defn new-snapshot
   "Constructs a canonical session snapshot from prepared portable values.

@@ -39,6 +39,69 @@ the widget layer. Ordinary conversation remains readable and execution remains i
 The current visual system is documented in [TUI design](TUI_DESIGN.md). The
 [TUI skill](../.agents/skills/arrodes-tui/SKILL.md) describes the implementation workflow.
 
+## Context policy and inspection
+
+`/context` opens the full-terminal **Session context** choices. Ordinary sessions
+remain **Linear history** unless explicitly enabled. To opt in:
+
+1. Use `/providers` for normal authentication and `/models` for the exact main model
+   (for example `codex-backend/gpt-6.1-sol`).
+2. Open `/context`, choose **Summarizer model**, and enter an exact model ID.
+   The default is `gpt-6-luna`; Enter saves, Escape keeps the previous setting.
+   This selects the summarizer only, not the main model or context policy.
+3. Choose **Summary tree** and confirm. The confirmation names the selected
+   summarizer/provider and explains possible background calls and separate cost.
+   There is no model substitution or second authentication flow.
+4. Send the next message normally. Required historical preparation is shown as
+   **Preparing history…** before the main request; generated summaries are not
+   streamed into the assistant's reply.
+
+The summary provider defaults to the session provider. `/context` edits policy and
+exact summary model; choose a different summary provider or byte/attempt/deadline
+settings through [configuration](CONFIGURATION.md#summary-tree-context-opt-in) or
+[`session.configure`](PROTOCOL.md#session-context), not an undocumented TUI picker.
+
+On an empty, unsent composer, these choices update configuration for the first
+message without creating a stored session or making provider calls. Inspection
+labels it **unsent composer (no stored session)**. On a saved session, choices save
+only that conversation's settings for the next safe outer-turn boundary; they
+do not rewrite original history, restart the evaluator or interrupt current native
+REPL/tool replay. A running request may still use its earlier policy/budget.
+Selecting **Linear history** disables summary work at that boundary (or quiesces it
+when idle); it does not delete the original conversation.
+
+Choose **Inspect context and summary usage** for a read-only snapshot. It displays
+configured policy and summarizer, summary-work status and failures, stored node
+count, active-operation versus stored-history-preview policy, readiness/fit,
+rendered UTF-8 bytes/budget, and required versus covered original source entries
+for that projection. An incomplete bounded preview shows its reason and, when
+applicable, the untrimmed available frontier's required bytes, not a guaranteed
+size for all pending history; it never claims missing history is summarized.
+Separate persisted completed-node summary usage and cost show measured fields and
+measured-node counts, with unknowns explicit. Displayed failures are runtime
+diagnostics; optional unpersisted attempt spend is exposed by
+[`session.context`](PROTOCOL.md#session-context), not this screen or durable node
+accounting.
+Close and reopen to refresh. Opening this screen, navigating history or reopening
+a session never generates summaries; only explicit runtime work enables catch-up.
+An explicit later run can retry required failed preparation without replaying effects.
+
+The historical evidence view is attributed data, not new instructions or an
+automatic ranking of memories. `/history` continues to browse canonical recorded
+entries. The assistant can use ordinary `history/view`, `history/zoom`,
+`history/read` and `history/date` through the existing `repl`; expert users can
+inspect with `/eval` and `(history/view)`. See [Sessions](SESSIONS.md) for original
+record paging, retrieval receipts and retained-result navigation.
+
+Context screens follow ordinary draft/navigation ownership: dismissal restores
+the unsent draft and transcript position; late inspection/configuration responses
+do not reopen a dismissed screen or overwrite another conversation's state. Failed
+saves remain visible without clearing drafts. Escape dismisses the context screen
+before requesting foreground cancellation. Cancellation is a request, not proof
+that a worker has exited; completed history/results remain inspectable, and
+continuation retains settled native evidence rather than repeating effects.
+
+
 ## Session agents
 
 `/agents` or `F4` opens a full-terminal browser using the same screen shell as
@@ -103,7 +166,10 @@ provider usage on the active history path, including compaction and branch summa
 Uncached input, cache-read, cache-write and output counts are independent counters;
 provider totals are not added to their breakdowns. Missing counters and prices are
 shown as unknown, and partial totals report unmeasured requests. Known USD spend is
-an estimate, not an invoice; title calls and inactive branches are excluded.
+an estimate, not an invoice; title calls, summary-tree model work and inactive
+branches are excluded. `/context` reports summary-tree accounting independently.
+The footer's latest reported ordinary main usage is not the projected historical
+view's byte size; tree compaction does not manufacture a replacement usage count.
 
 At 120 columns or wider the footer also shows latest cache-read/write counts.
 The full `/usage` surface remains available at narrow widths. Escape restores the

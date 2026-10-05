@@ -103,7 +103,7 @@
   (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
     (let [sid (:id (fixtures/create-session rt))
           root (:value (evaluate rt sid '(help)))]
-      (is (= #{"background" "delegation" "failure" "results"}
+      (is (= #{"coding" "background" "delegation" "failure" "results"}
              (set (map :workflow (:workflows root)))))
       (is (every? #(and (string? (:purpose %)) (not (contains? % :steps)))
                   (:workflows root)))
@@ -124,6 +124,15 @@
     (is (= "unknown-workflow"
            (:error/code (ex-data (try (help/help 'clojure.core selection {:workflow "not-installed"})
                                       (catch clojure.lang.ExceptionInfo error error))))))))
+
+(deftest coding-workflow-follows-selected-file-capabilities
+  (fixtures/with-runtime [rt (fn [_ _] (fixtures/answer "Done"))]
+    (let [sid (:id (fixtures/create-session rt))
+          available #(set (map :workflow (:workflows (:value (evaluate rt sid '(help))))))]
+      (runtime/configure! rt sid {:config {:tools ["read" "write" "bash"]}})
+      (is (not (contains? (available) "coding")))
+      (runtime/configure! rt sid {:config {:tools ["read" "write" "edit" "bash"]}})
+      (is (contains? (available) "coding")))))
 
 (deftest registered-tools-do-not-masquerade-as-native-workflows
   (let [tool-names ["jobs/start!" "jobs/inspect" "jobs/wait" "jobs/output" "jobs/result" "jobs/cancel!"]

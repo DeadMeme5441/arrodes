@@ -9,7 +9,7 @@
 ;; Only public session-facing entry points belong here. The Vars themselves supply
 ;; the live docstrings and arities; contracts supplement native return semantics.
 (def ^:private native-contracts
-  {"help" {:arities ["[]" "[{:workflow \"background\"|\"delegation\"|\"failure\"|\"results\"}]" "[{:group group :query query :offset offset :limit limit}]" "[name]" "[name {:detailed? true}]"]
+  {"help" {:arities ["[]" "[{:workflow \"coding\"|\"background\"|\"delegation\"|\"failure\"|\"results\"}]" "[{:group group :query query :offset offset :limit limit}]" "[name]" "[name {:detailed? true}]"]
            :returns "Bounded group discovery or an on-demand workflow recipe; named lookups return one Clojure function contract."
            :examples ["(help {:workflow \"background\"})" "(help 'agents/start!)"]}
    "workspace" {:arities ["[]" "[{:query query :offset offset :limit limit}]"]
@@ -31,6 +31,18 @@
                   :examples ["(invoke-tool \"grep\" {:path \"src\" :pattern \"needle\"})"]}
    "register-tool!" {:arities ["[var descriptor]"] :returns "Registration acknowledgement for a Var; ordinary functions need no registration."
                      :examples ["(register-tool! #'my-function {:name \"my-function\"})"]}
+   "history/view" {:arities ["[]" "[opts]"]
+                   :returns "Completed summary frontier page with readiness/fit, addressed nodes and typed source-span references; never starts inference."
+                   :examples ["(history/view {:limit 8})" "(history/view {:query \"earlier decision\"})"]}
+   "history/zoom" {:arities ["[node-id]" "[node-id opts]" "[start count]"]
+                   :returns "Completed parent and two child summaries; a singleton returns bounded original evidence. :summary? true explicitly pages singleton summary text. Only the current historical path is accessible."
+                   :examples ["(history/zoom (:id (first (:nodes (history/view)))))" "(history/zoom 0 2)"]}
+   "history/read" {:arities ["[entry-id]" "[entry-id opts]"]
+                   :returns "Original visible text and inert code, timestamp, source-scoped :result-reference provenance and :history/retrieval. Character :offset and UTF-8 byte :limit bound pages; :complete?/:next are explicit."
+                   :examples ["(history/read entry-id {:limit 4096 :query \"why?\"})"]}
+   "history/date" {:arities ["[entry-id]"]
+                   :returns "Recorded epoch milliseconds and typed original reference, not inferred event time."
+                   :examples ["(history/date entry-id)"]}
    "jobs/start!" {:returns "Session-owned job handle immediately; the zero-argument function runs in managed background work."
                   :examples ["(def check-job (jobs/start! {:name \"Check\"} #(do (prn \"checked\") {:ok true})))"]}
    "jobs/inspect" {:returns "Compact status with inert :next source strings for output, result inspection, successful value-and-ack, or waiting/cancellation. {:detailed? true} includes diagnostics."
@@ -75,7 +87,17 @@
                      :examples ["(agents/resume! a)"]}})
 
 (def ^:private workflows
-  {"background"
+  {"coding"
+   {:purpose "Inspect, edit and verify project files with native functions and a managed process workflow."
+    :requires #{"help" "result-info"}
+    :requires-builtins #{"read" "write" "edit" "bash"}
+    :steps ["Inspect unfamiliar contracts before using them. Independent lookups can share a returned map: {:read (help 'read) :edit (help 'edit) :bash (help 'bash)}. Read that result before constructing calls that depend on it; only the last form's value is returned."
+            "Read the relevant file range: (read {:path \"src/app.ts\" :detailed true :offset 1 :limit 120}). Follow its page information or retained output before editing omitted text. Prefer native file inspection over concatenating entire files through a shell."
+            "Create a file with (write {:path \"src/example.ts\" :content \"export const answer = 42;\\n\"}). Change existing text with (edit {:path \"src/example.ts\" :edits [{:oldText \"answer = 42\" :newText \"answer = 43\"}]}). Each oldText must match exactly once; edits are atomic. Avoid shell heredocs and nested Python replacements for these operations."
+            "Arguments are Clojure maps, not JSON syntax: (bash {:command \"bun run typecheck && bun test\" :timeout 120}). Use the project's actual commands; && prevents a dependent check from running after a failed prerequisite. Nonzero exit is a normal result: inspect :exit-code, :stdout and :stderr."
+            "Bind reusable results in the REPL and return focused evidence instead of large logs. If a display is shortened, inspect result-info and its retained output rather than rerunning effects. A failed evaluation may have performed earlier effects; use the failure workflow before retrying uncertain mutations."
+            "Use the background workflow for a long-running server. Verify the actual user-facing behavior and relevant persistence, not only compilation. In the final reply preserve useful decisions, observed checks, remaining failures and the running service address when applicable."]}
+   "background"
    {:purpose "Start a function job; inspect, wait, read output, then retrieve success or failure."
     :requires #{"jobs/start!" "jobs/inspect" "jobs/wait" "jobs/output" "jobs/result" "jobs/cancel!"}
     :steps ["Evaluate separately; each REPL call returns only its last form. Bind work under a descriptive name: (def check-job \"Managed project check.\" (jobs/start! {:name \"Check\"} #(do (prn \"checked\") {:ok true})))"
@@ -106,10 +128,12 @@
             "For artifact-backed content, (def page (artifact-page artifact-id {:limit 4096})); then (artifact-page artifact-id {:after (:cursor page) :limit 4096}) while :cursor exists. That cursor is reusable and scoped to this session/artifact; :offset remains for random access. Never load huge content merely to list or inspect it."]}})
 
 (defn- available-workflows [entries]
-  (let [installed (set (map :name (remove :symbol entries)))]
+  (let [installed (set (map :name (remove :symbol entries)))
+        builtins (set (map :name (filter #(= "arrodes.builtin" (:owner %)) entries)))]
     (->> workflows
-         (keep (fn [[name {:keys [purpose requires]}]]
-                 (when (every? installed requires)
+         (keep (fn [[name {:keys [purpose requires requires-builtins]}]]
+                 (when (and (every? installed requires)
+                            (every? builtins requires-builtins))
                    {:workflow name :purpose purpose})))
          (sort-by :workflow)
          vec)))

@@ -1,10 +1,13 @@
 (ns arrodes.mcp-process-regression-test
   (:require [arrodes.mcp :as mcp]
+            [arrodes.owned-process :as owned-process]
             [arrodes.platform :as u]
             [clojure.string :as str]
             [clojure.test :refer [deftest is]])
-  (:import (java.nio.file Files LinkOption Path)
-           (java.nio.file.attribute FileAttribute)))
+  (:import (com.sun.jna Native)
+           (java.nio.file Files LinkOption Path)
+           (java.nio.file.attribute FileAttribute)
+           (java.util.concurrent TimeUnit)))
 
 (defn- temp-directory []
   (str (Files/createTempDirectory "arrodes-mcp-process-" (make-array FileAttribute 0))))
@@ -111,3 +114,82 @@
                 (is (wait-until #(not (process-alive? second-pid)) 1000))))
             (finally (mcp/close! pool))))
         (finally (remove-directory! directory))))))
+
+(deftest raced-stdio-exit-closes-but-live-permission-failure-retains-ownership
+  (when (Files/isExecutable (u/path "/bin/sh"))
+    (doseq [exit-before-error? [true false]]
+      (let [directory (temp-directory)
+            script (str directory "/server.sh")
+            release (str directory "/release")
+            source (str/join
+                    "\n"
+                    ["while IFS= read -r line; do"
+                     "  case \"$line\" in"
+                     "    *'\"method\":\"initialize\"'*)"
+                     "      id=$(printf '%s' \"$line\" | sed -E 's/.*\"id\":(\"[^\"]*\"|[0-9]+).*/\\1/')"
+                     "      version=$(printf '%s' \"$line\" | sed -E 's/.*\"protocolVersion\":\"([^\"]+)\".*/\\1/')"
+                     "      printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"protocolVersion\":\"%s\",\"capabilities\":{},\"serverInfo\":{\"name\":\"gated\",\"version\":\"1\"}}}\\n' \"$id\" \"$version\" ;;"
+                     "  esac"
+                     "done"
+                     "while [ ! -f release ]; do sleep 0.01; done"])]
+        (try
+          (spit script source)
+          (let [pool (mcp/create! directory
+                                  {:mcp/servers
+                                   {"gated" {:transport :stdio :command "/bin/sh"
+                                             :args [script] :timeout-ms 5000}}})]
+            (try
+              (mcp/catalog! pool "gated")
+              (let [owned (get-in @(:states pool) ["gated" :owned])
+                    process ^Process (:process owned)
+                    native-var (ns-resolve 'arrodes.owned-process 'posix-call)
+                    native-call @native-var
+                    failures (atom 0)
+                    report
+                    (with-redefs-fn
+                      {native-var
+                       (fn [library function & arguments]
+                         (if (and (= "kill" function)
+                                  (= [(- (.pid process)) 15] (vec arguments)))
+                           (do
+                             (swap! failures inc)
+                             (when exit-before-error?
+                               ;; The native scope really exits; only the raced
+                               ;; signal result is injected, never its liveness.
+                               (spit release "")
+                               (when-not (.waitFor process 5 TimeUnit/SECONDS)
+                                 (throw (ex-info "MCP EOF fixture did not exit" {}))))
+                             (Native/setLastError 1)
+                             -1)
+                           (apply native-call library function arguments)))}
+                      #(mcp/close! pool))]
+                (is (pos? @failures))
+                (is (:closed? report))
+                (if exit-before-error?
+                  (do
+                    (is (:cleanup-complete? report))
+                    (is (empty? (:errors report)))
+                    (is (nil? (get-in @(:states pool) ["gated" :owned])))
+                    (is (not (.isAlive process)))
+                    (is (not (owned-process/alive? owned))))
+                  (do
+                    (is (false? (:cleanup-complete? report)))
+                    (is (= "mcp/cleanup-failed" (get-in report [:errors 0 :code])))
+                    (is (str/includes? (get-in report [:errors 0 :message])
+                                       "kill(process-group) failed with native error 1"))
+                    (is (= :cleanup-failed (get-in @(:states pool) ["gated" :status])))
+                    (is (identical? owned (get-in @(:states pool) ["gated" :owned])))
+                    (is (.isAlive process))
+                    (is (owned-process/alive? owned))))
+                ;; A real subsequent cleanup, with signaling restored, must
+                ;; release the same retained owner rather than invent success.
+                (let [retry (mcp/close! pool)]
+                  (is (:already-closed? retry))
+                  (is (:cleanup-complete? retry))
+                  (is (empty? (:errors retry)))
+                  (is (not (owned-process/alive? owned)))))
+              (finally
+                (let [report (mcp/close! pool)]
+                  (when-not (:cleanup-complete? report)
+                    (throw (ex-info "MCP regression cleanup did not finish" report)))))))
+          (finally (remove-directory! directory)))))))

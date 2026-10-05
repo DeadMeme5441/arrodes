@@ -51,7 +51,7 @@
                   (with-open [reader (DriverManager/getConnection
                                      (str "jdbc:sqlite:" (.toUri (util/path db-path)) "?mode=ro"))]
                     (let [version (schema/check-schema! reader)]
-                      (when (#{3 4} version)
+                      (when (#{3 4 5} version)
                         (value/check! (= "ok" (sql/scalar reader "PRAGMA integrity_check" []))
                                       :unsupported-store-format
                                       "SQLite integrity check failed; restore the database from a backup"
@@ -67,7 +67,7 @@
           (value/check! (= checked version) :unsupported-store-format
                         "Store changed during validation; retry after closing other database writers"
                         {:path db-path})
-          (when (and db-path (#{3 4} version))
+          (when (and db-path (#{3 4 5} version))
             (sql/execute-command! connection "PRAGMA synchronous = FULL")
             (schema/backup-store! connection db-path version)
             (schema/upgrade-schema! connection))

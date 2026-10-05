@@ -93,6 +93,73 @@ Supported session-default fields are:
 
 `provider-retries` is bounded to five retries at runtime. A false `:fallback-model?` prevents silent model substitution.
 
+### Summary-tree context (opt-in)
+
+Absent `:context-policy` or explicit `:linear` keeps ordinary linear context.
+Select **Summary tree** in [`/context`](TUI.md#context-policy-and-inspection), or
+set these fields at the top level of a global/trusted-project settings file.
+For an explicit session configuration, put them inside `:config :settings`
+(`config.settings` over [RPC](PROTOCOL.md#session-context)).
+
+| Setting | Default | Accepted values / bounds |
+| --- | --- | --- |
+| `:context-policy` | `:linear` | `:linear` or `:summary-tree`; string equivalents accepted |
+| `:summary-provider` | Session provider | Provider keyword or string ID |
+| `:summary-model` | `"gpt-6-luna"` | Nonblank exact model ID; no substitution |
+| `:summary-node-bytes` | `512` | Integer 1–16,777,216; UTF-8 summary target per node |
+| `:summary-view-bytes` | `128000` | Integer 1–16,777,216; actual rendered historical-view UTF-8 byte budget, including navigation markup |
+| `:summary-max-attempts` | `3` | Integer 1–10; bounded compression attempts per generated node |
+| `:summary-timeout-ms` | `60000` | Integer 1–3,600,000; work deadline for each summary node, not the whole history backlog |
+
+For example, explicitly choose the main and summary models independently:
+
+```clojure
+{:provider :codex-backend
+ :model "gpt-6.1-sol"
+ :thinking :high
+ :context-policy :summary-tree
+ :summary-provider :codex-backend
+ :summary-model "gpt-6-luna"
+ :summary-node-bytes 512
+ :summary-view-bytes 128000
+ :summary-max-attempts 3
+ :summary-timeout-ms 60000}
+```
+
+This is an opt-in example, not a change to the main-model default. Both exact models
+must be available to the account. Authenticate through `/providers` and the normal
+provider auth store; no credentials belong in these settings or summary records.
+Changing `:summary-model` does not change the main model or enable the tree policy.
+
+The node size is a target, not permission to truncate evidence: after the bounded
+attempts, the shortest complete nonempty summary may exceed it. Empty or truncated
+completions are not stored as fake summaries. The rendered view budget remains a
+bound; a budget too small to represent the required history fails explicitly.
+Bytes are not tokens or a guarantee that the whole main request fits a model window.
+
+Normal foreground preparation waits cancellably for its complete, fitting
+summary-only view; there is no default whole-backlog deadline. Healthy catch-up may
+take longer than one node's timeout. Embedded `summaries/ensure-ready!` callers may
+still supply an explicit `:timeout-ms` wait bound. Genuine node failures remain
+visible; increasing a node timeout is not a substitute for resolving them.
+
+Enabling allows separate, tool-free model work before a main request and background
+catch-up after relevant committed work. Opening/reopening a session, inspecting
+context, or importing history never generates summaries. Configuration alone does
+not immediately build the tree. Completed derived nodes are reusable; failures are
+tracked by node and settings, background maintenance does not repeatedly retry a
+failed node, and later explicit foreground demand can retry required work.
+Changing prompts or settings does not rewrite previously completed cache nodes.
+
+Saved-session changes take effect at a safe outer-turn boundary, not halfway through
+native REPL/tool replay. The configured policy may therefore differ from the active
+request's policy or budget. A run override and delivered steering/follow-up settings
+are explicit intents; later per-key configuration wins even when the same value is
+explicitly set again. See [RPC](PROTOCOL.md#session-context) for application and
+inspection, [Providers](PROVIDERS.md#summary-model-work) for accounting/cache behavior,
+and [Sessions](SESSIONS.md) for canonical history and original-record retrieval.
+
+
 Provider transports default to `:connect-timeout-ms 15000` and `:timeout-ms 60000`
 (stream read-idle timeout). Configure these at runtime/global settings scope, or
 under `:provider-options` keyed by provider ID for provider-specific overrides.
@@ -107,10 +174,12 @@ Operation admission counts running and waiting operations; it is independent of
 `:job-limit` for background functions.
 `operation-threads` is not a compatibility spelling for `operation-limit`.
 When launched, a child inherits a selected snapshot of its parent's session
-configuration unless its `agents/start!`/`agent.start` options override it. Future
-parent model changes do not mutate child configuration. Provider credentials remain
-in the usual provider credential store, not in a child launch record; a child
-loads project resources and trust through its own session/evaluator lifecycle.
+configuration unless its `agents/start!`/`agent.start` options override it. Context
+policy and summary settings are not implicitly inherited: a child must opt in
+explicitly. Future parent model changes do not mutate child configuration.
+Provider credentials remain in the usual provider credential store, not in a child
+launch record; a child loads project resources and trust through its own
+session/evaluator lifecycle.
 
 Automatic session naming is enabled by default. Set `:auto-title? false` to disable
 both the initial local name and background title generation. `:title-model` selects
@@ -215,8 +284,9 @@ Arrodes never moves, merges, or overwrites them. Choose a current-format applica
 home explicitly when necessary.
 
 An implicit `HOME/data` directory is not selected as project history. An explicit
-`--data-dir PATH` selects one data directory. Supported schema-3/4 layouts upgrade
-to schema 5 after a retained SQLite backup; artifact content and credentials/settings
-are preserved. Unsupported, malformed, newer and foreign stores are rejected intact.
+`--data-dir PATH` selects one data directory. The current store schema is 6;
+recognized schema-3/4/5 layouts upgrade after a retained SQLite backup. Artifact
+content and credentials/settings are preserved. Unsupported, malformed, newer
+and foreign stores are rejected intact.
 The [format contract](COMPATIBILITY.md) defines supported layouts, backup names
 and explicit recovery; startup never resets an incompatible store.

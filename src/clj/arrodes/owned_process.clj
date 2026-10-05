@@ -159,15 +159,24 @@
                          (when (wait-until #(nil? (poll!)) timeout-ms) @state)
                          (loop []
                            (or (poll!) (do (Thread/sleep 10) (recur))))))
-              signal! (fn [signal]
-                        (let [result (posix-call library "kill" (- pid) signal)]
-                          (when (and (neg? result) (not= 3 (Native/getLastError)))
-                            (throw (native-error "kill(process-group)" (Native/getLastError))))))
               scope-alive? (fn []
                              (poll!)
                              (let [result (posix-call library "kill" (- pid) 0)
-                                   error (Native/getLastError)]
-                               (or (zero? result) (= 1 error))))
+                                   error (when (neg? result) (Native/getLastError))]
+                               (cond
+                                 (zero? result) true
+                                 (= 1 error) true
+                                 (= 3 error) false
+                                 :else (throw (native-error "kill(process-group, 0)" error)))))
+              signal! (fn [signal]
+                        (let [result (posix-call library "kill" (- pid) signal)
+                              error (when (neg? result) (Native/getLastError))]
+                          ;; Darwin can return EPERM for a group containing only
+                          ;; zombies. Reap and prove the whole scope gone; a live
+                          ;; or inaccessible descendant must still fail cleanup.
+                          (when (and (neg? result)
+                                     (not (wait-until scope-alive? forced-wait-ms)))
+                            (throw (native-error "kill(process-group)" error)))))
               process (process-proxy pid stdin stdout stderr await! poll!
                                      (fn [force?] (signal! (if force? 9 15))))]
           {:process process :kind :posix-process-group

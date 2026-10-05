@@ -1,7 +1,10 @@
 (ns arrodes.tui-app-test
   "Actual JVM regressions for commands issued during connection changes."
   (:require [arrodes.tui-app :as app]
-            [arrodes.tui-rpc :as rpc]))
+            [arrodes.tui-rpc :as rpc]
+            [arrodes.tui-model :as model]
+            [arrodes.tui.commands :as commands]
+            [clojure.string :as str]))
 
 (def ^:private fs (js/require "node:fs"))
 (def ^:private path (js/require "node:path"))
@@ -41,6 +44,9 @@
             \"__arm-queue\" (do (arm! :queue) (runtime/session rt (:session-id params)))
             \"__arm-models\" (do (arm! :models) (reset! catalog-session (:session-id params)) (runtime/session rt (:session-id params)))
             \"__arm-providers\" (do (arm! :providers) (reset! catalog-session (:session-id params)) (runtime/session rt (:session-id params)))
+            \"__configure-tree-event\" (dispatch rt \"session.configure\"
+                                                 {:session-id (:session-id params)
+                                                  :config {:settings {:context-policy :summary-tree}}})
             \"__await-entered\" (do (await! @entered \"delayed request admission\")
                                     (runtime/session rt (:session-id params)))
             \"__release-run\" (do (deliver @run-release true) (runtime/session rt (:session-id params)))
@@ -58,9 +64,8 @@
 
           \"session.configure\"
           (let [result (dispatch rt method params)]
-            (if (= :configure @mode)
-              (do (deliver @entered true) (await! @release \"configure release\")
-                  (reset! mode nil) result)
+            (if (compare-and-set! mode :configure nil)
+              (do (deliver @entered true) (await! @release \"configure release\") result)
               result))
 
           \"session.reload\"
@@ -265,6 +270,197 @@
                                 (check! (= @before (get @(:state application) action))
                                         "Late catalog response from A overwrote B's catalog"))))))))))
 
+
+(defn- context-history! [application before policies]
+  (let [sid (get-in @(:state application) [:view :session :id])]
+    (-> (rpc/request! @(:client application) "session.view" {:session-id sid})
+        (.then
+         (fn [wire]
+           (let [snapshot (model/hydrate (model/decode-wire wire) [])
+                 canonical (:entries snapshot)
+                 appended (drop (count before) canonical)
+                 observed (mapv #(keyword (get-in % [:data :settings :context-policy])) appended)
+                 diagnostic (str " "
+                                 (pr-str {:before-count (count before)
+                                          :canonical-count (count canonical)
+                                          :controller-count (count (get-in @(:state application) [:view :entries]))
+                                          :cursor (:cursor snapshot)
+                                          :expected-policies policies
+                                          :observed-policies observed}))]
+             (check! (= before (vec (take (count before) canonical)))
+                     (str "Context changes must retain every recorded entry unchanged and in order" diagnostic))
+             (check! (= (filterv #(= :message (:kind %)) before)
+                        (filterv #(= :message (:kind %)) canonical))
+                     (str "Context changes must preserve the visible conversation" diagnostic))
+             (check! (and (every? #(= :config (:kind %)) appended)
+                          (= policies observed))
+                     (str "Context changes must append their canonical configuration records in order" diagnostic))
+             ;; Mutation replies do not await the publisher. The snapshot cursor
+             ;; proves every committed history event has reached the controller.
+             (-> (until-state! application
+                               #(and (= sid (get-in % [:view :session :id]))
+                                     (nil? (:hydrating %))
+                                     (>= (or (get-in % [:view :cursor]) 0) (:cursor snapshot)))
+                               (str "The controller must observe the authoritative history cursor" diagnostic))
+                 (.then
+                  (fn [_]
+                    (let [view (:view @(:state application))]
+                      (check! (= canonical (:entries view))
+                              (str "The reconciled controller transcript must match the saved canonical history" diagnostic
+                                   " reconciled-count=" (count (:entries view))))))))))))))
+
+(defn- context-controls! [application]
+  (let [before @(:state application)
+        entries (get-in before [:view :entries])
+        draft "Preserve this context draft"
+        selection (:id (first (filter #(= :message (:kind %)) entries)))]
+    (swap! (:state application) update :ui assoc :draft draft :selected selection)
+    (-> (app/command! application :configure-context
+                      {:settings {:context-policy "summary-tree" :summary-model "gpt-6-luna"}})
+        (.then (fn [_] (context-history! application entries [:summary-tree])))
+        (.then (fn [_] (app/command! application :context)))
+        (.then (fn [inspection]
+                 (check! (= :summary-tree (keyword (:policy inspection))) "Context inspection must expose the configured policy")
+                 (check! (= "gpt-6-luna" (get-in inspection [:settings :summary-model]))
+                         "The exact summarizer model must persist")
+                 (check! (contains? inspection :view) "Context inspection must expose bounded view readiness")
+                 (check! (contains? inspection :summary) "Context inspection must separate summary accounting")
+                 (check! (= draft (get-in @(:state application) [:ui :draft]))
+                         "Context controls must preserve the unsent draft")
+                 (check! (= selection (get-in @(:state application) [:ui :selected]))
+                         "Context controls must preserve transcript selection")
+                 (rejects-with! (app/command! application :configure-context
+                                             {:settings {:summary-model ""}}) "invalid-config")))
+        (.then (fn [_]
+                 (check! (= :error (get-in @(:state application) [:notice :kind]))
+                         "Invalid context settings must show an error")
+                 (check! (= draft (get-in @(:state application) [:ui :draft]))
+                         "Rejected settings must not discard the draft")
+                 (app/command! application :refresh)))
+        (.then (fn [_]
+                 (check! (= :summary-tree (keyword (get-in @(:state application) [:view :session :config :settings :context-policy])))
+                         "Ordinary session refresh must retain the saved policy")
+                 (context-history! application entries [:summary-tree])))
+        (.then (fn [_]
+                 (check! (= draft (get-in @(:state application) [:ui :draft]))
+                         "Refresh and rejected settings must preserve the draft")
+                 (check! (= selection (get-in @(:state application) [:ui :selected]))
+                         "Refresh and rejected settings must preserve transcript selection")
+                 (app/command! application :configure-context {:settings {:context-policy :linear}})))
+        (.then (fn [_] (context-history! application entries [:summary-tree :linear]))))))
+
+(defn- context-menu-view [application]
+  {:app application
+   :actions {:open-overlay! (fn [_ overlay]
+                              (swap! (:state application) assoc-in [:ui :overlay]
+                                     (assoc overlay :token (str (random-uuid)) :index 0)))
+             :close-overlay! (fn [_] (swap! (:state application) assoc-in [:ui :overlay] nil))
+             :confirm! (fn [_ title description action]
+                         (swap! (:state application) assoc-in [:ui :overlay]
+                                {:kind :confirm :title title :hint description
+                                 :token (str (random-uuid))
+                                 :items [{:choose (fn [])}
+                                         {:choose (fn []
+                                                    (swap! (:state application) assoc-in [:ui :overlay] nil)
+                                                    (action))}]}))}})
+
+(defn- context-interleaving! [application event-only?]
+  (let [sid (get-in @(:state application) [:view :session :id])
+        menu (context-menu-view application)
+        entries (get-in @(:state application) [:view :entries])
+        cursor (get-in @(:state application) [:view :cursor])
+        configuration-seq (atom nil)
+        selection (:id (first (filter #(= :message (:kind %)) entries)))
+        draft "Newer context draft"
+        notice {:kind :error :message "Keep this newer context notice"}
+        newer-overlay (atom nil)
+        revision (atom nil)
+        policy #(keyword (get-in % [:view :session :config :settings :context-policy]))
+        control (fn [name]
+                  (rpc/request! @(:client application) "session.name" {:session-id sid :name name}))]
+    (swap! (:state application) update :ui assoc :draft draft :selected selection)
+    (-> (control "__arm-configure")
+        (.then
+         (fn [_]
+           (commands/open-context! menu)
+           (let [pending ((get-in @(:state application) [:ui :overlay :items 1 :choose]))]
+             (-> (control "__await-entered")
+                 (.then (fn [_]
+                          (until-state! application
+                                        #(and (= :linear (policy %))
+                                              (> (or (get-in % [:context-configurations sid :event :seq]) 0) cursor))
+                                        "The delayed Linear save did not emit its configuration")))
+                 (.then (fn [_]
+                          (reset! configuration-seq (get-in @(:state application) [:context-configurations sid :event :seq]))
+                          (reset! revision (get-in @(:state application) [:view :session :revision]))
+                          (if event-only?
+                            ;; Consume only the event, not the newer session snapshot.
+                            (control "__configure-tree-event")
+                            (do
+                              (swap! (:state application) assoc-in [:ui :overlay] nil)
+                              (commands/open-context! menu)
+                              ((get-in @(:state application) [:ui :overlay :items 2 :choose]))
+                              ((get-in @(:state application) [:ui :overlay :items 1 :choose]))))))
+                 (.then (fn [_]
+                          (until-state! application
+                                        #(and (= :summary-tree (policy %))
+                                              (> (or (get-in % [:context-configurations sid :event :seq]) 0) @configuration-seq))
+                                        "The newer Summary-tree configuration did not arrive")))
+                 (.then (fn [_]
+                          (when event-only?
+                            (check! (= @revision (get-in @(:state application) [:view :session :revision]))
+                                    "The event-only regression must not depend on a refreshed session revision"))
+                          (commands/open-context! menu)
+                          (swap! (:state application) assoc :notice notice)
+                          (reset! newer-overlay (get-in @(:state application) [:ui :overlay]))
+                          (control "__release")))
+                 (.then (fn [_] pending))
+                 (.then (fn [result]
+                          (check! (nil? result) "A superseded context save must not complete the newer UI interaction")
+                          (rpc/request! @(:client application) "session.inspect" {:session-id sid})))
+                 (.then (fn [wire]
+                          (let [persisted (get-in (model/decode-wire wire) [:session :config :settings :context-policy])
+                                current @(:state application)
+                                cached (some #(when (= sid (:id %)) %) (:sessions current))]
+                            (check! (= :summary-tree (keyword persisted) (policy current)
+                                       (keyword (get-in cached [:config :settings :context-policy])))
+                                    (str "A late Linear reply must not contradict the persisted policy in active or cached sessions "
+                                         (pr-str {:persisted persisted
+                                                  :active (policy current)
+                                                  :cached (get-in cached [:config :settings :context-policy])})))
+                            (check! (= draft (get-in current [:ui :draft]))
+                                    "A late context reply must not change the newer draft")
+                            (check! (= selection (get-in current [:ui :selected]))
+                                    "A late context reply must not change transcript selection")
+                            (check! (= @newer-overlay (get-in current [:ui :overlay]))
+                                    "A late context reply must not close or overwrite the newer context menu")
+                            (check! (= notice (:notice current))
+                                    "A late context reply must not replace the newer notice")
+                            (context-history! application entries [:linear :summary-tree]))))
+                 (.then (fn [_] (app/command! application :context)))
+                 (.then (fn [inspection]
+                          (check! (= :summary-tree (keyword (:policy inspection)))
+                                  "Read-only context inspection must report the authoritative tree policy")
+                          (swap! (:state application) update :ui assoc :overlay nil)
+                          (app/command! application :configure-context {:settings {:context-policy :linear}})))
+                 (.then (fn [_] (context-history! application entries [:linear :summary-tree :linear]))))))))))
+
+(defn- empty-context-controls! [application]
+  (let [before (count (:sessions @(:state application)))]
+    (-> (app/command! application :configure-context
+                      {:settings {:context-policy :summary-tree :summary-model "gpt-6-luna"}})
+        (.then (fn [_] (app/command! application :context)))
+        (.then (fn [inspection]
+                 (check! (:unsent? inspection) "Empty context inspection must remain local")
+                 (check! (= :summary-tree (:policy inspection)) "Empty composer must support summary-tree selection")
+                 (check! (nil? (get-in @(:state application) [:view :session :id]))
+                         "Context controls must not create an empty saved session")
+                 (check! (= before (count (:sessions @(:state application))))
+                         "Context controls must not add a stored session")
+                 (check! (= "Unsent input" (get-in @(:state application) [:ui :draft]))
+                         "Empty context controls must preserve user input")
+                 ;; Keep subsequent fixture inference linear, retaining the model setting.
+                 (app/command! application :configure-context {:settings {:context-policy :linear}}))))))
 (defn- controller-interleavings! [application]
   (let [a (get-in @(:state application) [:view :session :id])]
     (-> (app/command! application :new-session {:name "Interleaving target"})
@@ -279,6 +475,11 @@
                                                 :model "offline"
                                                 :thinking :high}
                                                b "B configure draft" "Model")))
+                 (.then (fn [_] (app/command! application :switch-session {:id a})))
+                 (.then (fn [_]
+                          (delayed-navigation! application "__arm-configure" :configure-context
+                                               {:settings {:context-policy :linear :summary-model "gpt-6-luna"}}
+                                               b "B context draft" "Context")))
                  (.then (fn [_] (app/command! application :switch-session {:id a})))
                  (.then (fn [_]
                           (delayed-navigation! application "__arm-reload" :reload {}
@@ -360,9 +561,11 @@ process.stdin.on('data', chunk => {
                  (check! (nil? (get-in @(:state fresh) [:view :session :id])) "Reconnect of an empty composer must not create a session")
                  (check! (= "Unsent input" (get-in @(:state fresh) [:ui :draft])) "Reconnect must preserve unsent composer text")
                  (let [before (count (:sessions @(:state fresh)))]
-                   (-> (let [first-send (app/command! fresh :submit {:text "First actual message"})
-                             duplicate (rejects-with! (app/command! fresh :submit {:text "First actual message"}) "submission-pending")]
-                         (js/Promise.all #js [first-send duplicate]))
+                   (-> (empty-context-controls! fresh)
+                       (.then (fn [_]
+                                (let [first-send (app/command! fresh :submit {:text "First actual message"})
+                                      duplicate (rejects-with! (app/command! fresh :submit {:text "First actual message"}) "submission-pending")]
+                                  (js/Promise.all #js [first-send duplicate]))))
                        (.then (fn [_]
                                 (until-state! fresh
                                               #(some (fn [entry] (= :user (keyword (get-in entry [:data :message/role]))))
@@ -372,6 +575,8 @@ process.stdin.on('data', chunk => {
                        (.then (fn [sessions]
                                 (check! (= (inc before) (count sessions)) "First Send must create exactly one session")
                                 (check! (get-in @(:state fresh) [:view :session :id]) "First Send must activate the saved session")
+                                (check! (= "gpt-6-luna" (get-in @(:state fresh) [:view :session :config :settings :summary-model]))
+                                        "First Send must persist unsent context settings normally")
                                 (app/close! fresh)))))))
         (.then (fn [_] (app/start! resumed)))
         (.then (fn [_]
@@ -414,11 +619,20 @@ process.stdin.on('data', chunk => {
                  (check! (not= :error (get-in @(:state contender) [:notice :kind]))
                          "Successful reconnect must remove the stale connection error")))
         (.then (fn [_] (app/command! contender :submit {:text "First message after reconnect"})))
+        (.then (fn [_]
+                 (until-state! contender
+                               #(contains? #{:completed :failed :cancelled :interrupted}
+                                           (get-in % [:view :operation :status]))
+                               "First message must settle before read-only context control checks")))
+        (.then (fn [_] (app/command! contender :refresh)))
+        (.then (fn [_] (context-controls! contender)))
+        (.then (fn [_] (context-interleaving! contender false)))
+        (.then (fn [_] (context-interleaving! contender true)))
         (.then (fn [_] (controller-interleavings! contender)))
         (.then (fn [_] (fresh-start-and-resume! options contender)))
         (.then (fn [_] (graceful-close!)))
         (.then (fn [_]
-                 (println "RPC/controller passed: startup recovery, navigation-owned refresh, delivered queue reconciliation and acknowledged draft ownership.")))
+                 (println "RPC/controller passed: startup recovery, navigation-owned refresh, same-session context reply/event ownership, delivered queue reconciliation and acknowledged draft ownership.")))
         (.finally (fn []
                     (-> (js/Promise.all #js [(app/close! owner) (app/close! contender)])
                         (.then (fn [_] (.rmSync fs temporary #js {:recursive true :force true})))))))))
