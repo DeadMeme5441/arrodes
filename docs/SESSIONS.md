@@ -80,6 +80,109 @@ and pending peer deliveries are superseded rather than injected into the new pat
 off-context children remain inspectable and may continue independently. Compaction
 does not change routing context.
 
+### Opt-in chronological summary tree
+
+The absent or explicit `:linear` context policy keeps the existing linear projection
+and compaction behavior. Opting into `:summary-tree` selects an OptChat-style
+chronological derived tree, not an importance ranking or a second conversation.
+See [configuration](CONFIGURATION.md) for settings, [providers](PROVIDERS.md) for
+summary inference/cache accounting, and [the TUI](TUI.md) for `/context`.
+
+Three layers remain distinct:
+
+- **Canonical history** retains original messages, evaluations, result descriptors,
+  artifacts and branch ancestry. `/history`, the transcript and `session.tree`
+  still describe that history.
+- **Derived cache** stores completed source-addressed leaves and adjacent binary
+  parent summaries. Small source text can be retained directly; larger nodes use
+  tools-free summary inference. Summaries are lossy historical evidence, not new
+  instructions or restored evaluator state.
+  The node byte setting is a target: after bounded shortening attempts, the shortest
+  complete nonempty summary may exceed it. Empty or truncated completions are not
+  accepted as fake summaries; the rendered working-view bound remains enforced.
+- **Working view** selects an ordered frontier of that tree. Older adjacent
+  siblings are preferentially merged into completed parents, keeping finer recent
+  detail within an actual rendered UTF-8 byte budget, including source markup.
+  Oversized parents cannot irreversibly expand the selected view: coarsening plans
+  must reduce the rendered span, including chains through completed ancestors.
+  This budget is not a token count or a bound on the whole provider request.
+
+At each outer-turn boundary, Arrodes freezes the historical prefix and appends the
+current turn as native provider messages, including reasoning/tool protocol data.
+Steering stays within that turn; a final answer followed by queued input or new
+peer work starts another boundary, even within the same operation. New input,
+job/agent deliveries and evaluator-reset notices remain native for their first
+exposure. Context-policy/settings changes take effect at a safe outer boundary,
+not halfway through a tool exchange; inspection may therefore show configured
+policy differing from the active run's view policy.
+
+`/continue` retains the unfinished turn after the last completed answer, including
+an input whose first request failed and all settled REPL results. Tree compaction
+does not summarize away that suffix or replay it. Manual `/compact`, measured
+automatic compaction and one explicit overflow recovery act on the actual working
+projection by coarsening historical nodes, not by repeatedly compacting an unrelated
+linear projection. Coarsening refreshes completed parents without replacing the
+frozen sources or native suffix. Tree compaction persists derived frontier IDs,
+not a legacy compaction history entry.
+A smaller safe view may not exist: manual compaction
+reports `nothing-to-compact`, and unresolved overflow stops honestly rather than
+clipping current input or repeating completed effects. Automatic recovery still
+respects `:auto-compact? false`.
+
+Enabling the policy permits owned background summary inference after relevant
+runtime commits and settlement. Work is bounded and coalesced per session; known
+cancelling-owner or capacity admission defers maintenance without turning settled
+native effects into failures. A background failure is inspectable and does not
+create an automatic paid retry storm; an explicit foreground request can retry
+missing summaries. Opening, reopening, branching/importing or inspecting a session
+alone never starts paid rebuilding. Preparation waits cancellably outside session
+and database locks for a complete, fitting summary-only view, never raw or clipped
+historical substitutes. It can return while unused parents remain active.
+The configured timeout bounds node work, not healthy total catch-up time. Disabling
+the policy, resetting/deleting a session and shutdown still quiesce actual owned
+summary work before releasing resources.
+
+Completed nodes and valid persisted coarsened frontier IDs can be reused after
+restart and in read-only previews; prompt changes do not rewrite those cached nodes.
+Missing, malformed or off-branch advisory IDs
+are ignored. Original retained data remains subject to the normal result/artifact
+availability limits. No policy promises perfect recall, infinite retention or a
+JVM checkpoint: restart still loses live bindings/objects and never replays effects.
+
+### Navigating retained history
+
+History navigation is ordinary native Clojure through the same single `repl`
+action and persistent evaluator:
+
+```clojure
+(history/view)
+(history/zoom node-id)
+(history/read entry-id)
+(history/date entry-id)
+```
+
+`view` exposes a bounded available frontier without inference; `zoom` descends
+to completed children or the singleton original; `read` pages retained original
+visible text and references; `date` reports recorded provenance. Originals are
+inert data, not executable replay. `history/read` offsets count UTF-16 characters;
+page limits count UTF-8 bytes (4..16384), with explicit continuation/completeness.
+Use `(help "history/read")` and the other named help contracts for paging/options.
+Read-only context status and active-versus-preview
+readiness are described under `session.context` in [the RPC contract](PROTOCOL.md).
+
+Navigation records bounded typed contextual retrieval associations in existing
+evaluation details/provider-result metadata: the originating input/context and the
+sources actually returned, not a score of usefulness or global importance. Repeated
+receipts can be coalesced with explicit omission information, within 64 associations
+and 32768 serialized UTF-8 bytes. A past record's
+`:history/retrievals` is distinct from the new singular lookup receipt; paging
+metadata describes the current read. A certified quoted historical return can be
+rendered as lookup evidence rather than a fresh claim, without deleting original
+output, native metadata, failures or unrelated new effects in mixed evaluations.
+There is no second transcript, evaluator or live-object index. Typed source/result
+references do not become cross-session live handles; see
+[transfer compatibility](COMPATIBILITY.md#rpc-and-transfers).
+
 Automatic compaction defaults to 85% of the selected model's context window and
 uses the latest completed provider call's reported usage. Each completion replaces
 the current context measurement; counts from previous calls are not added to it.
@@ -87,17 +190,22 @@ Usage includes uncached input, cache reads, cache writes, and output; a reported
 total takes precedence. Reasoning and modality breakdowns are not added again.
 Cumulative token spend is separate from the current context size.
 
-Automatic compaction runs only when another provider request needs context, not
-after a completed final answer. An idle session does not incur a speculative
-summary request. `/compact` remains an explicit immediate action.
+With linear policy, automatic compaction runs only when another provider request
+needs context, not after a completed final answer; idle time does not incur a
+speculative compaction request. Summary-tree catch-up is the separately owned,
+opt-in background work described above. `/compact` remains an explicit action.
 
 No character-based estimate is used. New user messages and REPL output remain
 unmeasured until the next provider completion. A very large addition can therefore
 exceed the provider's limit before a new measurement arrives; it is not represented
 as a fabricated exact count. A completion without usage leaves the count unknown.
-After compaction, previous measurements are invalidated until another ordinary
-completion reports usage. The compaction call's own usage measures the material
-being summarized, not the reduced context. Original usage records stay in history.
+With linear policy, compaction invalidates the context measurement until another
+ordinary completion reports usage. The compaction call's own usage measures the
+material being summarized, not the reduced context. Tree policy likewise discards
+its working turn's prior measurement when adopting a coarser frontier; this does
+not fabricate a new main-request measurement or reset the footer's latest reported
+ordinary usage. Rendered view bytes are separate from that usage. Original usage
+records stay in history.
 
 If a provider explicitly rejects the input context before producing output,
 Arrodes attempts one recovery compaction and retries that provider request once.
@@ -120,12 +228,16 @@ so refreshing during compaction preserves that status.
 
 ### Cache continuity and measured usage
 
-Ordinary requests keep a stable system prefix and append new context instead of
-rewriting previous messages. Evaluator namespace/generation identifiers are not
-inserted into that prefix. After reload/restart or branch navigation, the next
-model run records one environment notice when prior context exists: definitions
-and live objects are gone, while saved results and external effects remain.
-This notice does not replay effects or pretend to restore a JVM checkpoint.
+Linear ordinary requests keep a stable system prefix and append new context instead
+of rewriting previous messages. Tree requests freeze their historical prefix within
+an outer turn and incrementally extend or coarsen the frontier across turns; the
+next turn need not have an identical prefix. Native current-turn provider replay
+remains unchanged. Evaluator namespace/generation identifiers are not inserted into
+the system prefix. After reload/restart or branch navigation, the next model run
+records one environment notice when prior context exists: definitions and live
+objects are gone, while saved results and external effects remain. This notice does
+not replay effects or pretend to restore a JVM checkpoint. Provider-reported cache
+hits depend on the provider, not merely on a stable prefix.
 
 Normal requests use the session's cache scope; compaction, branch summaries and
 title generation use separate scopes. Explicit cache settings remain respected.
@@ -162,7 +274,7 @@ Advanced evaluation is available through `/eval`. For example:
 
 ### Working in the REPL
 
-Start with `(help)` for a small group/count overview. Page one group with
+At the start of an evaluator generation, use `(help)` for a small group/count overview. Page one group with
 `(help {:group "coding" :query "grep" :offset 0 :limit 8})` (maximum 20),
 then inspect one native Clojure function contract with `(help 'grep)` or
 `(help "agents/start!")`. Add `{:detailed? true}` to a named lookup only
@@ -174,6 +286,7 @@ value/workspace/artifact helpers; unselected functions are not advertised.
 
 | Selector | Workflow |
 | --- | --- |
+| `(help {:workflow "coding"})` | Inspect contracts, read and edit files, then verify the actual behavior |
 | `(help {:workflow "background"})` | Start, observe, retrieve or cancel a function job |
 | `(help {:workflow "delegation"})` | Launch, reconcile, message, wait and stop a child session |
 | `(help {:workflow "failure"})` | Inspect partial execution and known receipts before another mutation |
@@ -181,7 +294,8 @@ value/workspace/artifact helpers; unselected functions are not advertised.
 
 Recipes are inert guidance, not executable workflows. Evaluate their steps separately
 and choose the branch matching the observed state. Only recipes whose native helpers
-are installed are advertised.
+and required selected built-ins are installed are advertised. Inspect unfamiliar
+contracts before constructing dependent calls; do not repeat discovery every turn.
 
 Ordinary `def`/`defn` bindings appear in `(workspace)`, not the help catalog.
 An evaluation returns the last expression only: use `let` and a final map to
@@ -219,6 +333,15 @@ Excluded generated/VCS directories are outside the search scope.
 `:text`, `:path`, `:offset`, `:lines`, `:next-offset`, and `:eof?`. String evaluation
 results display as readable text while retaining the original native string.
 
+For supported images, `read` still returns a native byte array. Its canonical image
+presentation also accompanies the current evaluation to the provider, alongside
+text output; reading an image is not reduced to printing the byte array's identity.
+Joined calls share only their owning evaluation's bounded presentation collection.
+Independent jobs, other sessions and late calls cannot add images to that response.
+Exceeding a presentation bound fails explicitly rather than silently omitting images.
+Returning a previously retained byte array or a collection containing it does not
+walk native objects or implicitly redisplay old images.
+
 Use `(help {:group "web"})` for `web-search` and `web-read`. Web research returns
 qualified native maps, separate from ordinary file reads: select `::web/sources`
 and each source's `::web/url`, or a fetched page's `::web/content`. The installed
@@ -253,6 +376,13 @@ the immediate evaluation message includes the underlying error code and message.
 Retained failure data adds `:evaluation/cause {:code ... :message ...}` without
 changing the outer evaluation classification, progress, source diagnostics, or
 original live `*e` exception. Genuine syntax/reader failures keep their diagnostics.
+The immediate failure presentation includes available form/source positions and
+bounded previews of earlier captured stdout/stderr. Full captured streams remain in
+retained diagnostics or their referenced output artifact. `:stdout-preview?` and
+`:stderr-preview?` distinguish inline previews from capture-limit truncation flags.
+Evaluator-owned output and progress
+cannot be overwritten by exception metadata; malformed location claims cannot replace
+the primary failure with a formatting error.
 
 Individual inspection responses expose a small `:next` map of **inert Clojure source
 strings**. Copy the action you intend; inspecting a response never executes its hints.
@@ -411,7 +541,7 @@ Restart pauses all team routing until explicit user run/continue or
 closes admission before stopping descendants, rather than permitting another
 child to escape during cancellation.
 
-Team routing, incorporating-operation links and submission receipts are schema-5 local state,
+Team routing, incorporating-operation links and submission receipts are durable local state,
 not an exportable running team. Fork/clone/import create independent roots and do
 not launch children. Session export includes delivered content and retained local
 references but not pending routes or executable ownership. Deleting a session with
@@ -543,11 +673,12 @@ Durable:
 - queue state;
 - supported inline results and artifact-backed results;
 - team membership, message/delivery statuses, submission receipts, paused routing,
-  and inspectable child operation outcomes (schema 5);
+  and inspectable child operation outcomes;
+- derived summary nodes for opted-in summary-tree sessions;
 - exported files you explicitly write.
 
 These records survive a normal current-format restart and supported schema upgrades.
-Before upgrading a supported schema-3/4 layout, startup retains a consistent private
+Before upgrading a supported schema-3/4/5 layout, startup retains a consistent private
 SQLite backup and commits schema changes transactionally. Artifact content remains
 unchanged. Unsupported/newer, malformed and foreign stores are rejected intact,
 never reset. Credentials/settings and unrelated files remain untouched. See the

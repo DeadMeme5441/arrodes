@@ -2,12 +2,15 @@
   "Single-owner activation and teardown of live session evaluators and resources."
   (:require [arrodes.capabilities :as capabilities]
             [arrodes.agents :as agents]
+            [arrodes.context-tree :as context-tree]
+            [arrodes.history :as history]
             [arrodes.jobs :as jobs]
             [arrodes.provider :as provider]
             [arrodes.resources :as resources]
             [arrodes.runtime.control :as control]
             [arrodes.store :as store]
             [arrodes.store.command :as command]
+            [arrodes.summaries :as summaries]
             [arrodes.platform :as util]
             [arrodes.value :as value]))
 
@@ -68,6 +71,7 @@
                                             :get-session #(store/session (:store runtime) sid)})
             _ (swap! built assoc :registry registry)
             _ (agents/install! (:agents runtime) registry)
+            _ (history/install! registry)
             activation (resources/activate!
                         manager registry
                         (handle-context runtime sid cwd provider-manager))]
@@ -134,6 +138,12 @@
 
 
 (defn- close-owned-handle! [runtime sid handle]
+  (when-let [manager (:summaries runtime)]
+    (summaries/cancel-session! manager sid)
+    (value/check! (summaries/await-session! manager sid
+                                           (long (or (:close-timeout-ms (:initial-settings runtime)) 10000)))
+                  :summaries-still-running "History summarization has not exited; session resources retained."
+                  {:session-id sid}))
   (let [resource-report (resources/close! (:resources handle))]
     (value/check! (= :closed (:status resource-report)) :cleanup-incomplete
                   "Session resources did not finish shutting down"
@@ -188,10 +198,11 @@
   #{:provider :model :thinking :tools :instructions :settings})
 
 (def ^:private generation-setting-keys
-  #{:temperature :top-p :max-output-tokens :stop :response-format
-    :cache :provider-options :auto-compact? :compaction-threshold
-    :compaction-keep-entries :compaction-max-output-tokens
-    :max-steps :provider-retries :fallback-model? :auto-title? :title-model :title-provider})
+  (into context-tree/setting-keys
+        #{:temperature :top-p :max-output-tokens :stop :response-format
+          :cache :provider-options :auto-compact? :compaction-threshold
+          :compaction-keep-entries :compaction-max-output-tokens
+          :max-steps :provider-retries :fallback-model? :auto-title? :title-model :title-provider}))
 
 (defn cwd-session-defaults [runtime cwd]
   (let [manager (resources/create! {:cwd cwd :home (:home runtime)
@@ -224,6 +235,13 @@
     (swap! (:resetting runtime) conj sid))
   (jobs/block-session! (:jobs runtime) sid)
   (try
+    (when-let [manager (:summaries runtime)]
+      (summaries/cancel-session! manager sid)
+      (value/check! (summaries/await-session! manager sid
+                                             (long (or (:close-timeout-ms (:initial-settings runtime)) 10000)))
+                    :summaries-still-running "History summarization has not exited; evaluator retained."
+                    {:session-id sid}))
+    (swap! (:context-views runtime) dissoc sid)
     (jobs/cancel-session! (:jobs runtime) sid)
     (value/check! (jobs/await-session! (:jobs runtime) sid
                                      (long (or (:close-timeout-ms (:initial-settings runtime)) 10000)))

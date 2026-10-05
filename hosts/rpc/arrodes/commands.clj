@@ -18,11 +18,11 @@
             [clojure.string :as str])
   (:import (java.util.concurrent TimeUnit)))
 
-(def version "0.2.1")
+(def version "0.2.2")
 (def protocol-version 1)
 (def methods
   ["runtime.inspect" "session.list" "session.create" "session.inspect" "session.state"
-   "session.view" "session.entries" "session.tree" "session.configure" "session.name"
+   "session.view" "session.entries" "session.tree" "session.context" "session.configure" "session.name"
    "session.label" "session.rewind" "session.fork" "session.clone" "session.delete"
    "session.run" "session.continue" "session.compact" "session.steer"
    "session.follow-up" "session.cancel" "session.queue" "session.queue.update"
@@ -152,10 +152,13 @@
         (let [lines (remove str/blank? (str/split text #"\n"))
               header (json/read-str (first lines) :key-fn keyword)]
           (value/check! (and (= "session" (:type header)) (= "arrodes-session" (:format header))
-                             (= 1 (:version header)) (= "edn" (:encoding header)))
+                             (contains? #{1 2} (:version header)) (= "edn" (:encoding header)))
                         :invalid-import "Unsupported JSONL session format" {})
           (let [metadata (edn/read-string (:data header))]
             (value/check! (map? metadata) :invalid-import "Session header data must be a map" {})
+            (value/check! (= (select-keys header [:format :version])
+                             (select-keys metadata [:format :version]))
+                          :invalid-import "Session header does not match its envelope" {})
             (assoc metadata :entries
                    (mapv (fn [line]
                            (let [entry (json/read-str line :key-fn keyword)]
@@ -239,6 +242,7 @@
     "session.view" (runtime/session-view rt (sid params))
     "session.entries" {:entries (if (:branch? params) (runtime/active-path rt (sid params)) (runtime/entries rt (sid params)))}
     "session.tree" {:entries (runtime/entries rt (sid params)) :head (:head (runtime/session rt (sid params)))}
+    "session.context" (runtime/context-inspect rt (sid params))
     "session.configure" (runtime/configure! rt (sid params)
                                             (cond-> (select-keys params [:name :metadata :expected-revision])
                                               (:config params) (assoc :config (normalize-config (:config params)))))

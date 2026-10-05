@@ -24,6 +24,10 @@
 (def ^:private max-content-parts 256)
 (def ^:private max-retained-output-characters (* 16 1024 1024))
 (def ^:private max-durable-nodes 100000)
+(def ^:private max-history-associations 64)
+(def ^:private max-history-receipt-bytes (* 32 1024))
+(def ^:private max-presentation-images 16)
+(def ^:private max-presentation-characters (* 12 1024 1024))
 (def ^:private hook-points
   #{:before-invoke :after-invoke :transform-context :transform-request
     :input :before-run :after-run})
@@ -584,11 +588,12 @@
   (let [{:keys [text hard-truncated?]} (content-text content)]
     (if-not (or hard-truncated? (text-truncated? text))
       {:content content :details details}
-      (let [artifact (artifacts/put! (:store registry) (:session-id registry) text
-                                     {:kind :text :name (str "capability-" call-id "-output.txt")})
+      (let [artifact (or (when (:output-truncated? details) (:artifact details))
+                         (artifacts/put! (:store registry) (:session-id registry) text
+                                         {:kind :text :name (str "capability-" call-id "-output.txt")}))
             preview (str (bounded-head text)
                          "\n\n[Output preview truncated. "
-                         (if hard-truncated?
+                         (if (or hard-truncated? (:output-hard-truncated? details))
                            "Retained output prefix"
                            "Full retained output")
                          " is artifact " (:id artifact) ".]")
@@ -632,6 +637,43 @@
                                    item))
                       :else false)))]
        (durable? value initial-depth)))))
+
+(defn- evaluation-failure-details! [registry call-id details]
+  (let [data (:data details)
+        stdout (:stdout data)
+        stderr (:stderr data)
+        captured? (and (string? stdout) (string? stderr))
+        spill? (and captured? (> (+ (count stdout) (count stderr)) max-inline-value-bytes))
+        preview (fn [text] (subs text 0 (min 4096 (count text))))
+        output (when spill? (str "stdout:\n" stdout "\nstderr:\n" stderr))
+        artifact (when spill?
+                   (artifacts/put! (:store registry) (:session-id registry) output
+                                   {:kind :text :name (str "evaluation-" call-id "-output.txt")}))
+        owned-keys [:stdout :stderr :stdout-truncated? :stderr-truncated? :exception
+                    :completed-forms :form-index :phase :line :column :evaluation/cause
+                    :stdout-preview? :stderr-preview?]
+        owned (cond-> (select-keys data owned-keys)
+                spill? (assoc :stdout (preview stdout) :stderr (preview stderr)
+                              :stdout-preview? (> (count stdout) 4096)
+                              :stderr-preview? (> (count stderr) 4096)))
+        metadata (apply dissoc data owned-keys)
+        ;; Keep unrelated JVM values or oversized metadata from erasing owned diagnostics.
+        projected (loop [entries (seq (take 64 metadata))
+                         kept owned
+                         omitted (max 0 (- (count metadata) 64))]
+                    (if-let [[key native] (first entries)]
+                      (let [safe (if (durable-value? native) native
+                                     {:preview (bounded-native-print native) :live-only? true})
+                            candidate (assoc kept key safe)
+                            retain? (and (durable-value? key) (durable-value? candidate))]
+                        (recur (next entries) (if retain? candidate kept)
+                               (if retain? omitted (inc omitted))))
+                      (cond-> kept (pos? omitted) (assoc :exception-data-omitted omitted))))]
+    (cond-> (assoc details :data projected)
+      spill? (assoc :artifact artifact :output-truncated? true
+                    :retained-characters (count output))
+      (and spill? (or (:stdout-truncated? data) (:stderr-truncated? data)))
+      (assoc :output-hard-truncated? true))))
 
 (defn- result-descriptor! [registry call-id value content details error?]
   (let [text (:text (content-text content))
@@ -687,9 +729,16 @@
 
 (defn- retain! [registry call-id name raw]
   (let [details (into {} (map (fn [[key value]]
-                               [key (if (durable-value? value) value
-                                        {:preview (bounded-native-print value)
-                                         :live-only? true})]))
+                               [key (if (contains? #{:history/retrievals :history/quoted-return} key)
+                                      (do
+                                        (value/check! (and (durable-value? value)
+                                                           (or (not= key :history/retrievals) (vector? value)))
+                                                      :invalid-history-receipts
+                                                      "Owned history metadata must remain durable typed data" {})
+                                        value)
+                                      (if (durable-value? value) value
+                                          {:preview (bounded-native-print value)
+                                           :live-only? true}))]))
                       (:details raw))
         bounded (bound-content! registry call-id (:content raw) details)
         complete (assoc raw :id call-id :name name
@@ -708,13 +757,155 @@
              {:value native-value :content (if error (or (ex-message error) "Job failed") "Background job result")
               :error? (boolean error) :details (if error (value/error-map error) {})})))
 
+(defn- history-collector [registry job-id]
+  {:registry registry :job-id job-id
+   :state (atom {:closed? false :retrievals [] :seen #{} :calls 0 :bytes 2
+                 :coalesced-calls 0 :omitted-calls 0 :oversized-calls 0})})
+
+(defn- history-receipt-bytes [receipt]
+  (value/check! (map? receipt) :invalid-history-receipts "History receipt must be a map" {})
+  (when (durable-value? receipt)
+    (utf8-bytes (binding [*print-length* nil *print-level* nil *print-meta* false *print-dup* false]
+                  (pr-str receipt)))))
+
+(defn history-retrieval-page
+  "Bound already-recorded typed associations for native source navigation, using
+  the same 64-association/32768-byte limits as collection. Omitted associations
+  remain explicitly counted; this neither creates receipts nor rewrites history."
+  [receipts]
+  (value/check! (vector? receipts) :invalid-history-receipts "History receipts must be a vector" {})
+  (let [total (count receipts)]
+    (loop [index 0 retained [] bytes 2]
+      (if (or (= index total) (= (count retained) max-history-associations))
+        {:history/retrievals retained
+         :history/retrieval-page {:total-associations total :retained-associations (count retained)
+                                  :omitted-associations (- total (count retained))
+                                  :retained-bytes bytes :max-associations max-history-associations
+                                  :max-bytes max-history-receipt-bytes}}
+        (let [receipt (nth receipts index)
+              size (history-receipt-bytes receipt)
+              next-bytes (when size (+ bytes size (if (seq retained) 1 0)))]
+          (if (and next-bytes (<= next-bytes max-history-receipt-bytes))
+            (recur (inc index) (conj retained receipt) next-bytes)
+            (recur (inc index) retained bytes)))))))
+
+(defn record-history-retrieval!
+  "Collect at most 64 contextual associations and 32768 serialized UTF-8 bytes,
+  not a complete call log. Identical receipts coalesce; excess/oversized receipts
+  are explicitly counted as omitted. Exact identities cover accepted originals
+  plus the latest admissible return (one separately bounded receipt); excess
+  identities are not certified. Joined invocations share this collector."
+  [returned receipt]
+  (let [context *invocation-context*
+        collector (::history-collector context)]
+    (when (and collector
+               (identical? (:registry context) (:registry collector))
+               (= (:job-id context) (:job-id collector)))
+      (let [known? (contains? (:seen @(:state collector)) receipt)
+            bytes (when-not known? (history-receipt-bytes receipt))
+            admissible? (or known? (and bytes (<= (+ 2 bytes) max-history-receipt-bytes)))
+            observed (when admissible? {:value returned :receipt receipt})]
+        (swap! (:state collector)
+               (fn [state]
+                 (if (:closed? state) state
+                     (let [state (update state :calls inc)
+                           state (cond-> state admissible? (assoc :last-return observed))
+                           retained-bytes (when bytes
+                                            (+ (:bytes state) bytes
+                                               (if (seq (:retrievals state)) 1 0)))]
+                       (cond
+                         (not admissible?)
+                         (-> state (update :omitted-calls inc) (update :oversized-calls inc))
+
+                         (contains? (:seen state) receipt)
+                         (update state :coalesced-calls inc)
+
+                         (or (= max-history-associations (count (:retrievals state)))
+                             (> retained-bytes max-history-receipt-bytes))
+                         (update state :omitted-calls inc)
+
+                         :else
+                         (-> state
+                             (update :retrievals conj observed)
+                             (update :seen conj receipt)
+                             (assoc :bytes retained-bytes)))))))))
+    returned))
+
+(defn- history-details [raw collector]
+  (let [settled (swap! (:state collector) assoc :closed? true)
+        retrievals (:retrievals settled)
+        quoted (some #(when (and % (identical? (:value raw) (:value %))) (:receipt %))
+                     (cons (:last-return settled) retrievals))
+        incomplete? (pos? (+ (:coalesced-calls settled) (:omitted-calls settled)))]
+    (reset! (:state collector) {:closed? true})
+    (cond-> raw
+      (pos? (:calls settled))
+      (update :details assoc
+              :history/retrievals (mapv :receipt retrievals)
+              :history/retrieval-summary
+              {:calls (:calls settled) :retained-associations (count retrievals)
+               :coalesced-calls (:coalesced-calls settled) :omitted-calls (:omitted-calls settled)
+               :oversized-calls (:oversized-calls settled) :all-calls-recorded? (not incomplete?)
+               :retained-bytes (:bytes settled) :max-associations max-history-associations
+               :max-bytes max-history-receipt-bytes
+               :return-identities-complete? (not incomplete?)})
+      (and quoted (not (:error? raw)) (string? (get-in raw [:details :printed])))
+      (assoc-in [:details :history/quoted-return]
+                {:history/retrieval quoted}))))
+
+(defn- presentation-collector [registry job-id]
+  {:registry registry :job-id job-id
+   :state (atom {:closed? false :parts [] :images 0 :characters 0})})
+
+(defn- record-presentation! [registry context result]
+  (let [collector (::presentation-collector context)
+        content (:content result)]
+    (when (and collector (identical? registry (:registry collector))
+               (= (:job-id context) (:job-id collector))
+               (vector? content) (some #(= :image (:part/type %)) content))
+      ;; These are explicit capability effects, not a walk/index of native return values.
+      ;; Futures may join this invocation; jobs and later evaluations cannot inherit it.
+      (swap! (:state collector)
+             (fn [{:keys [closed? parts images characters] :as state}]
+               (if closed?
+                 state
+                 (let [next-images (+ images (count (filter #(= :image (:part/type %)) content)))
+                       next-characters (+ characters
+                                          (reduce + 0 (for [part content item (vals part)
+                                                            :when (string? item)] (count item))))]
+                   (value/check! (and (<= next-images max-presentation-images)
+                                      (<= next-characters max-presentation-characters)
+                                      (< (+ (count parts) (count content)) max-content-parts))
+                                 :presentation-too-large
+                                 "Image presentation exceeds this evaluation's inline bound; these images were not added to provider input"
+                                 {:images next-images :max-images max-presentation-images
+                                  :characters next-characters :max-characters max-presentation-characters
+                                  :result (:result result)})
+                   (assoc state :parts (into parts content)
+                          :images next-images :characters next-characters))))))))
+
+(defn- presentation-result [raw collector]
+  (let [settled (swap! (:state collector) assoc :closed? true)
+        parts (:parts settled)]
+    (reset! (:state collector) {:closed? true})
+    (if (seq parts)
+      ;; Keep the certified final return last, after independent presentation.
+      (update raw :content
+              #(if (string? %)
+                 (conj parts {:part/type :text :text (str "\n" %)})
+                 (into parts %)))
+      raw)))
+
 (defn evaluate!
   "Evaluate source as a session operation, not as a registered capability.
   Evaluation owns a separate lock: functions called inside it retain their own
   effect locks, so joined Clojure futures can compose independent calls."
   [registry source options]
   (ensure-open! registry)
-  (let [context (invocation-context registry (or (:id options) (util/id)) options)
+  (let [collector (history-collector registry (get-in options [:context :job-id]))
+        presentation (presentation-collector registry (get-in options [:context :job-id]))
+        context (assoc (invocation-context registry (or (:id options) (util/id)) options)
+                       ::history-collector collector ::presentation-collector presentation)
         call-id (:call-id context)]
     (publish! registry context :evaluation/started
               {:source (if (string? source) source (bounded-native-print source))})
@@ -725,16 +916,25 @@
                      (repl/evaluate! (:namespace registry) (:repl-history registry)
                                      (fn [] *invocation-context*) source)))
                 (catch Throwable error
-                  {:value nil :error? true
-                   :content (or (ex-message error) (.getName (class error)))
-                   :details (value/error-map error)}))
+                  (let [details (evaluation-failure-details! registry call-id (value/error-map error))
+                        artifact (:artifact details)]
+                    {:value nil :error? true
+                     :content (str (or (ex-message error) (.getName (class error)))
+                                   (when artifact
+                                     (str "\n["
+                                          (if (:output-hard-truncated? details)
+                                            "Captured output prefix" "Full captured output")
+                                          " is artifact " (:id artifact) ".]")))
+                     :details details})))
           _ (when (instance? AutoCloseable (:value raw))
               (swap! (:resources registry)
                      (fn [resources]
                        (if (some #(identical? (:value raw) (:value %)) resources)
                          resources
                          (conj resources {:owner "arrodes.repl" :value (:value raw)})))))
-          result (retain! registry call-id nil (update raw :error? boolean))]
+          result (retain! registry call-id nil
+                          (presentation-result
+                           (history-details (update raw :error? boolean) collector) presentation))]
       (publish! registry context :evaluation/completed
                 (select-keys result [:content :details :result :error?]))
       result)))
@@ -748,7 +948,14 @@
   (let [call-id (:id call)
         initial-name (:name call)
         phase (volatile! :arguments)
-        context (invocation-context registry call-id options)]
+        initial-context (invocation-context registry call-id options)
+        inherited (::history-collector initial-context)
+        owned? (not (and inherited (identical? registry (:registry inherited))
+                         (= (:job-id initial-context) (:job-id inherited))))
+        collector (if owned?
+                    (history-collector registry (:job-id initial-context))
+                    inherited)
+        context (assoc initial-context ::history-collector collector)]
     (value/check! (and (string? call-id) (not (str/blank? call-id))) :invalid-tool-call
                  "Capability call id must be a non-empty string" {})
     (value/check! (and (string? initial-name) (not (str/blank? initial-name))) :invalid-tool-call
@@ -795,7 +1002,8 @@
                                "after-invoke hooks must return a normalized result map" {:name name})
                   (normalized-result name hooked))))
             (catch Throwable error (failure-result initial-name error @phase)))
-          result (retain! registry call-id initial-name raw)]
+          result (retain! registry call-id initial-name
+                          (if owned? (history-details raw collector) raw))]
       (publish! registry context :capability/completed
                 (select-keys result [:name :content :details :result :error?]))
       result)))
@@ -817,6 +1025,8 @@
                                          (assoc :parent-call-id (:call-id context))))))))
   ([registry name arguments options]
    (let [result (invoke! registry {:id (util/id) :name name :arguments arguments} options)]
+     (when-not (:error? result)
+       (record-presentation! registry (or (:context options) *invocation-context*) result))
      (if (:error? result)
        (throw (ex-info (:content result)
                        (merge {:error/code (or (get-in result [:details :code]) "capability-failed")

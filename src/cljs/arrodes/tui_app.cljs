@@ -1,6 +1,7 @@
 (ns arrodes.tui-app
   "Controller composition root: connection lifecycle, setup and action dispatch."
   (:require [clojure.string :as str]
+            [arrodes.context-tree :as context-tree]
             [arrodes.tui-model :as model]
             [arrodes.tui-rpc :as rpc]
             [arrodes.tui.controller.attachments :as attachments]
@@ -33,7 +34,8 @@
       (refresh-project! app))
     (swap! (:state app)
            (fn [state]
-             (let [state (if (= :session/named (:type event))
+             (let [state (sessions/observe-configuration state event)
+                   state (if (= :session/named (:type event))
                            (update state :sessions
                                    #(mapv (fn [session]
                                             (if (= (:session-id event) (:id session))
@@ -327,6 +329,7 @@
           :history nil
           :history-by-session {}
           :widgets-by-session {}
+          :context-configurations {}
           :navigation-generation 0
           :ui {:draft "" :drafts {} :session-ui {} :attachments []
                :overlay nil :selected nil :inspect-tab :summary
@@ -375,7 +378,7 @@
         oid (client/operation-id-from state)
         navigation (:navigation-generation state)
         context {:session-id sid :navigation navigation}]
-    (when (and (:first-submit? state) (contains? #{:new-session :switch-session :select-model} action))
+    (when (and (:first-submit? state) (contains? #{:new-session :switch-session :select-model :configure-context} action))
       (throw (client/error "submission-pending" "Wait for the first message to finish submitting." {})))
     (case action
       :submit (cond (:first-submit? state) (client/rejected (client/error "submission-pending" "The first message is being submitted." {}))
@@ -417,6 +420,78 @@
       (-> (client/call! app "job.output" (merge {:session-id sid :job-id (:id data) :limit 12000}
                                                (select-keys data [:offset :limit :after :tail?]))) (.then client/decode))
       :refresh (if sid (sessions/hydrate-session! app sid false) (client/resolved (:view state)))
+      :context
+      (if sid
+        (-> (client/call! app "session.context" {:session-id sid}) (.then client/decode))
+        (let [settings (context-tree/settings (get-in state [:view :session :config]))]
+          (client/resolved {:policy (:context-policy settings) :settings settings
+                            :summary {:status :idle :node-count 0}
+                            :view {:ready? true :fits? true :bytes 0
+                                   :budget (:summary-view-bytes settings) :nodes []}
+                            :unsent? true})))
+
+      :configure-context
+      (let [updates (:settings data)
+            _ (when-not (and (map? updates) (every? context-tree/setting-keys (keys updates)))
+                (throw (client/error "invalid-config" "Context settings must contain only summary-tree settings." {})))
+            token (str (random-uuid))
+            configured-event (get-in state [:context-configurations sid :event])
+            overlay-token (get-in state [:ui :overlay :token])
+            owns? (fn [current session]
+                    (and (= token (get-in current [:context-configurations sid :token]))
+                         (let [event (get-in current [:context-configurations sid :event])]
+                           (or (= configured-event event)
+                               (and session (= (:config session) (get-in event [:data :config])))))
+                         (or (nil? session)
+                             (>= (or (:revision session) 0)
+                                 (max (or (some #(when (= sid (:id %)) (:revision %)) (:sessions current)) 0)
+                                      (if (= sid (client/session-id-from current))
+                                        (or (get-in current [:view :session :revision]) 0) 0))))))
+            owns-notice? (fn [current]
+                           (and (= sid (client/session-id-from current))
+                                (= navigation (:navigation-generation current))
+                                (= overlay-token (get-in current [:ui :overlay :token]))
+                                (= (:notice state) (:notice current))))
+            config (update (get-in state [:view :session :config]) :settings merge updates)
+            normalized (try
+                         (select-keys (context-tree/settings config) (keys updates))
+                         (catch :default error
+                           (throw (client/error (or (:error/code (ex-data error)) "invalid-config")
+                                                (ex-message error) (ex-data error)))))]
+        (swap! (:state app) assoc-in [:context-configurations sid :token] token)
+        (-> (if sid
+              (client/mutation! app "session.configure"
+                                {:session-id sid :config {:settings normalized}})
+              (do (swap! (:state app) update-in [:view :session :config :settings] merge normalized)
+                  (client/resolved (get-in @(:state app) [:view :session]))))
+            (.then
+             (fn [wire-session]
+               (let [session (client/decode wire-session)
+                     applied? (volatile! false)]
+                 (swap! (:state app)
+                        (fn [current]
+                          (if (owns? current session)
+                            (do
+                              (vreset! applied? true)
+                              (cond-> current
+                                sid (update :sessions sessions/replace-session session)
+                                (and sid (= sid (client/session-id-from current))
+                                     (= navigation (:navigation-generation current)))
+                                (assoc-in [:view :session] session)
+                                (owns-notice? current)
+                                (assoc :notice
+                                       {:kind :info
+                                        :message (if sid
+                                                   "Context settings saved for the next turn; current work and history are unchanged."
+                                                   "Context settings saved for your first message; no session created.")})))
+                            current)))
+                 (when @applied? session))))
+            (.catch
+             (fn [error]
+               (if (and (owns? @(:state app) nil) (owns-notice? @(:state app)))
+                 (throw error)
+                 (throw (ex-info (or (ex-message error) (.-message error) (str error))
+                                 (assoc (ex-data error) :superseded-context-save? true))))))))
       :sessions (sessions/load-sessions! app)
       :switch-session (-> (sessions/switch-session! app (:id data))
                           (.then (fn [snapshot]
@@ -474,6 +549,7 @@
                                                         (not= target (client/value-field session :id))) %))
                                     (update :history-by-session dissoc target)
                                     (update :widgets-by-session dissoc target)
+                                    (update :context-configurations dissoc target)
                                     (update-in [:ui :drafts] dissoc target)
                                     (update-in [:ui :session-ui] dissoc target))
                           (= target sid) (assoc-in [:view :session] nil)
@@ -666,13 +742,14 @@
            promise (if connection (.then connection execute) (execute nil))]
        (.catch promise
                (fn [command-error]
-                 (swap! (:state app) assoc :notice
-                        {:kind :error
-                         :message (or (ex-message command-error)
-                                      (.-message command-error)
-                                      (str command-error))
-                         :unknown-outcome? (boolean (:unknown-outcome? (ex-data command-error)))
-                         :data (ex-data command-error)})
+                 (when-not (:superseded-context-save? (ex-data command-error))
+                   (swap! (:state app) assoc :notice
+                          {:kind :error
+                           :message (or (ex-message command-error)
+                                        (.-message command-error)
+                                        (str command-error))
+                           :unknown-outcome? (boolean (:unknown-outcome? (ex-data command-error)))
+                           :data (ex-data command-error)}))
                  (throw command-error))))
      (catch :default command-error
        (swap! (:state app) assoc :notice

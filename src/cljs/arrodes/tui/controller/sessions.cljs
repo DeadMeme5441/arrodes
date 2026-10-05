@@ -54,6 +54,28 @@
       (mapv #(if (= sid (client/value-field % :id)) session %) sessions)
       (conj (vec sessions) session))))
 
+(defn observe-configuration
+  "Track configured-event order separately from snapshot revisions, and keep the
+  session list's policy in sync even when only the event has arrived."
+  [state event]
+  (let [sid (:session-id event)
+        previous (get-in state [:context-configurations sid :event])]
+    (if (and (= :session/configured (:type event))
+             (get-in event [:data :config])
+             (or (not (number? (:seq event)))
+                 (> (:seq event)
+                    (max (or (:seq previous) 0)
+                         (if (= sid (client/session-id-from state))
+                           (or (get-in state [:view :cursor]) 0) 0)))))
+      (-> state
+          (assoc-in [:context-configurations sid :event] event)
+          (update :sessions
+                  #(mapv (fn [session]
+                           (if (= sid (:id session))
+                             (assoc session :config (get-in event [:data :config]))
+                             session)) %)))
+      state)))
+
 
 (defn replay-pages! [app sid after events through]
   (if (>= after through)

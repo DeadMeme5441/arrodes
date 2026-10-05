@@ -18,6 +18,7 @@ results. The UI combines a consistent snapshot, durable events and transient out
 | Session handle | Evaluator namespace, function registry, provider manager and resource activation |
 | Job service | Session-owned function workers, independent cancellation/output, child *function-job* cleanup, durable outcomes |
 | Operation | Cancellation, worker lifetime, usage and queued-input delivery boundaries |
+| Summary service | Bounded/coalesced session summary workers, completed derived nodes, separate inference usage and cancellable preparation |
 | Registry | Evaluation lock, native results, function wrappers and owned closeable resources |
 | Resource activation | Attributed extension contributions, cleanup and lazy MCP clients |
 | TUI controller | RPC process/connection, navigation generation, drafts and view reconciliation |
@@ -57,7 +58,9 @@ Internal transfer envelopes use qualified keywords and `clojure.spec.alpha`.
 starting a transaction; unknown keys are errors. Prepared model runs use fields
 such as `::preparation/config` and are validated at model entry.
 Specs check these envelopes, not arbitrary native evaluator values. Nested durable
-records, public return maps, SQLite schema 5, RPC 1 and export format 1 are unchanged.
+records and native evaluator values keep their contracts; current persistence is
+SQLite schema 6, RPC framing remains 1, and ordinary transfers remain export 1
+(typed retrieval transfers use export 2). See [compatibility](COMPATIBILITY.md).
 
 `web.clj` registers native research functions through resource activation.
 `web/hosted` owns search-only native provider tools and source normalization;
@@ -66,6 +69,44 @@ bounded inert HTTP extraction, and `web/data` owns qualified result specs.
 Hosted work joins before returning, while the existing MCP pool owns explicit
 remote research calls. The existing result/artifact layer retains available
 research values; no new search cache, agent loop or persistence format is added.
+
+### Context projection
+
+Absent or explicit linear policy retains the ordinary projection. Opt-in
+summary-tree policy separates canonical history, session-owned derived cache and
+the current working request. `context_tree.cljc` owns pure chronological binary
+nodes, source rendering and deterministic recency-shaped frontier fitting;
+`store/context_tree.clj` persists immutable completed nodes. `summaries.clj` owns
+bounded tools-free inference and catch-up, outside database/session locks, with
+separate cache scope and measured spend. Two bounded session coordinators share
+eight admitted node jobs; chronological leaves and eligible merges overlap.
+Per-node deadlines do not impose a whole-backlog deadline on foreground settling.
+The service neither replaces the evaluator nor adds provider actions.
+
+`runtime/model` freezes the historical view at an outer-turn boundary and appends
+native current-turn messages through the existing provider/REPL loop. Steering
+keeps that prefix; final-answer/follow-up boundaries can select another view.
+Unfinished input and settled tool exchanges stay native, including on `/continue`;
+tree compaction refreshes completed parents and only adopts a genuinely smaller
+safe historical projection. Foreground view readiness does not require unused
+parents to finish, but teardown retains ownership until all started work exits.
+Its adopted frontier IDs persist as derived session metadata, not a linear
+compaction history entry. Working-view bytes and latest reported main usage remain
+distinct; completed-node accounting is durable, while summary failure/unpersisted
+attempt-spend reports are runtime diagnostics.
+Irreducible context is an explicit failure, never truncation or effect replay.
+`history.clj` installs ordinary `history/view`, `zoom`, `read` and `date` functions.
+They navigate retained evidence and collect bounded contextual lookup associations
+in existing invocation/evaluation records, not an importance index or second log.
+
+Inspection and open/reopen never start summary inference. Explicitly enabled runtime
+work may schedule catch-up; cancelling/capacity admission defers maintenance, and
+failed background work does not autonomously retry indefinitely. Lifecycle changes
+wait for actual worker exit before closing shared provider/store resources. Valid
+persisted nodes/frontiers can serve later requests and previews without rebuilding.
+The original transcript, native result IDs/artifacts, jobs and session-backed child
+ownership/routing remain unchanged; a root-only policy is not silently inherited
+by children. See [sessions](SESSIONS.md#opt-in-chronological-summary-tree).
 
 ## TUI modules
 
@@ -89,8 +130,8 @@ honestly distinguish inline, artifact-backed, live-only and unavailable values.
 Streaming text/progress is transient; it cannot become a competing durable history.
 
 Startup takes exclusive database/artifact ownership and validates before mutation.
-Supported schema-3/4 stores receive a consistent retained SQLite backup and a
-transactional upgrade to schema 5. Current stores reopen directly. Unsupported,
+Supported schema-3/4/5 stores receive a consistent retained SQLite backup and a
+transactional upgrade to schema 6. Current stores reopen directly. Unsupported,
 newer, foreign, malformed or unsafe stores fail intact; legacy reset markers never
 resume deletion. Recovery does not replay effects or change credentials/settings.
 See the [format contract](COMPATIBILITY.md) for supported layouts and recovery.

@@ -650,13 +650,14 @@ children, pending human prompts, unknown mutation outcomes, reconnect and cancel
 
 ### Format cutover
 
-Session routing, submissions and incorporating-operation links require **SQLite schema 5**.
+Session routing, submissions and incorporating-operation links were introduced in **SQLite schema 5**.
 The original destructive cutover described by this design has been replaced by
-the [preservation-first format contract](COMPATIBILITY.md). Supported schema-3/4
-layouts receive a consistent retained backup and transactional upgrade; unsupported,
+the [preservation-first format contract](COMPATIBILITY.md). Supported schema-3/4/5
+layouts receive a consistent retained backup and transactional upgrade to schema 6; unsupported,
 newer, malformed and foreign stores fail intact. Artifact ownership and exclusive
 locks remain required; interrupted legacy reset markers no longer resume deletion.
-RPC JSONL framing remains protocol 1 and session-only export format remains 1.
+RPC JSONL framing remains protocol 1. Ordinary session exports remain format 1;
+typed history-retrieval references require format 2.
 Export copies delivered content under local retention ownership and severs
 executable team routes; it is not a recursive executable team transfer.
 

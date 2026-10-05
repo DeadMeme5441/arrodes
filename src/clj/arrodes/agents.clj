@@ -5,6 +5,7 @@
             [clojure.string :as str]
             [arrodes.artifacts :as artifacts]
             [arrodes.capabilities :as capabilities]
+            [arrodes.context-tree :as context-tree]
             [arrodes.platform :as util]
             [arrodes.run :as run]
             [arrodes.store :as store]
@@ -194,7 +195,9 @@
           settings (:initial-settings (runtime manager))
           oid (util/id)
           submission (or (:submission-id opts) (util/id))
-          config (run/effective-config source (:config opts))
+          inherited (update-in source [:config :settings]
+                               #(apply dissoc (or % {}) context-tree/setting-keys))
+          config (run/effective-config inherited (:config opts))
           prepared (merge opts
                           {:id (util/id) :operation-id oid :submission-id submission
                            :name (or (:name opts) (str "Agent-" (subs submission 0 8)))

@@ -64,7 +64,7 @@ If you deliberately need another store, pass a distinct `--data-dir PATH`. This 
 
 ### Incompatible store format or unsupported home layout
 
-Schema 5 is current. Supported schema-3/4 layouts upgrade transactionally after a
+Schema 6 is current. Supported schema-3/4/5 layouts upgrade transactionally after a
 private, WAL-inclusive backup beside the database (`.schemaVERSION-UUID.backup`).
 Unsupported/newer, malformed or foreign stores are rejected without deletion.
 Use a compatible build or restore a known-good backup explicitly while all runtimes
@@ -109,6 +109,11 @@ Use `/reload` to reset the evaluator and reload the resource set, or start a new
 MCP connections are lazy: they open when the `mcp` function first uses a configured server. Check the absolute stdio command or HTTP URL, environment references, and timeout. Arrodes is an MCP client, not an MCP server. Use `(mcp {:action "status"})` or reconnect that server through the `mcp` function.
 
 If MCP cleanup is incomplete, retry reload or close. Arrodes may retain store ownership until owned resources have actually stopped.
+
+POSIX stdio servers own a process group. On macOS, signaling a group containing only
+zombies can report `EPERM`; cleanup checks for whole-group disappearance before
+succeeding. A live or inaccessible group, or an unexpected probe error, remains a
+cleanup failure. Leader exit alone does not prove that descendants have stopped.
 
 ## Session recovery
 

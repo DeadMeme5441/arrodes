@@ -60,22 +60,89 @@ Partial response metadata remains available on stream failure. A normal provider
 output-limit response is different: runtime records the partial assistant/usage,
 then stops before executing its tool calls. It never retries those effects.
 
+## Summary model work
+
+Summary-tree context is explicitly enabled through [`/context`](TUI.md#context-policy-and-inspection)
+or [context settings](CONFIGURATION.md#summary-tree-context-opt-in). Its tool-free
+summarizer uses the exact `:summary-model` (default `gpt-6-luna`) and
+`:summary-provider` (default the session provider), with no requested reasoning.
+It does not switch the main model. For example, `codex-backend/gpt-6.1-sol` may be
+the main pair while `codex-backend/gpt-6-luna` summarizes history. Authentication
+and account/model entitlement use the usual provider manager and auth store;
+missing auth/model/provider fails honestly instead of selecting a replacement.
+
+Small source/child text that fits the node target can form a derived node without a
+model call. Otherwise the service makes bounded compression attempts, keeps complete
+nonempty results only, and may accept the shortest complete result above the target
+after exhausting those attempts. This does not relax the rendered-view byte bound.
+Work has bounded admission: two session coordinators plus 32 waiting sessions,
+with at most eight admitted node jobs globally. A session coalesces background
+snapshots. Leaves progress chronologically; eligible parent merges can overlap
+later leaves rather than blocking their ancestor chain. Unresolved matching
+foreground requests may share readiness work; settled promises are not reused.
+
+Readiness is separate from worker exit. A complete, fitting frozen view can serve
+the main model while unused parents continue building. Node work has its own
+deadline; default foreground settling is cancellable without a whole-backlog
+deadline, while explicit caller wait bounds remain supported. Background capacity
+or cancelling-owner deferral does not turn settled native effects into failures.
+Failures are node-specific and inspectable, not an automatic paid retry storm.
+Explicit foreground demand can retry needed nodes. Opening or inspecting a session
+never starts inference; closing/resetting still waits for actual owned work to exit.
+
+The compactor receives the current incremental summarized view through the start
+of a leaf, or through the end of a parent, as bare text without added tree-address
+markup. It receives the whole selected original or both child summaries separately
+from that contextual prefix. A task-independent, explicitly illustrative byte-scale
+example and measured UTF-8-safe shortening feedback guide the target; cut feedback
+is never stored as a summary. User words, work reports, assistant requests and
+observed outcomes retain distinct attribution. Summary prose remains lossy evidence;
+retrieve originals before relying on ambiguous details.
+
+For a tree-policy turn, the historical summary frontier and developer/tool prefix
+are frozen while current user input, native assistant/tool messages and their
+provider replay metadata append normally. Steering stays in that turn; a final
+answer followed by new input starts a new outer-turn projection. Safe compaction
+may change the projection, but neither retrieval nor a retry executes old effects.
+Opaque provider reasoning/replay remains in canonical native records, not in
+generated memory summaries. There is still one persistent evaluator and one
+provider-visible `repl` action; [`history/*`](SESSIONS.md) are ordinary functions,
+not automatic importance ranking or another tool protocol.
+
+`session.context` and `/context` expose summary accounting separately from ordinary
+main-call usage: stored node/leaf/byte counts, only reported numeric usage/cost
+fields, and counts of nodes with measured usage/cost. Failure status and separately
+reported spend from attempts not persisted as completed nodes are runtime diagnostics,
+not durable completed-node accounting. Unknown counters/prices are not zero; derived
+bytes are not token counts. `/usage` and the footer retain the latest reported
+ordinary main-request usage, not projected view bytes or a combined summary context
+window. Summary cost is reported separately, not inferred from main usage.
+
+
 ## Cache behavior
 
 Arrodes enables provider-native prompt caching by default with a stable per-session
 scope. Caller cache controls (including disabling caching) remain honored.
-Compaction, branch summaries and title requests have separate scopes; no local
-prompt-response memoization or stale tool-result cache is introduced. System
-instructions stay stable across evaluator replacement; an append-only reset notice
-explains lost live state without rewriting earlier messages. Automatic compaction
-waits until another request needs context instead of spending a model call after
-a completed final answer.
+Compaction, branch summaries and title requests have separate scopes; summary-tree
+compression uses `SESSION_ID:summary-tree`. Both main and summary requests honor
+caller cache controls, including disabling caching. No local prompt-response
+memoization or stale tool-result cache is introduced. System instructions stay
+stable across evaluator replacement; an append-only reset notice
+explains lost live state without rewriting earlier messages. Linear automatic
+compaction waits until another request needs context instead of spending a model
+call after a completed final answer; opt-in tree catch-up is separately owned
+background work.
 
 Provider usage and cache metadata remain canonical and durable. `/usage` distinguishes
 reported cache reads/writes from uncached input and output, and known active-path
 estimated cost from unpriced requests. Absent measurements are unknown, not cache
 misses or zero spend. Offline wire fixtures prove request/prefix and accounting
 behavior; actual cache effectiveness still depends on the provider's reported usage.
+
+A tree turn's stable historical prefix supports provider-native prefix reuse; it
+does not guarantee a cache hit or a particular savings. New outer turns, branch
+changes and compaction may alter that prefix. Summary cache scope is independent
+of the main session scope, and its reported usage is not added to main-call context.
 
 ## Web research
 

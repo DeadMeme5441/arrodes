@@ -182,7 +182,7 @@
           (finally (runtime/close! reopened)))))))
 
 (deftest unsupported-stores-preserve-history-settings-and-artifacts
-  (doseq [version [0 1 2 6]]
+  (doseq [version [0 1 2 7]]
     (let [directory (session-fixtures/temp-directory)
           path (str directory "/sessions.sqlite")
           artifact-dir (str path ".artifacts")
