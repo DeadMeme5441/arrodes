@@ -125,48 +125,109 @@
              (:id (provider/model manager :replaceable "configured-new"))))
       (is (not (contains? @(:last-refresh manager) :replaceable))))))
 
-(deftest anthropic-alias-does-not-use-or-refresh-legacy-subscription-oauth
+(defn- anthropic-stream [stop?]
+  (apply str
+         (map #(str "data: " (json/write-str %) "\n\n")
+              (cond-> [{:type "message_start" :message {:id "fixture" :model "test-model"
+                                                          :usage {:input_tokens 10}}}
+                       {:type "content_block_start" :index 0
+                        :content_block {:type "tool_use" :id "call-1" :name "_repl" :input {}}}
+                       {:type "content_block_delta" :index 0
+                        :delta {:type "input_json_delta" :partial_json "{\"source\":\"(+ 1 2)\"}"}}
+                       {:type "content_block_stop" :index 0}
+                       {:type "message_delta" :delta {:stop_reason "tool_use"}
+                        :usage {:output_tokens 5}}]
+                stop? (conj {:type "message_stop"})))))
+
+(deftest anthropic-oauth-streams-through-alias-without-leaking-api-key
   (with-manager
     (fn [manager]
-      (let [legacy {:type :oauth
-                    :access-token "sk-ant-oat01-legacy"
-                    :refresh-token "owner-refresh-token"
-                    :expires-at Long/MAX_VALUE
-                    :source :stored-oauth}
-            calls (atom 0)]
-        (auth/put-credential! (:auth manager) :anthropic legacy)
-        (provider/register! manager :claude-alias
-                            {:type :profile-alias :provider :anthropic})
+      (let [captured (atom nil) events (atom []) closed? (atom false)
+            credential {:type :oauth :access-token "opaque-oauth-token"
+                        :refresh-token "owner-refresh-token"
+                        :expires-at Long/MAX_VALUE :source :stored-oauth}]
+        (auth/put-credential! (:auth manager) :anthropic credential)
+        (provider/register! manager :claude-alias {:type :profile-alias :provider :anthropic})
         (with-redefs [sdk/list-models (fn [_] [{:model/id "test-model"
-                                                :model/capabilities #{:chat :streaming :tools}}])
-                      auth/request! (fn [& _] (swap! calls inc))
-                      sdk/complete (fn [& _] (swap! calls inc))]
-          (let [completion-error
-                (try
-                  (provider/complete! manager request {:provider :claude-alias})
-                  nil
-                  (catch clojure.lang.ExceptionInfo e e))
-                refresh-error
-                (try
-                  (provider/refresh-auth! manager :claude-alias)
-                  nil
-                  (catch clojure.lang.ExceptionInfo e e))
-                login-errors
-                (mapv (fn [options]
-                        (try
-                          (provider/login! manager :claude-alias options)
-                          nil
-                          (catch clojure.lang.ExceptionInfo e e)))
-                      [{:type :oauth}
-                       {:type :api-key :api-key "sk-ant-oat01-pasted"}])]
-            (is (= "auth"
-                   (:error/code (ex-data completion-error))))
-            (is (= "unsupported-oauth"
-                   (:error/code (ex-data refresh-error))))
-            (is (= ["unsupported-oauth" "unsupported-oauth"]
-                   (mapv #(-> % ex-data :error/code) login-errors)))))
-        (is (zero? @calls))
-        (is (= legacy (auth/credential (:auth manager) :anthropic)))))))
+                                              :model/capabilities #{:chat :streaming :tools}}])
+                      sdk-http/sse-response
+                      (fn [req]
+                        (reset! captured req)
+                        {:status 200 :headers {}
+                         :body (proxy [ByteArrayInputStream]
+                                      [(.getBytes (anthropic-stream true) StandardCharsets/UTF_8)]
+                                 (close [] (reset! closed? true) (proxy-super close)))})]
+          (let [response (provider/complete! manager
+                                             (assoc request :request/tools
+                                                    [{:type :function :function {:name "repl" :description "Evaluate"
+                                                                                :parameters {:type "object"}}}])
+                                             {:provider :claude-alias :on-event #(swap! events conj %)})]
+            (is (= :claude-alias (:response/provider response)))
+            (is (= "repl" (-> response :response/tool-calls first :tool-call/name)))
+            (is (= :tool-calls (:response/finish-reason response)))
+            (is (= "Bearer opaque-oauth-token" (get-in @captured [:headers "authorization"])))
+            (is (not-any? #(= "x-api-key" (clojure.string/lower-case (name %)))
+                          (keys (:headers @captured))))
+            (is (= "_repl" (get-in @captured [:body :tools 0 :name])))
+            (is @closed?)
+            (is (some #(= "repl" (:tool-call/name %)) @events))))
+        (is (= credential (auth/credential (:auth manager) :anthropic)))
+        (is (nil? (auth/credential (:auth manager) :claude-alias)))
+        (is (= [:api-key :oauth]
+               (:auth-modes (some #(when (= :anthropic (:provider %)) %)
+                                  (:providers (provider/status manager))))))))))
+
+(deftest anthropic-oauth-requires-message-stop-not-just-stop-reason
+  (with-manager
+    (fn [manager]
+      (auth/put-credential! (:auth manager) :anthropic
+                            {:type :oauth :access-token "opaque" :expires-at Long/MAX_VALUE})
+      (let [closed? (atom false)]
+        (with-redefs [sdk/list-models (constantly [])
+                      sdk-http/sse-response
+                      (fn [_] {:status 200
+                               :body (proxy [ByteArrayInputStream]
+                                            [(.getBytes (anthropic-stream false) StandardCharsets/UTF_8)]
+                                       (close [] (reset! closed? true) (proxy-super close)))})]
+          (is (thrown? clojure.lang.ExceptionInfo
+                       (provider/complete! manager request {:provider :anthropic}))))
+        (is @closed?)))))
+
+(deftest anthropic-oauth-discovery-and-refresh-use-credential-owner
+  (with-manager
+    (fn [manager]
+      (auth/put-credential! (:auth manager) :anthropic
+                            {:type :oauth :access-token "old" :refresh-token "owner-refresh"
+                             :expires-at Long/MAX_VALUE :source :stored-oauth})
+      (provider/register! manager :claude-alias {:type :profile-alias :provider :anthropic})
+      (let [captured (atom [])]
+        (with-redefs [auth/request! (fn [req]
+                                     (swap! captured conj req)
+                                     (if (= :post (:method req))
+                                       {:access_token "fresh" :expires_in 3600}
+                                       {:data [{:id "test-model"}]}))]
+          (is (= :refreshed (:status (provider/refresh-auth! manager :claude-alias))))
+          (provider/refresh! manager :anthropic))
+        (is (= "owner-refresh" (get-in @captured [0 :body :refresh_token])))
+        (is (= "Bearer fresh" (get-in @captured [1 :headers "authorization"])))
+        (is (nil? (get-in @captured [1 :headers "x-api-key"])))
+        (is (= "2023-06-01" (get-in @captured [1 :headers "anthropic-version"])))
+        (is (nil? (auth/credential (:auth manager) :claude-alias)))))))
+
+(deftest anthropic-oauth-refuses-custom-endpoints-and-hosted-search
+  (with-manager
+    (fn [manager]
+      (auth/put-credential! (:auth manager) :anthropic
+                            {:type :oauth :access-token "opaque" :expires-at Long/MAX_VALUE})
+      (provider/register! manager :claude-proxy
+                          {:type :profile-alias :provider :anthropic :base-url "https://proxy.invalid/v1"})
+      (with-redefs [sdk/list-models (constantly [])
+                    sdk-http/sse-response (fn [_] (throw (AssertionError. "Unexpected inference")))]
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (provider/complete! manager request {:provider :claude-proxy})))
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (provider/web-search! manager {:provider :anthropic :model "test-model"
+                                                    :query "fixture"} {})))))))
 
 (deftest explicit-logout-removes-a-legacy-copilot-credential
   (with-manager

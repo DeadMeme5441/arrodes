@@ -88,6 +88,18 @@ if settings were saved but session configuration fails, the error explicitly rep
 The TUI loads that provider's cached catalog first, then discovers models through
 `model.refresh` when connected. Requests retain session/navigation ownership.
 
+Provider catalog/status rows may add `auth-modes` to advertise explicit login choices.
+Anthropic and its profile aliases advertise `["api-key", "oauth"]`; clients should use
+this metadata instead of inferring supported choices from the current credential type.
+Other providers retain their existing login behavior. `auth.login` with Anthropic
+`type: "oauth"` explicitly requests experimental Claude browser sign-in; the default
+remains API-key authentication. Existing browser URL and secret manual-code host
+requests are reused; the local browser callback uses port `54545`. Manual input
+requires the full redirect URL or `code#state`, not a bare code. OAuth rejects custom
+endpoints and is restricted to `https://api.anthropic.com/v1`. `auth.logout` removes
+only the selected provider's own saved credential. See
+[provider eligibility and limitations](PROVIDERS.md#anthropic-claude-browser-sign-in-experimental).
+
 Authentication is separate: `auth.login` does not select a model. A TUI can cancel
 an in-progress login using the protocol `cancel` envelope with the login request ID.
 

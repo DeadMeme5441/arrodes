@@ -26,6 +26,43 @@ Browser/manual authentication uses host requests. Secret inputs are masked, excl
 from drafts/history, and cleared from editors when dismissed. Cancelled authentication
 must terminate its owned work; completed credential writes are not undone by cancellation.
 
+### Anthropic Claude browser sign-in (experimental)
+
+Anthropic retains API-key authentication as its default. `/login` (also `/providers`
+and `/setup`) offers **Use an API key** or **Claude browser sign-in (experimental)**
+when the provider advertises `:auth-modes [:api-key :oauth]`. Configured Anthropic
+profile aliases expose the same choice while retaining their own credential ownership.
+First-launch setup asks for an authentication method before signing in; available
+credentials can still be explicitly reused. Codex ChatGPT sign-in is unchanged.
+
+Claude sign-in is opt-in: an explicit `auth.login` request with `type: "oauth"`
+starts the browser flow. Use `type: "api-key"` for a Console key. Browser sign-in
+uses the existing `:auth-url` host event and a local callback on port `54545`;
+manual completion uses the secret `:manual-code` prompt if needed. Paste the full
+redirect URL or `code#state`; a bare code is rejected because the flow must validate
+its state. Follow the displayed instructions rather than pasting a code or redirect
+URL into chat. Arrodes never implicitly imports credentials from Claude tools or
+their local stores.
+
+OAuth requests are restricted to the official `https://api.anthropic.com/v1`
+endpoint. Aliases and settings using custom endpoints are rejected for OAuth to
+avoid leaking subscription credentials. Access tokens are refreshed automatically
+with a five-minute expiry guard. `auth.logout` removes only the selected provider's
+Arrodes-owned saved credential, not credentials belonging to other aliases or
+external Claude tools. Environment credentials, if present, remain available.
+
+This integration remains experimental. A user-reported live smoke test on one account
+confirmed inference, REPL tool execution, and same-session persistent state. Saved
+credential reuse after restart and live token refresh remain unverified; offline
+fixtures cover refresh behavior. This is not a guarantee of compatibility for other
+accounts. Subscription eligibility, permitted use, model access and limits are
+controlled by Anthropic;
+Arrodes does not guarantee that a Claude subscription is eligible or that sign-in
+grants model access. Offline fixtures are not evidence of live subscription access.
+Console API-key and supported cloud-provider routes remain alternatives. Anthropic
+hosted web search is API-key-only for now and explicitly refuses OAuth credentials
+rather than silently switching providers or billing routes.
+
 ## Selection and execution
 
 A provider/model identity is the pair of provider ID and exact model ID. Validate reasoning
@@ -178,8 +215,10 @@ there is no automatic provider, model, MCP or paid-reader fallback.
 
 Manager-local profile aliases for those families retain their configured endpoint
 and credential ownership. Search resolves credentials through the existing provider
-manager; it does not copy keys into session data or support Anthropic subscription
-OAuth. Provider/model availability and account entitlement still apply.
+manager; it does not copy keys into session data. Anthropic hosted search remains
+API-key-only (including profile aliases) and explicitly rejects OAuth credentials,
+even when Claude browser sign-in is used for ordinary model calls. Provider/model
+availability and account entitlement still apply.
 
 Hosted calls default to a 30-second total request deadline (maximum 120 seconds),
 five retained sources (1–20), and 2,048 output tokens (1–8,192). Codex OAuth does

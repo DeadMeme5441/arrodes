@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Add explicit, experimental Anthropic Claude browser sign-in alongside the default
+  API-key route, including authentication-method choices in `/login` and setup for
+  Anthropic profile aliases. Reuse masked manual completion and local browser
+  callbacks without implicitly importing Claude credentials or changing Codex login.
+  Restrict OAuth to the official Anthropic endpoint and require state-bearing manual
+  completion; refresh expiring tokens automatically and keep logout provider-owned.
+- Document provider-controlled subscription eligibility and user-reported live
+  inference/REPL smoke testing on one account; restart and live token-refresh
+  verification remain pending. Anthropic hosted web search remains API-key-only
+  and explicitly refuses OAuth credentials.
+
 ## 0.2.2
 
 - Add opt-in OptChat-style chronological summary-tree context with a frozen,

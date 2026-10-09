@@ -133,3 +133,54 @@
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Default saved, but"
                               (setup/apply-model! rt params)))
         (is (= "beta" (:model @settings)))))))
+
+(deftest setup-offers-explicit-authentication-modes
+  (doseq [provider-id [:anthropic :claude-profile]
+          mode [:api-key :oauth]
+          current-type [:api-key :oauth]
+          available? [false true]]
+    (let [requests (atom [])
+          calls (atom [])
+          entry {:provider provider-id :name "Claude" :available? available?
+                 :auth {:type current-type} :auth-modes [:api-key :oauth]}]
+      (with-redefs [runtime/ui! (fn [_ request]
+                                 (swap! requests conj request)
+                                 (case (:title request)
+                                   "Use provider credentials" :login
+                                   "Choose authentication method" (name mode)
+                                   "Authenticate in your browser" :continue
+                                   "Authorization code" "synthetic-code"))
+                    provider/login! (fn [_ id options]
+                                      (swap! calls conj [id (:type options)])
+                                      (when (= :oauth (:type options))
+                                        ((:on-event options) {:type :auth-url :url "https://example.invalid/authorize"
+                                                              :instructions "Sign in in your browser"})
+                                        (is (= "synthetic-code"
+                                               ((:input options) {:type :manual-code :message "Authorization code"})))))]
+        (#'setup/ensure-auth! {} ::manager entry)
+        (is (= [[provider-id mode]] @calls))
+        (is (= [:api-key :oauth]
+               (mapv :value (:items (first (filter #(= "Choose authentication method" (:title %)) @requests))))))
+        (is (every? :secret? (filter #(= :input (:kind %)) @requests)))
+        (is (not-any? #(some #{"synthetic-code"} (tree-seq coll? seq %)) @requests))))))
+
+(deftest setup-keeps-single-mode-login-and-explicit-reuse
+  (doseq [auth-type [:api-key :oauth]]
+    (with-redefs [runtime/ui! (fn [& _] (throw (AssertionError. "Single-mode providers must not gain a method picker")))
+                  provider/login! (fn [_ _ options] (is (= auth-type (:type options))))]
+      (#'setup/ensure-auth! {} ::manager {:provider (if (= :oauth auth-type) :codex-backend :fixture)
+                                        :auth {:type auth-type}})))
+  (with-redefs [runtime/ui! (fn [_ request]
+                             (is (= "Use provider credentials" (:title request)))
+                             :reuse)
+                provider/login! (fn [& _] (throw (AssertionError. "Reuse must not sign in")))]
+    (#'setup/ensure-auth! {} ::manager {:provider :anthropic :available? true
+                                      :auth {:type :oauth} :auth-modes [:api-key :oauth]})))
+
+(deftest cancelling-authentication-method-does-not-start-login
+  (with-redefs [runtime/ui! (fn [& _] (throw (ex-info "cancelled" {:error/code "cancelled"})))
+                provider/login! (fn [& _] (throw (AssertionError. "Cancelled selection must not log in")))]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cancelled"
+                          (#'setup/ensure-auth! {} ::manager
+                           {:provider :anthropic :auth {:type :api-key}
+                            :auth-modes [:api-key :oauth]})))))
