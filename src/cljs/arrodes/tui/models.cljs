@@ -36,9 +36,10 @@
         id (catalog/provider-id entry)
         auth-type (keyword (get-in entry [:auth :type] :api-key))
         return! #(do (c/ui! view assoc :overlay previous) (c/action! :render-overlay! view))
-        connect! (fn []
+        modes (mapv keyword (:auth-modes entry))
+        connect! (fn [mode]
                    (return!)
-                   (c/fire! view :provider-login {:provider id :type auth-type}))
+                   (c/fire! view :provider-login {:provider id :type mode}))
         browse! (fn []
                   (c/action! :open-overlay! view {:kind :models :title "Models" :provider id :query "" :pane :models
                                        :return-overlay previous
@@ -56,9 +57,20 @@
                             :choose #(do (return!) (c/fire! view :providers {}))}]
                           (= :none auth-type)
                           [{:label "Browse available models" :description "This provider does not require sign-in" :choose browse!}]
+                          (> (count modes) 1)
+                          (mapv (fn [mode]
+                                  {:label (case mode
+                                            :api-key "Use an API key"
+                                            :oauth "Claude browser sign-in (experimental)"
+                                            (name mode))
+                                   :description (case mode
+                                                  :api-key "Anthropic Console API billing"
+                                                  :oauth "Eligibility is controlled by Anthropic; no Claude credentials are imported"
+                                                  "Provider authentication")
+                                   :choose #(connect! mode)}) modes)
                           :else
                           [{:label (if (:available? entry) "Sign in again" "Connect provider")
-                            :description (catalog/auth-label entry) :choose connect!}])
+                            :description (catalog/auth-label entry) :choose #(connect! auth-type)}])
                         (when (and (:available? entry) (not (contains? #{:ambient :none} auth-type)))
                           [{:label "Remove saved credentials" :description "Environment credentials, if present, remain available."
                             :choose #(c/action! :open-overlay!

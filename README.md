@@ -109,7 +109,7 @@ F5 discovers models from the selected provider. Enter chooses reasoning and then
 
 OAuth can open a browser or show a URL for manual completion. API keys and pasted authorization codes are masked and excluded from conversation drafts and history. Press `Esc` to cancel a setup screen without exiting; run `/setup` or `/login` later to continue.
 
-Codex supports ChatGPT sign-in. Anthropic access uses a Console API key or a supported cloud provider; Claude.ai subscription OAuth is not supported. GitHub Copilot login is not included. Each provider's account terms and data practices apply.
+Codex supports ChatGPT sign-in. For Anthropic, `/login` or `/setup` offers **Use an API key** (the default) or **Claude browser sign-in (experimental)**. Subscription eligibility and permitted use are controlled by Anthropic; basic live inference and REPL tool execution have been user-tested on one account, but restart and token-refresh verification remain pending. Arrodes does not implicitly import credentials from Claude tools. Anthropic hosted web search remains API-key-only. Supported cloud-provider routes remain available; GitHub Copilot login is not included. Each provider's account terms and data practices apply. See [authentication details](docs/PROVIDERS.md#anthropic-claude-browser-sign-in-experimental).
 
 Existing valid defaults skip setup. Launch selections take precedence for a new session:
 

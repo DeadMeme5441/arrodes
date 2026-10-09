@@ -3,6 +3,7 @@
   (:require [clojure.data.json :as json]
             [clojure.string :as str]
             [arrodes.auth :as auth]
+            [arrodes.anthropic-oauth :as anthropic-oauth]
             [arrodes.platform :as u]
             [arrodes.run :as run]
             [arrodes.web.data :as web]
@@ -18,7 +19,8 @@
             [llm.sdk.provider.auth :as sdk-auth]
             [llm.sdk.providers.codex.auth :as codex-auth]
             [llm.sdk.providers.codex.responses :as codex]
-            [llm.sdk.providers.openai.chat :as openai]))
+            [llm.sdk.providers.openai.chat :as openai]
+            [llm.sdk.providers.anthropic.chat :as anthropic]))
 
 (defrecord ProviderManager [home settings auth profiles live-models last-refresh
                             complete-fn closed? parent owns-auth?])
@@ -315,13 +317,10 @@
 
 (defn- auth-resolution [manager provider-id p refresh? options]
   (let [entry (stored-credential-entry manager provider-id p)
-        stored (:credential entry)
         anthropic? (anthropic-profile? p)
-        blocked-stored? (and anthropic?
-                             (or (= :oauth (:type stored))
-                                 (auth/anthropic-oauth-token?
-                                  (or (:secret stored) (:access-token stored)))))
-        c (when-not blocked-stored?
+        c (when-not (and anthropic?
+                         (= :api-key (get-in entry [:credential :type]))
+                         (auth/anthropic-oauth-token? (get-in entry [:credential :secret])))
             (current-credential manager entry refresh? options))
         env-token (let [token (env-value (:env-var-names p))]
                     (when-not (and anthropic?
@@ -499,6 +498,18 @@
             (->> (or (:models body) (:data body))
                  (keep #(codex-model provider-id p %)) vec))
 
+          (and (anthropic-profile? p) (= :oauth (:type resolution)))
+          (let [sdk-profile (-> (sdk/provider-profile :anthropic)
+                                (sdk-auth/apply-runtime-config
+                                 (sdk-runtime-config manager provider-id p resolution)))
+                req (anthropic-oauth/build-request sdk-profile
+                                                   {:request/model "discovery"
+                                                    :request/messages []}
+                                                   (:token resolution))
+                body (auth/request! {:url "https://api.anthropic.com/v1/models"
+                                     :headers (:headers req)})]
+            (->> (:data body) (keep #(model-from-openai provider-id p %)) vec))
+
           (= (:sdk-id p) :gemini-native)
           (let [body (auth/request! {:url "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"
                                      :headers {"x-goog-api-key" (:token resolution)}})]
@@ -565,6 +576,7 @@
                                      {:configured? false :type (profile-auth-mode p)})
                            :models (count (profile-models manager id p))
                            :refreshable? (:refreshable? p)}
+                    (anthropic-profile? p) (assoc :auth-modes [:api-key :oauth])
                     (get @(:last-refresh manager) id)
                     (assoc :last-refresh (get @(:last-refresh manager) id)))))))})
 
@@ -596,11 +608,6 @@
          p (profile manager provider-id)
          entry (stored-credential-entry manager provider-id p)
          credential-provider (or (:provider-id entry) provider-id)]
-     (when (and (anthropic-profile? p)
-                (= :oauth (get-in entry [:credential :type])))
-       (fail! :auth/unsupported-oauth
-              "Anthropic subscription OAuth credentials are not supported; use a Claude Console API key, Amazon Bedrock, or Google Vertex AI"
-              {:provider provider-id}))
      (assoc (auth/refresh! (:auth manager) credential-provider options)
             :provider provider-id))))
 
@@ -673,24 +680,34 @@
                    done? false]
               (if-let [record (first records)]
                 (let [payload (sdk-sse/data-payload record)
+                      data (sdk-sse/parse-json-data record)
+                      anthropic-stop? (and (= :anthropic (:sse-protocol options))
+                                           (= "message_stop" (:type data)))
                       done-record? (boolean (re-find #"(?m)^data:\s*\[DONE\]\s*$" record))
-                      _ (when (and payload (nil? (sdk-sse/parse-json-data record)))
+                      _ (when (and payload (nil? data))
                           (incomplete! provider-id model-id
                                        (sdk-stream/acc->response acc provider-id model-id)))
-                      parsed (event-list
-                              (sdk-transport/parse-stream-event transport profile record))
+                      parsed (mapv (or (:normalize-event options) identity)
+                                   (event-list
+                                    (sdk-transport/parse-stream-event transport profile record)))
                       acc (reduce (fn [current event]
                                     (emit-event! options event)
                                     (sdk-stream/reduce-event current event))
                                   acc parsed)]
-                  (recur (next records) acc
+                  (recur (when-not anthropic-stop? (next records)) acc
                          (or terminal? (some #(= :stream/end (:event/type %)) parsed))
-                         (or done? done-record?)))
+                         (or done? (if (= :anthropic (:sse-protocol options))
+                                     anthropic-stop?
+                                     done-record?))))
                 (if (and terminal? done?)
                   acc
                   (incomplete! provider-id model-id
                                (sdk-stream/acc->response acc provider-id model-id)))))
             response (sdk-stream/acc->response accumulated provider-id model-id)]
+        (when (and (= :anthropic (:sse-protocol options))
+                   (not (contains? #{:stop :tool-calls :length :content-filter}
+                                   (:response/finish-reason response))))
+          (incomplete! provider-id model-id response))
         (-> response
             (complete-stream! provider-id model-id)
             (pricing/stamp-response-cost-and-cache provider-id model-id)))
@@ -738,6 +755,20 @@
                    (direct-http-options manager provider-id))]
     (direct-sse-complete! provider-id (:request/model request) profile transport req options)))
 
+(defn- anthropic-oauth-complete! [manager provider-id p request options resolution]
+  (let [config (sdk-runtime-config manager provider-id p resolution)
+        profile (-> (sdk/provider-profile :anthropic)
+                    (assoc :profile/env-var-names [])
+                    (sdk-auth/apply-runtime-config config))
+        req (merge (anthropic-oauth/build-request profile
+                                                  (assoc request :request/stream? true)
+                                                  (:token resolution))
+                   (direct-http-options manager provider-id))]
+    (direct-sse-complete! provider-id (:request/model request) profile
+                          (anthropic/make-transport) req
+                          (assoc options :sse-protocol :anthropic
+                                 :normalize-event anthropic-oauth/normalize-event))))
+
 (defn- sdk-complete! [manager provider-id p request options]
   (let [resolution (require-auth! manager provider-id p true options)
         sdk-id (:sdk-id p)
@@ -755,8 +786,10 @@
         config (sdk-runtime-config manager provider-id p resolution)
         callback (fn [event] (emit-event! options event))]
     (when (auth/cancelled? options) (throw (cancelled-ex)))
-    (let [response (sdk/complete sdk-id request :stream? true :on-event callback
-                                 :retry false :config config)]
+    (let [response (if (and (anthropic-profile? p) (= :oauth (:type resolution)))
+                     (anthropic-oauth-complete! manager provider-id p request options resolution)
+                     (sdk/complete sdk-id request :stream? true :on-event callback
+                                 :retry false :config config))]
       (when (auth/cancelled? options) (throw (cancelled-ex)))
       (-> response
           (assoc :response/provider provider-id)
@@ -921,6 +954,10 @@
                                                          (::web/citations response))))))
                    (hosted-web/normalize family params (:response/raw response) response)))
                (let [resolution (require-auth! manager provider-id p true options)
+                     _ (when (and (anthropic-profile? p) (= :oauth (:type resolution)))
+                         (fail! :provider/unsupported-search
+                                "Hosted Anthropic web search requires an API key; Claude OAuth currently supports chat only"
+                                {:provider provider-id}))
                      sdk-id (if (= :openai (:sdk-id p)) :codex (:sdk-id p))
                      config (-> (merge {:base-url (:base-url p)}
                                        (sdk-runtime-config manager provider-id p resolution))

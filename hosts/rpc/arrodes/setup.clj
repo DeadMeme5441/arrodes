@@ -92,7 +92,22 @@
                      :message (or (:message event) (pr-str (dissoc event :type)))})))
 
 (defn- login! [rt manager entry]
-  (let [auth-type (keyword-value (get-in entry [:auth :type]))]
+  (let [modes (mapv keyword-value (:auth-modes entry))
+        auth-type (if (> (count modes) 1)
+                    (keyword-value
+                     (choose! rt "Choose authentication method"
+                              "Claude browser sign-in is experimental; subscription eligibility is controlled by Anthropic."
+                              (mapv (fn [mode]
+                                      {:label (case mode
+                                                :api-key "Use an API key"
+                                                :oauth "Claude browser sign-in (experimental)"
+                                                (name mode))
+                                       :description (case mode
+                                                      :api-key "Anthropic Console API billing"
+                                                      :oauth "Sign in explicitly in your browser; no Claude credentials are imported"
+                                                      "Provider authentication")
+                                       :value mode}) modes)))
+                    (keyword-value (get-in entry [:auth :type])))]
     (when (= :ambient auth-type)
       (value/fail! :auth/ambient
                    "This provider uses ambient credentials. Configure them in the environment, then retry setup."

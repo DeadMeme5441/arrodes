@@ -36,6 +36,8 @@
 
 (def ^:private openai-client-id "app_EMoamEEZ73f0CkXaXp7hrann")
 (def ^:private openai-token-url "https://auth.openai.com/oauth/token")
+(def ^:private anthropic-client-id "9d1c250a-e61b-44d9-88ed-5944d1962f5e")
+(def ^:private anthropic-token-url "https://api.anthropic.com/v1/oauth/token")
 (def ^:private anthropic-oauth-prefix "sk-ant-oat01-")
 
 (defn anthropic-oauth-token?
@@ -46,11 +48,6 @@
 
 (defn- fail! [code message data]
   (throw (ex-info message (assoc data :error/code (name code) :error/type code))))
-
-(defn- reject-anthropic-oauth! [provider-id]
-  (fail! :auth/unsupported-oauth
-         "Anthropic subscription OAuth is not supported; use a Claude Console API key, Amazon Bedrock, or Google Vertex AI"
-         {:provider provider-id}))
 
 (defn- check-open! [store]
   (when @(:closed? store)
@@ -334,14 +331,16 @@
 (defn- await-browser-code [options callback expected-state]
   (if-let [provided (:code options)]
     (let [parsed (parse-authorization-input provided)]
-      (when (and (:state parsed) (not= expected-state (:state parsed)))
+      (when (and (or (:require-state? options) (:state parsed))
+                 (not= expected-state (:state parsed)))
         (fail! :auth/state-mismatch "OAuth state did not match" {}))
       (:code parsed))
     (let [manual (when (:input options)
                    (future (prompt! options
                                     {:type :manual-code
-                                     :message "Complete browser login, or paste the authorization code/redirect URL"
-                                     :placeholder "http://localhost/callback"})))
+                                     :message (or (:code-message options)
+                                                  "Complete browser login, or paste the authorization code/redirect URL")
+                                     :placeholder (or (:code-placeholder options) "http://localhost/callback")})))
           deadline (+ (System/currentTimeMillis) (long (or (:timeout-ms options) 600000)))]
       (try
         (loop []
@@ -350,7 +349,8 @@
             (and callback (realized? (:result callback))) (:code @(:result callback))
             (and manual (future-done? manual))
             (let [parsed (parse-authorization-input @manual)]
-              (when (and (:state parsed) (not= expected-state (:state parsed)))
+              (when (and (or (:require-state? options) (:state parsed))
+                         (not= expected-state (:state parsed)))
                 (fail! :auth/state-mismatch "OAuth state did not match" {}))
               (:code parsed))
             (>= (System/currentTimeMillis) deadline)
@@ -362,8 +362,9 @@
   (let [access (:access_token response)
         refresh (:refresh_token response)
         expires (:expires_in response)]
-    (when-not (and (string? access) (seq access))
-      (fail! :auth/token-response "OAuth token response did not include an access token"
+    (when-not (and (string? access) (not (str/blank? access))
+                   (or (nil? expires) (and (number? expires) (<= 0 expires))))
+      (fail! :auth/token-response "OAuth token response did not include a valid access token and expiry"
              {:provider provider}))
     (cond-> {:type :oauth
              :access-token access
@@ -406,6 +407,41 @@
                                    :code code :code_verifier verifier :redirect_uri redirect}})
                  0)]
           (assoc c :account-id (jwt-account-id (:access-token c)))))
+      (finally (when callback (.stop ^HttpServer (:server callback) 0))))))
+
+(defn- login-anthropic-browser [options]
+  (when-not (= :browser (keyword (or (:flow options) :browser)))
+    (fail! :auth/unsupported-flow "Claude OAuth supports browser login only" {}))
+  (let [{:keys [verifier challenge]} (pkce)
+        state (random-url-token 24)
+        redirect "http://localhost:54545/callback"
+        callback (callback-server "127.0.0.1" 54545 "/callback" state)
+        url (str "https://claude.ai/oauth/authorize?"
+                 (form-body {:code "true" :response_type "code"
+                             :client_id anthropic-client-id :redirect_uri redirect
+                             :scope (str "org:create_api_key user:profile user:inference "
+                                         "user:sessions:claude_code user:mcp_servers user:file_upload")
+                             :code_challenge challenge :code_challenge_method "S256"
+                             :state state}))]
+    (try
+      (notify! options {:type :auth-url :url url
+                        :instructions "Complete Claude login in your browser, or paste the full redirect URL / code#state. Subscription access is controlled by Anthropic."})
+      (let [code (await-browser-code (assoc options :require-state? true
+                                          :code-message "Complete browser login, or paste the full redirect URL / code#state (not a bare code)"
+                                          :code-placeholder "http://localhost:54545/callback?code=…&state=…")
+                                     callback state)]
+        (when (str/blank? code)
+          (fail! :auth/missing-code "No OAuth authorization code was received" {}))
+        (ensure-active! options)
+        (assoc (token-credential
+                :anthropic
+                (request! {:method :post :url anthropic-token-url
+                           :body {:grant_type "authorization_code"
+                                  :client_id anthropic-client-id
+                                  :code code :state state :code_verifier verifier
+                                  :redirect_uri redirect}})
+                300000)
+               :oauth-provider :anthropic))
       (finally (when callback (.stop ^HttpServer (:server callback) 0))))))
 
 (defn- poll! [options interval-seconds expires-seconds f]
@@ -475,8 +511,6 @@
                           (when (contains? #{:codex-backend :openai-codex} provider-id)
                             :oauth)
                           :api-key))
-        _ (when (and anthropic? (= :oauth mode))
-            (reject-anthropic-oauth! provider-id))
         credential
         (case mode
           :api-key
@@ -486,19 +520,23 @@
             (when (str/blank? secret)
               (fail! :auth/missing-key "API key cannot be blank" {:provider provider-id}))
             (when (and anthropic? (anthropic-oauth-token? secret))
-              (reject-anthropic-oauth! provider-id))
+              (fail! :auth/type "Use browser OAuth login, not the API-key field, for Claude subscription credentials"
+                     {:provider provider-id}))
             (cond-> {:type :api-key :secret secret :source :stored-api-key}
               (:base-url options) (assoc :base-url (:base-url options))
               (:project options) (assoc :project (:project options))
               (:location options) (assoc :location (:location options))))
           :oauth
-          (if (contains? #{:codex-backend :openai-codex} provider-id)
+          (cond
+            anthropic? (login-anthropic-browser options)
+            (contains? #{:codex-backend :openai-codex} provider-id)
             (if (= :device-code (keyword (or (:flow options) :browser)))
               (login-openai-device options)
               (login-openai-browser options))
-            (fail! :auth/unsupported-oauth "Provider does not support OAuth login"
-                   {:provider provider-id}))
+            :else (fail! :auth/unsupported-oauth "Provider does not support OAuth login"
+                         {:provider provider-id}))
           (fail! :auth/type "Unknown authentication type" {:type mode}))]
+    (ensure-active! options)
     (put-credential! store provider-id credential)
     {:provider provider-id :status :logged-in :type (:type credential)
      :expires-at (:expires-at credential)}))
@@ -518,6 +556,17 @@
     (retain-refresh-data
      c
      (cond
+       (or (= :anthropic provider-id) (= :anthropic (:oauth-provider c)))
+       (assoc (token-credential
+               provider-id
+               (request! {:method :post :url anthropic-token-url
+                          :headers {"anthropic-beta" "oauth-2025-04-20"}
+                          :body {:grant_type "refresh_token"
+                                 :refresh_token refresh-token
+                                 :client_id anthropic-client-id}})
+               300000)
+              :oauth-provider :anthropic)
+
        (contains? #{:codex-backend :openai-codex} provider-id)
        (let [x (token-credential
                 provider-id
@@ -536,15 +585,13 @@
 (defn refresh!
   "Refresh one stored OAuth credential. API-key credentials are unchanged."
   [store provider-id options]
+  (ensure-active! options)
   (let [provider-id (keyword provider-id)]
     (let [attempted (credential-snapshot store provider-id)
           c (:credential attempted)]
       (when-not c
         (fail! :auth/not-configured "Provider has no stored credential"
                {:provider provider-id}))
-      (when (and (= :anthropic provider-id)
-                 (= :oauth (:type c)))
-        (reject-anthropic-oauth! provider-id))
       (locking (refresh-lock store provider-id)
         (let [current (credential-snapshot store provider-id)]
           (if (not= (:revision attempted) (:revision current))
@@ -565,11 +612,6 @@
   "Refresh an OAuth credential only when its guarded expiry has passed."
   [store provider-id options]
   (when-let [c (credential store provider-id)]
-    (when (and (= :anthropic (keyword provider-id))
-               (or (= :oauth (:type c))
-                   (anthropic-oauth-token?
-                    (or (:secret c) (:access-token c)))))
-      (reject-anthropic-oauth! (keyword provider-id)))
     (if (and (= :oauth (:type c))
              (number? (:expires-at c))
              (<= (:expires-at c) (System/currentTimeMillis)))
