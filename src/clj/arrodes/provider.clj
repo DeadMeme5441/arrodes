@@ -18,7 +18,8 @@
             [llm.sdk.provider.auth :as sdk-auth]
             [llm.sdk.providers.codex.auth :as codex-auth]
             [llm.sdk.providers.codex.responses :as codex]
-            [llm.sdk.providers.openai.chat :as openai]))
+            [llm.sdk.providers.openai.chat :as openai]
+            [llm.sdk.providers.anthropic.chat :as anthropic]))
 
 (defrecord ProviderManager [home settings auth profiles live-models last-refresh
                             complete-fn closed? parent owns-auth?])
@@ -82,6 +83,10 @@
 
 (defn- anthropic-profile? [profile]
   (= :anthropic (:sdk-id profile)))
+
+(defn- anthropic-oauth-profile? [profile]
+  (and (anthropic-profile? profile)
+       (contains? #{:sdk :profile-alias} (:kind profile))))
 
 (defn- sdk-profile->local [id]
   (let [p (sdk/provider-profile id)]
@@ -315,14 +320,18 @@
 
 (defn- auth-resolution [manager provider-id p refresh? options]
   (let [entry (stored-credential-entry manager provider-id p)
-        stored (:credential entry)
         anthropic? (anthropic-profile? p)
-        blocked-stored? (and anthropic?
-                             (or (= :oauth (:type stored))
-                                 (auth/anthropic-oauth-token?
-                                  (or (:secret stored) (:access-token stored)))))
-        c (when-not blocked-stored?
+        c (when-not (and anthropic?
+                         (= :api-key (get-in entry [:credential :type]))
+                         (auth/anthropic-oauth-token? (get-in entry [:credential :secret])))
             (current-credential manager entry refresh? options))
+        _ (when (and (= :oauth (:type c))
+                     (or anthropic? (= :anthropic (:oauth-provider c))
+                         (auth/anthropic-oauth-token? (or (:secret c) (:access-token c))))
+                     (not (anthropic-oauth-profile? p)))
+            (fail! :provider/oauth-transport
+                   "Claude OAuth requires a native Anthropic provider or profile alias"
+                   {:provider provider-id}))
         env-token (let [token (env-value (:env-var-names p))]
                     (when-not (and anthropic?
                                    (auth/anthropic-oauth-token? token))
@@ -478,6 +487,7 @@
            (select-keys (get-in (:settings manager) [:provider-options provider-id])
                         [:base-url :connect-timeout-ms :timeout-ms :transport :incremental?]))
     (:token resolution) (assoc :auth-token (:token resolution))
+    (anthropic-profile? p) (assoc :auth-mode (:type resolution))
     (:account-id resolution) (assoc :account-id (:account-id resolution))
     (and (= :profile-alias (:kind p)) (:base-url p))
     (assoc :base-url (:base-url p))
@@ -498,6 +508,16 @@
                                      :headers (:headers request-auth)})]
             (->> (or (:models body) (:data body))
                  (keep #(codex-model provider-id p %)) vec))
+
+          (and (anthropic-profile? p) (= :oauth (:type resolution)))
+          (let [sdk-profile (-> (sdk/provider-profile :anthropic)
+                                (sdk-auth/apply-runtime-config
+                                 (sdk-runtime-config manager provider-id p resolution)))
+                req (->> {:url "https://api.anthropic.com/v1/models"}
+                         (sdk-auth/apply-http-options sdk-profile)
+                         (anthropic/finalize-request sdk-profile))
+                body (auth/request! req)]
+            (->> (:data body) (keep #(model-from-openai provider-id p %)) vec))
 
           (= (:sdk-id p) :gemini-native)
           (let [body (auth/request! {:url "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"
@@ -565,6 +585,7 @@
                                      {:configured? false :type (profile-auth-mode p)})
                            :models (count (profile-models manager id p))
                            :refreshable? (:refreshable? p)}
+                    (anthropic-oauth-profile? p) (assoc :auth-modes [:api-key :oauth])
                     (get @(:last-refresh manager) id)
                     (assoc :last-refresh (get @(:last-refresh manager) id)))))))})
 
@@ -584,7 +605,7 @@
              "Vertex uses Application Default Credentials; pass an explicit OAuth access token as :api-key or configure ADC"
              {:provider provider-id}))
     (auth/login! (:auth manager) provider-id
-                 (assoc options :anthropic-profile? (anthropic-profile? p)))))
+                 (assoc options :anthropic-profile? (anthropic-oauth-profile? p)))))
 
 (defn refresh-auth!
   "Explicitly refresh one stored OAuth credential."
@@ -596,11 +617,6 @@
          p (profile manager provider-id)
          entry (stored-credential-entry manager provider-id p)
          credential-provider (or (:provider-id entry) provider-id)]
-     (when (and (anthropic-profile? p)
-                (= :oauth (get-in entry [:credential :type])))
-       (fail! :auth/unsupported-oauth
-              "Anthropic subscription OAuth credentials are not supported; use a Claude Console API key, Amazon Bedrock, or Google Vertex AI"
-              {:provider provider-id}))
      (assoc (auth/refresh! (:auth manager) credential-provider options)
             :provider provider-id))))
 
@@ -921,6 +937,10 @@
                                                          (::web/citations response))))))
                    (hosted-web/normalize family params (:response/raw response) response)))
                (let [resolution (require-auth! manager provider-id p true options)
+                     _ (when (and (anthropic-profile? p) (= :oauth (:type resolution)))
+                         (fail! :provider/unsupported-search
+                                "Hosted Anthropic web search requires an API key; Claude OAuth currently supports chat only"
+                                {:provider provider-id}))
                      sdk-id (if (= :openai (:sdk-id p)) :codex (:sdk-id p))
                      config (-> (merge {:base-url (:base-url p)}
                                        (sdk-runtime-config manager provider-id p resolution))

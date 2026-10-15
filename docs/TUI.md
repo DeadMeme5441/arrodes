@@ -39,6 +39,18 @@ the widget layer. Ordinary conversation remains readable and execution remains i
 The current visual system is documented in [TUI design](TUI_DESIGN.md). The
 [TUI skill](../.agents/skills/arrodes-tui/SKILL.md) describes the implementation workflow.
 
+## Provider authentication
+
+`/login`, `/setup` and `/providers` open provider management without changing the
+conversation's model. When a provider advertises multiple `auth-modes`, show an
+explicit choice instead of deriving the login method from its current credential.
+Anthropic and its aliases offer **Use an API key** and **Claude browser sign-in
+(experimental)**; providers such as Codex retain their existing single sign-in action.
+First-launch setup makes the same choice before requesting authentication. Browser
+URLs use the existing host UI, and manual codes remain masked, excluded from drafts
+and history, and cleared on dismissal. Users choosing OAuth accept responsibility
+and liability for its use; see [authentication and user responsibility](PROVIDERS.md#anthropic-claude-browser-sign-in-experimental).
+
 ## Context policy and inspection
 
 `/context` opens the full-terminal **Session context** choices. Ordinary sessions

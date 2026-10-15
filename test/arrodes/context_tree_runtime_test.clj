@@ -277,6 +277,7 @@
             (is (< (count frontier-ids) (count (get-in before [:view :nodes]))))
             (is (= "A fresh task after compaction"
                    (value/text-content (:message/content (last (:request/messages request)))))))
+          (is (summaries/await-session! (:summaries rt) sid 5000))
           (is (get-in (runtime/context-inspect rt sid) [:view :fits?])))))))
 
 (deftest disable-during-preparation-finishes-the-frozen-turn-and-next-turn-is-linear

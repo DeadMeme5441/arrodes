@@ -16,6 +16,9 @@ the change:
 | `bun run test:release` | Offline payload compression and self-update integrity/atomic replacement |
 | `bun run test` | Release, core and TUI suites; the pull request CI command |
 
+For the RPC/controller fixture alone, run
+`bun scripts/test-tui.ts arrodes.tui-app-test`.
+
 Tests use fixtures by default and must not require real accounts or paid model calls.
 Optional diagnostics remain available for focused investigation:
 
