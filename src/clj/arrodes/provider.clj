@@ -326,7 +326,8 @@
                          (auth/anthropic-oauth-token? (get-in entry [:credential :secret])))
             (current-credential manager entry refresh? options))
         _ (when (and (= :oauth (:type c))
-                     (or anthropic? (= :anthropic (:oauth-provider c)))
+                     (or anthropic? (= :anthropic (:oauth-provider c))
+                         (auth/anthropic-oauth-token? (or (:secret c) (:access-token c))))
                      (not (anthropic-oauth-profile? p)))
             (fail! :provider/oauth-transport
                    "Claude OAuth requires a native Anthropic provider or profile alias"

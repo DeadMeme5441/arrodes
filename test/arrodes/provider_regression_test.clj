@@ -261,14 +261,18 @@
 (deftest anthropic-oauth-cannot-escape-through-custom-transports
   (doseq [[kind source] [[:openai-compatible :anthropic]
                          [:azure-openai :anthropic]
-                         [:openai-compatible nil]]]
+                         [:openai-compatible :owned]
+                         [:openai-compatible :legacy]]]
     (with-manager
       (fn [manager]
-        (auth/put-credential! (:auth manager) (or source :custom-claude)
-                              {:type :oauth :access-token "private-oauth-token"
-                               :oauth-provider :anthropic :expires-at Long/MAX_VALUE})
+        (auth/put-credential! (:auth manager) (if (= :anthropic source) source :custom-claude)
+                              (cond-> {:type :oauth :expires-at Long/MAX_VALUE
+                                       :access-token (if (= :legacy source)
+                                                       "sk-ant-oat01-legacy-fixture"
+                                                       "private-oauth-token")}
+                                (not= :legacy source) (assoc :oauth-provider :anthropic)))
         (provider/register! manager :custom-claude
-                            {:type kind :provider source
+                            {:type kind :provider (when (= :anthropic source) source)
                              :base-url "https://proxy.invalid/v1"
                              :endpoint "https://proxy.invalid"
                              :deployment "test-model" :api-version "2025-01-01"
