@@ -185,6 +185,11 @@
   (-> (control! application "__arm-queue")
       (.then (fn [_]
                (app/command! application :submit {:mode :prompt :text "Keep running"})))
+      (.then (fn [operation]
+               (until-state! application
+                             #(and (= (:id operation) (get-in % [:view :operation :id]))
+                                   (= :running (get-in % [:view :operation :status])))
+                             "The controlled run must be visible before submitting steering")))
       (.then
        (fn [_]
          (swap! (:state application) assoc-in [:ui :draft] "deliver before receipt")
@@ -636,3 +641,8 @@ process.stdin.on('data', chunk => {
         (.finally (fn []
                     (-> (js/Promise.all #js [(app/close! owner) (app/close! contender)])
                         (.then (fn [_] (.rmSync fs temporary #js {:recursive true :force true})))))))))
+
+(defn -main []
+  (aset js/globalThis "ARRODES_TUI_TEST_DONE" (exercise!)))
+
+(set! *main-cli-fn* -main)
