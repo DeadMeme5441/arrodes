@@ -125,30 +125,37 @@
              (:id (provider/model manager :replaceable "configured-new"))))
       (is (not (contains? @(:last-refresh manager) :replaceable))))))
 
-(defn- anthropic-stream [stop?]
-  (apply str
-         (map #(str "data: " (json/write-str %) "\n\n")
-              (cond-> [{:type "message_start" :message {:id "fixture" :model "test-model"
-                                                          :usage {:input_tokens 10}}}
-                       {:type "content_block_start" :index 0
-                        :content_block {:type "tool_use" :id "call-1" :name "_repl" :input {}}}
-                       {:type "content_block_delta" :index 0
-                        :delta {:type "input_json_delta" :partial_json "{\"source\":\"(+ 1 2)\"}"}}
-                       {:type "content_block_stop" :index 0}
-                       {:type "message_delta" :delta {:stop_reason "tool_use"}
-                        :usage {:output_tokens 5}}]
-                stop? (conj {:type "message_stop"})))))
+(defn- anthropic-stream
+  ([stop?] (anthropic-stream stop? "tool_use"))
+  ([stop? finish-reason]
+   (apply str
+          (map #(str "data: " (json/write-str %) "\n\n")
+               (cond-> [{:type "message_start" :message {:id "fixture" :model "test-model"
+                                                       :usage {:input_tokens 10}}}
+                        {:type "content_block_start" :index 0
+                         :content_block {:type "tool_use" :id "call-1" :name "_repl" :input {}}}
+                        {:type "content_block_delta" :index 0
+                         :delta {:type "input_json_delta" :partial_json "{\"source\":\"(+ 1 2)\"}"}}
+                        {:type "content_block_stop" :index 0}
+                        {:type "message_delta" :delta {:stop_reason finish-reason}
+                         :usage {:output_tokens 5}}]
+                 stop? (conj {:type "message_stop"}))))))
 
 (deftest anthropic-oauth-streams-through-alias-without-leaking-api-key
   (with-manager
     (fn [manager]
       (let [captured (atom nil) events (atom []) closed? (atom false)
+            model-id "claude-sonnet-4-6"
+            request (assoc request :request/model model-id
+                           :request/tools [{:type :function
+                                            :function {:name "repl" :description "Evaluate"
+                                                       :parameters {:type "object"}}}])
             credential {:type :oauth :access-token "opaque-oauth-token"
                         :refresh-token "owner-refresh-token"
                         :expires-at Long/MAX_VALUE :source :stored-oauth}]
         (auth/put-credential! (:auth manager) :anthropic credential)
         (provider/register! manager :claude-alias {:type :profile-alias :provider :anthropic})
-        (with-redefs [sdk/list-models (fn [_] [{:model/id "test-model"
+        (with-redefs [sdk/list-models (fn [_] [{:model/id model-id
                                               :model/capabilities #{:chat :streaming :tools}}])
                       sdk-http/sse-response
                       (fn [req]
@@ -157,11 +164,12 @@
                          :body (proxy [ByteArrayInputStream]
                                       [(.getBytes (anthropic-stream true) StandardCharsets/UTF_8)]
                                  (close [] (reset! closed? true) (proxy-super close)))})]
-          (let [response (provider/complete! manager
-                                             (assoc request :request/tools
-                                                    [{:type :function :function {:name "repl" :description "Evaluate"
-                                                                                :parameters {:type "object"}}}])
-                                             {:provider :claude-alias :on-event #(swap! events conj %)})]
+          (let [response (provider/complete! manager request
+                                             {:provider :claude-alias :on-event #(swap! events conj %)})
+                direct (provider/complete! manager request {:provider :anthropic})]
+            (is (= 0.000105M (get-in direct [:response/cost :cost/usd])))
+            (is (= (:response/cost direct) (:response/cost response))
+                "Aliases retain the underlying Anthropic usage estimate")
             (is (= :claude-alias (:response/provider response)))
             (is (= "repl" (-> response :response/tool-calls first :tool-call/name)))
             (is (= :tool-calls (:response/finish-reason response)))
@@ -192,6 +200,27 @@
           (is (thrown? clojure.lang.ExceptionInfo
                        (provider/complete! manager request {:provider :anthropic}))))
         (is @closed?)))))
+
+(deftest anthropic-oauth-requires-a-provider-reported-finish-reason
+  (doseq [finish-reason [nil "unrecognized_reason"]]
+    (with-manager
+      (fn [manager]
+        (auth/put-credential! (:auth manager) :anthropic
+                              {:type :oauth :access-token "opaque" :expires-at Long/MAX_VALUE})
+        (with-redefs [sdk/list-models (constantly [])
+                      sdk-http/sse-response
+                      (fn [_] {:status 200
+                               :body (ByteArrayInputStream.
+                                      (.getBytes (anthropic-stream true finish-reason)
+                                                 StandardCharsets/UTF_8))})]
+          (let [failure (try
+                          (provider/complete! manager request {:provider :anthropic})
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+            (is (= :provider/incomplete-stream (:error/type (ex-data failure))))
+            (is (= "repl" (get-in (ex-data failure)
+                                  [:partial-response :response/tool-calls 0 :tool-call/name]))
+                "A complete tool call must not hide a missing or unknown finish reason")))))))
 
 (deftest anthropic-oauth-discovery-and-refresh-use-credential-owner
   (with-manager
@@ -228,6 +257,33 @@
         (is (thrown? clojure.lang.ExceptionInfo
                      (provider/web-search! manager {:provider :anthropic :model "test-model"
                                                     :query "fixture"} {})))))))
+
+(deftest anthropic-oauth-cannot-escape-through-custom-transports
+  (doseq [[kind source] [[:openai-compatible :anthropic]
+                         [:azure-openai :anthropic]
+                         [:openai-compatible nil]]]
+    (with-manager
+      (fn [manager]
+        (auth/put-credential! (:auth manager) (or source :custom-claude)
+                              {:type :oauth :access-token "private-oauth-token"
+                               :oauth-provider :anthropic :expires-at Long/MAX_VALUE})
+        (provider/register! manager :custom-claude
+                            {:type kind :provider source
+                             :base-url "https://proxy.invalid/v1"
+                             :endpoint "https://proxy.invalid"
+                             :deployment "test-model" :api-version "2025-01-01"
+                             :models [{:id "test-model"}]})
+        (let [sent? (atom false)
+              failure (with-redefs [sdk-http/sse-response
+                                    (fn [_]
+                                      (reset! sent? true)
+                                      (throw (ex-info "Credential reached custom transport" {})))]
+                        (try
+                          (provider/complete! manager request {:provider :custom-claude})
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e)))]
+          (is (= :provider/oauth-transport (:error/type (ex-data failure))))
+          (is (false? @sent?) "Reject inherited OAuth before sending any HTTP request"))))))
 
 (deftest explicit-logout-removes-a-legacy-copilot-credential
   (with-manager

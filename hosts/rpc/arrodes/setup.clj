@@ -96,7 +96,7 @@
         auth-type (if (> (count modes) 1)
                     (keyword-value
                      (choose! rt "Choose authentication method"
-                              "Claude browser sign-in is experimental; subscription eligibility is controlled by Anthropic."
+                              "Claude Code OAuth is experimental. You accept responsibility and liability for its use, Anthropic's terms, and account consequences."
                               (mapv (fn [mode]
                                       {:label (case mode
                                                 :api-key "Use an API key"

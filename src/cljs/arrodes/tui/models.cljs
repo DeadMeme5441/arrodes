@@ -65,7 +65,7 @@
                                             (name mode))
                                    :description (case mode
                                                   :api-key "Anthropic Console API billing"
-                                                  :oauth "Eligibility is controlled by Anthropic; no Claude credentials are imported"
+                                                  :oauth "You accept responsibility and liability for use, Anthropic's terms and account consequences"
                                                   "Provider authentication")
                                    :choose #(connect! mode)}) modes)
                           :else

@@ -48,7 +48,8 @@ Anthropic and its aliases offer **Use an API key** and **Claude browser sign-in
 (experimental)**; providers such as Codex retain their existing single sign-in action.
 First-launch setup makes the same choice before requesting authentication. Browser
 URLs use the existing host UI, and manual codes remain masked, excluded from drafts
-and history, and cleared on dismissal. See [provider eligibility and limitations](PROVIDERS.md#anthropic-claude-browser-sign-in-experimental).
+and history, and cleared on dismissal. Users choosing OAuth accept responsibility
+and liability for its use; see [authentication and user responsibility](PROVIDERS.md#anthropic-claude-browser-sign-in-experimental).
 
 ## Context policy and inspection
 

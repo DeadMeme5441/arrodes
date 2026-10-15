@@ -98,7 +98,7 @@ requests are reused; the local browser callback uses port `54545`. Manual input
 requires the full redirect URL or `code#state`, not a bare code. OAuth rejects custom
 endpoints and is restricted to `https://api.anthropic.com/v1`. `auth.logout` removes
 only the selected provider's own saved credential. See
-[provider eligibility and limitations](PROVIDERS.md#anthropic-claude-browser-sign-in-experimental).
+[authentication and user responsibility](PROVIDERS.md#anthropic-claude-browser-sign-in-experimental).
 
 Authentication is separate: `auth.login` does not select a model. A TUI can cancel
 an in-progress login using the protocol `cancel` envelope with the login request ID.

@@ -28,12 +28,17 @@ must terminate its owned work; completed credential writes are not undone by can
 
 ### Anthropic Claude browser sign-in (experimental)
 
-Anthropic retains API-key authentication as its default. `/login` (also `/providers`
-and `/setup`) offers **Use an API key** or **Claude browser sign-in (experimental)**
+Arrodes supports Anthropic OAuth for accessing Claude Code models. Anthropic retains
+API-key authentication as its default. `/login` (also `/providers` and `/setup`)
+offers **Use an API key** or **Claude browser sign-in (experimental)**
 when the provider advertises `:auth-modes [:api-key :oauth]`. Configured Anthropic
 profile aliases expose the same choice while retaining their own credential ownership.
 First-launch setup asks for an authentication method before signing in; available
 credentials can still be explicitly reused. Codex ChatGPT sign-in is unchanged.
+
+The SDK owns Anthropic request/response adaptation, tool-name replay, stream
+completion, and pricing. Arrodes supplies the explicit authentication mode and
+owns browser interaction, private credential storage, and refresh coordination.
 
 Claude sign-in is opt-in: an explicit `auth.login` request with `type: "oauth"`
 starts the browser flow. Use `type: "api-key"` for a Console key. Browser sign-in
@@ -51,17 +56,19 @@ with a five-minute expiry guard. `auth.logout` removes only the selected provide
 Arrodes-owned saved credential, not credentials belonging to other aliases or
 external Claude tools. Environment credentials, if present, remain available.
 
-This integration remains experimental. A user-reported live smoke test on one account
-confirmed inference, REPL tool execution, and same-session persistent state. Saved
-credential reuse after restart and live token refresh remain unverified; offline
-fixtures cover refresh behavior. This is not a guarantee of compatibility for other
-accounts. Subscription eligibility, permitted use, model access and limits are
-controlled by Anthropic;
-Arrodes does not guarantee that a Claude subscription is eligible or that sign-in
-grants model access. Offline fixtures are not evidence of live subscription access.
+Users who choose Claude Code OAuth access are responsible for confirming that their
+use complies with Anthropic's terms and their account permissions. They accept the
+risks and liability associated with that use, including account restrictions,
+suspension, charges, and data handling. To the extent permitted by applicable law,
+Arrodes and its contributors disclaim liability for consequences of that access.
+Support for this authentication method does not imply Anthropic's authorization,
+affiliation, or endorsement.
+
+The integration is experimental. Anthropic controls subscription eligibility, model
+access, and limits; successful sign-in does not guarantee model entitlement.
 Console API-key and supported cloud-provider routes remain alternatives. Anthropic
-hosted web search is API-key-only for now and explicitly refuses OAuth credentials
-rather than silently switching providers or billing routes.
+hosted web search is API-key-only and explicitly refuses OAuth credentials rather
+than silently switching providers or billing routes.
 
 ## Selection and execution
 

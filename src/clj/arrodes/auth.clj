@@ -425,7 +425,7 @@
                              :state state}))]
     (try
       (notify! options {:type :auth-url :url url
-                        :instructions "Complete Claude login in your browser, or paste the full redirect URL / code#state. Subscription access is controlled by Anthropic."})
+                        :instructions "Complete Claude login in your browser, or paste the full redirect URL / code#state. You accept responsibility and liability for this access, compliance with Anthropic's terms, and account consequences."})
       (let [code (await-browser-code (assoc options :require-state? true
                                           :code-message "Complete browser login, or paste the full redirect URL / code#state (not a bare code)"
                                           :code-placeholder "http://localhost:54545/callback?code=…&state=…")

@@ -84,7 +84,9 @@ def main():
          "First-launch sign-in, persistent sessions, and all Arrodes state under ~/.arrodes. "
          "No project dotfolder. Windows remains experimental and is not included. "
          "Includes third-party notices and corresponding sources. "
-         "Anthropic access uses API keys/cloud credentials; Claude.ai subscription OAuth and Copilot login are not supported. "
+         "Anthropic API-key/cloud access and experimental Claude Code OAuth are supported. "
+         "Users choosing OAuth accept responsibility and liability for their use, compliance with Anthropic's terms, and account consequences. "
+         "Copilot login is not supported. "
          "macOS binaries are not Developer ID signed or notarized.",
          *assets], check=True)
 

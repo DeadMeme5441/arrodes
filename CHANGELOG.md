@@ -2,16 +2,22 @@
 
 ## Unreleased
 
-- Add explicit, experimental Anthropic Claude browser sign-in alongside the default
+## 0.2.3
+
+- Support Anthropic OAuth for accessing Claude Code models through explicit,
+  experimental Claude browser sign-in alongside the default
   API-key route, including authentication-method choices in `/login` and setup for
   Anthropic profile aliases. Reuse masked manual completion and local browser
   callbacks without implicitly importing Claude credentials or changing Codex login.
   Restrict OAuth to the official Anthropic endpoint and require state-bearing manual
   completion; refresh expiring tokens automatically and keep logout provider-owned.
-- Document provider-controlled subscription eligibility and user-reported live
-  inference/REPL smoke testing on one account; restart and live token-refresh
-  verification remain pending. Anthropic hosted web search remains API-key-only
-  and explicitly refuses OAuth credentials.
+- Use clojure-llm-sdk 0.6.4's native Anthropic OAuth transport instead of an
+  Arrodes-local wire adapter. Preserve provider-alias pricing and reject incomplete
+  tool streams and OAuth credentials routed through incompatible custom transports.
+- Clarify that users choosing Claude Code OAuth access accept responsibility and
+  liability for their use, compliance with Anthropic's terms, and account consequences.
+  Anthropic hosted web search remains API-key-only and explicitly refuses OAuth
+  credentials.
 
 ## 0.2.2
 
