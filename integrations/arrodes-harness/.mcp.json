@@ -2,14 +2,7 @@
   "mcpServers": {
     "arrodes": {
       "command": "bun",
-      "args": ["run", "${CLAUDE_PLUGIN_ROOT}/mcp.ts"],
-      "env": {
-        "ARRODES_ROOT": "${ARRODES_ROOT}",
-        "ARRODES_BIN": "${ARRODES_BIN}",
-        "ARRODES_HOME": "${ARRODES_HOME}",
-        "ARRODES_DATA_DIR": "${ARRODES_DATA_DIR}",
-        "ARRODES_SESSION_ID": "${ARRODES_SESSION_ID}"
-      }
+      "args": ["run", "${CLAUDE_PLUGIN_ROOT}/mcp.ts"]
     }
   }
 }
