@@ -11,7 +11,21 @@ export const toolDefinitions: ToolDefinition[] = [
   {
     name: "arrodes_session_list",
     description: "List durable Arrodes sessions so a specific session can be selected.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    inputSchema: {
+      type: "object",
+      properties: { cwd: { type: "string", description: "Optional project directory filter; defaults to the adapter's current working directory." } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "arrodes_session_name",
+    description: "Assign a human-readable name to an Arrodes session so it can be identified when switching hosts.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" }, name: { type: "string", minLength: 1, maxLength: 200 } },
+      required: ["name"],
+      additionalProperties: false,
+    },
   },
   {
     name: "arrodes_setup_status",
@@ -369,7 +383,7 @@ function agentConfig(args: Record<string, unknown>): Record<string, unknown> {
 }
 
 export async function invokeTool(client: ArrodesRpcClient, name: string, rawArgs: Record<string, unknown> = {}): Promise<unknown> {
-  if (name === "arrodes_session_list") return client.call("session.list");
+  if (name === "arrodes_session_list") return client.call("session.list", { cwd: rawArgs.cwd ?? process.cwd() });
   if (name === "arrodes_setup_status") return client.call("setup.status");
   if (name === "arrodes_auth_status") return client.call("auth.status");
   if (name === "arrodes_model_list") return client.call("model.list", { provider: rawArgs.provider });
@@ -388,6 +402,8 @@ export async function invokeTool(client: ArrodesRpcClient, name: string, rawArgs
   switch (name) {
     case "arrodes_session_inspect":
       return client.call("session.inspect", withSession(sessionId));
+    case "arrodes_session_name":
+      return client.call("session.name", { ...withSession(sessionId), name: rawArgs.name });
     case "arrodes_session_entries":
       return client.call("session.entries", {
         ...withSession(sessionId),

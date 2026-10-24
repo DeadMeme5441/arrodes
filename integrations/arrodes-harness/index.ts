@@ -62,7 +62,8 @@ export default function arrodesHarness(pi: ExtensionAPI) {
   };
 
   const descriptionFor = (name: string) => toolDefinitions.find((tool) => tool.name === name)?.description ?? name;
-  register("arrodes_session_list", "Arrodes Sessions", descriptionFor("arrodes_session_list"), z.object({}));
+  register("arrodes_session_list", "Arrodes Sessions", descriptionFor("arrodes_session_list"), z.object({ cwd: z.string().optional() }));
+  register("arrodes_session_name", "Name Arrodes Session", descriptionFor("arrodes_session_name"), z.object({ sessionId: z.string().optional(), name: z.string().min(1).max(200) }));
   register("arrodes_setup_status", "Arrodes Setup", descriptionFor("arrodes_setup_status"), z.object({}));
   register("arrodes_auth_status", "Arrodes Auth Status", descriptionFor("arrodes_auth_status"), z.object({}));
   register("arrodes_model_list", "Arrodes Models", descriptionFor("arrodes_model_list"), z.object({ provider: z.string().optional() }));

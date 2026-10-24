@@ -36,6 +36,8 @@ export ARRODES_SESSION_ID="existing-session-id" # optional when exactly one sess
 ```
 
 The source-checkout mode launches `clojure -Srepro -M:host`. The project being worked on is taken from the host's current working directory; `ARRODES_ROOT` is only the runtime checkout. `ARRODES_HOME` and `ARRODES_DATA_DIR` may point to an explicit Arrodes home/data location.
+For human-readable session switching, call `arrodes_session_list` with the current project directory. It returns the durable UUID together with the session name and project metadata. Use `arrodes_session_name` to assign a descriptive name such as `fsgisvr - API auth review`; keep using the UUID in `ARRODES_SESSION_ID` when reconnecting because it remains the stable machine identifier.
+
 
 The bridge does not answer reverse UI, authentication, or attached-capability requests. Configure the provider and trust decision in Arrodes first, then use the adapters for headless work.
 

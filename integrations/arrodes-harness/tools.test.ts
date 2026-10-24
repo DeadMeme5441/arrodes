@@ -39,3 +39,18 @@ test("agent starts translate explicit routing fields into child config", async (
     },
   ]);
 });
+test("session listing filters by project and naming forwards the selected session", async () => {
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  const client = {
+    call: async (method: string, params: Record<string, unknown>) => {
+      calls.push([method, params]);
+      return {};
+    },
+  };
+  await invokeTool(client as never, "arrodes_session_list", { cwd: "/workspace/project" });
+  await invokeTool(client as never, "arrodes_session_name", { sessionId: "session-2", name: "API auth review" });
+  expect(calls).toEqual([
+    ["session.list", { cwd: "/workspace/project" }],
+    ["session.name", { "session-id": "session-2", name: "API auth review" }],
+  ]);
+});
