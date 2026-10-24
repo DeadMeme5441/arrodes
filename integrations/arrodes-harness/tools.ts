@@ -132,6 +132,7 @@ export const toolDefinitions: ToolDefinition[] = [
     name: "arrodes_agent_send",
     description: "Send a durable addressed message to an Arrodes child, parent, or team.",
     inputSchema: {
+      type: "object",
       properties: {
         sessionId: { type: "string" },
         target: { type: "string", description: "Child ID/name, parent, or all." },
