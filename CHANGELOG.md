@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- Add a dual host integration package for oh-my-pi and Claude Code. It reuses the
+  existing JSONL RPC contract for durable agent delegation, operation/job inspection,
+  context inspection and explicitly requested trusted evaluation, with shared skills
+  and headless adapters that refuse reverse UI/authentication requests.
 
 ## 0.2.3
 

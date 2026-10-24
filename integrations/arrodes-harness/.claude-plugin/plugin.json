@@ -1,0 +1,9 @@
+{
+  "name": "arrodes-harness",
+  "version": "0.1.0",
+  "description": "Durable Arrodes coding sessions, agents, jobs, results, and context inspection for Claude Code.",
+  "author": {
+    "name": "Arrodes contributors"
+  },
+  "license": "MIT"
+}

@@ -11,7 +11,7 @@ development procedures. Keep each fact in its owning document and link to it els
 | How do session agents coordinate and communicate? | [Harness coordination](HARNESS_COORDINATION.md) |
 | How are providers and model settings handled? | [Providers](PROVIDERS.md) |
 | Where do settings and project resources live? | [Configuration](CONFIGURATION.md) |
-| How do extensions, MCP, skills, and packages work? | [Extensions](EXTENSIONS.md) |
+| How do host integrations expose Arrodes capabilities? | [Integrations](INTEGRATIONS.md) |
 | What is the integration contract? | [RPC](PROTOCOL.md) |
 | How do I choose or create a theme pack? | [Themes](THEMES.md) |
 | What must the terminal interface preserve? | [TUI](TUI.md), [design system](TUI_DESIGN.md) |
