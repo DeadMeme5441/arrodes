@@ -122,13 +122,16 @@ export const toolDefinitions: ToolDefinition[] = [
         name: { type: "string" },
         task: { type: "string" },
         context: { type: "string" },
+        provider: { type: "string", description: "Explicit Arrodes provider ID; never inferred for delegated work." },
+        model: { type: "string", description: "Exact model ID for the selected provider." },
+        thinking: { type: "string" },
         config: {
           type: "object",
-          description: "Optional Arrodes child configuration override, such as provider, model, thinking, or generation settings.",
+          description: "Optional additional Arrodes child configuration, such as generation or provider settings.",
         },
         submissionId: { type: "string", description: "Stable identity for retry reconciliation; generate once and reuse." },
       },
-      required: ["name", "task"],
+      required: ["name", "task", "provider", "model"],
       additionalProperties: false,
     },
   },
@@ -354,6 +357,16 @@ function withSession(sessionId: string): Record<string, unknown> {
 function requestedSessionId(args: Record<string, unknown>): string | undefined {
   return typeof args.sessionId === "string" ? args.sessionId : undefined;
 }
+function agentConfig(args: Record<string, unknown>): Record<string, unknown> {
+  const config: Record<string, unknown> = {};
+  if (args.config && typeof args.config === "object" && !Array.isArray(args.config)) {
+    Object.assign(config, args.config);
+  }
+  config.provider = args.provider;
+  config.model = args.model;
+  if (typeof args.thinking === "string") config.thinking = args.thinking;
+  return config;
+}
 
 export async function invokeTool(client: ArrodesRpcClient, name: string, rawArgs: Record<string, unknown> = {}): Promise<unknown> {
   if (name === "arrodes_session_list") return client.call("session.list");
@@ -463,7 +476,7 @@ export async function invokeTool(client: ArrodesRpcClient, name: string, rawArgs
         name: rawArgs.name,
         task: rawArgs.task,
         context: rawArgs.context,
-        config: rawArgs.config,
+        config: agentConfig(rawArgs),
         "submission-id": typeof rawArgs.submissionId === "string" && rawArgs.submissionId.length > 0 ? rawArgs.submissionId : randomUUID(),
       });
     case "arrodes_agent_send":

@@ -99,7 +99,7 @@ export default function arrodesHarness(pi: ExtensionAPI) {
   register("arrodes_session_entries", "Arrodes Entries", descriptionFor("arrodes_session_entries"), z.object({ sessionId: z.string().optional(), offset: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(500).optional() }));
   register("arrodes_session_tree", "Arrodes History Tree", descriptionFor("arrodes_session_tree"), z.object({ sessionId: z.string().optional(), entryId: z.string().optional() }));
   register("arrodes_agent_list", "Arrodes Agents", descriptionFor("arrodes_agent_list"), z.object({ sessionId: z.string().optional() }));
-  register("arrodes_agent_start", "Start Arrodes Agent", descriptionFor("arrodes_agent_start"), z.object({ sessionId: z.string().optional(), name: z.string(), task: z.string(), context: z.string().optional(), config: z.record(z.any()).optional(), submissionId: z.string().optional() }));
+  register("arrodes_agent_start", "Start Arrodes Agent", descriptionFor("arrodes_agent_start"), z.object({ sessionId: z.string().optional(), name: z.string(), task: z.string(), context: z.string().optional(), provider: z.string(), model: z.string(), thinking: z.string().optional(), config: z.record(z.any()).optional(), submissionId: z.string().optional() }));
   register("arrodes_agent_send", "Message Arrodes Agent", descriptionFor("arrodes_agent_send"), z.object({ sessionId: z.string().optional(), target: z.string(), content: z.string(), wake: z.boolean().optional(), submissionId: z.string().optional() }));
   register("arrodes_agent_wait", "Wait for Arrodes Agent", descriptionFor("arrodes_agent_wait"), z.object({
     sessionId: z.string().optional(),
