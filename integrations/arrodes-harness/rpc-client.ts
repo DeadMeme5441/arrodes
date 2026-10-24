@@ -17,15 +17,10 @@ type Pending = {
   reject: (error: Error) => void;
 };
 
-type ArrodesReader = {
-  read(): Promise<{ done: boolean; value?: Uint8Array }>;
-  cancel(reason?: unknown): Promise<void>;
-  releaseLock(): void;
-};
 
 type ArrodesProcess = {
   stdin: { write(input: string): number | Promise<number>; end?: () => void };
-  stdout: { getReader(): ArrodesReader };
+  stdout: AsyncIterable<Uint8Array>;
   kill(signal?: number | string): void;
   exited: Promise<number>;
 };
@@ -84,7 +79,6 @@ function commandFromEnvironment(options: RpcClientOptions): { command: string[];
 
 export class ArrodesRpcClient {
   private process?: ArrodesProcess;
-  private stdoutReader?: ArrodesReader;
   private startPromise?: Promise<void>;
   private nextRequestId = 0;
   private pending = new Map<string, Pending>();
@@ -116,11 +110,6 @@ export class ArrodesRpcClient {
       // The pipe may already be closed.
     }
     try {
-      await this.stdoutReader?.cancel("adapter-closing");
-    } catch {
-      // The reader may already have been released by process exit.
-    }
-    try {
       process.kill("SIGKILL");
       await process.exited;
     } catch {
@@ -141,7 +130,7 @@ export class ArrodesRpcClient {
       stdout: "pipe",
       stderr: "inherit",
     });
-
+    void this.readOutput();
     const helloTimeout = Promise.withResolvers<never>();
     const helloTimer = setTimeout(() => helloTimeout.reject(new Error("Timed out waiting for Arrodes RPC hello")), 30_000);
     try {
@@ -176,15 +165,10 @@ export class ArrodesRpcClient {
     if (!this.process) return;
     const decoder = new TextDecoder();
     let buffer = "";
-    const reader = this.process.stdout.getReader();
-    this.stdoutReader = reader;
 
     try {
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        if (!chunk.value) continue;
-        buffer += decoder.decode(chunk.value, { stream: true });
+      for await (const chunk of this.process.stdout) {
+        buffer += decoder.decode(chunk, { stream: true });
         let newline = buffer.indexOf("\n");
         while (newline >= 0) {
           const line = buffer.slice(0, newline).replace(/\r$/, "");
@@ -200,9 +184,6 @@ export class ArrodesRpcClient {
       const failure = error instanceof Error ? error : new Error(String(error));
       this.hello.reject(failure);
       for (const waiter of this.pending.values()) waiter.reject(failure);
-    } finally {
-      reader.releaseLock();
-      this.stdoutReader = undefined;
     }
   }
 
