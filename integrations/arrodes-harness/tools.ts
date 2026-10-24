@@ -122,6 +122,10 @@ export const toolDefinitions: ToolDefinition[] = [
         name: { type: "string" },
         task: { type: "string" },
         context: { type: "string" },
+        config: {
+          type: "object",
+          description: "Optional Arrodes child configuration override, such as provider, model, thinking, or generation settings.",
+        },
         submissionId: { type: "string", description: "Stable identity for retry reconciliation; generate once and reuse." },
       },
       required: ["name", "task"],
@@ -459,6 +463,7 @@ export async function invokeTool(client: ArrodesRpcClient, name: string, rawArgs
         name: rawArgs.name,
         task: rawArgs.task,
         context: rawArgs.context,
+        config: rawArgs.config,
         "submission-id": typeof rawArgs.submissionId === "string" && rawArgs.submissionId.length > 0 ? rawArgs.submissionId : randomUUID(),
       });
     case "arrodes_agent_send":
